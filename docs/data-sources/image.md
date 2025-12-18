@@ -46,7 +46,6 @@ output "image_info" {
 The following arguments are supported. **Note:** You must specify either `slug` or `name`, but not both.
 
 - `slug` - (Optional) The slug of the image. Used for OS template lookup (e.g., `ubuntu-22.04`, `debian-11`, `centos-8`). Mutually exclusive with `name`.
-
 - `name` - (Optional) The name of the image. Used for custom images lookup. Mutually exclusive with `slug`.
 
 ## Attribute Reference
@@ -54,7 +53,6 @@ The following arguments are supported. **Note:** You must specify either `slug` 
 In addition to all arguments above, the following attributes are exported:
 
 - `id` - The unique identifier of the image.
-
 - `is_custom` - Boolean indicating whether this is a custom image (`true`) or an OS template (`false`).
 
 ## Common OS Template Slugs
