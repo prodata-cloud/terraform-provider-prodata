@@ -6,10 +6,7 @@ import (
 
 	"terraform-provider-prodata/internal/client"
 
-	"github.com/hashicorp/terraform-plugin-framework/action"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
-	"github.com/hashicorp/terraform-plugin-framework/ephemeral"
-	"github.com/hashicorp/terraform-plugin-framework/function"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/provider"
 	"github.com/hashicorp/terraform-plugin-framework/provider/schema"
@@ -33,7 +30,7 @@ type ProDataProviderModel struct {
 	ApiKeyId     types.String `tfsdk:"api_key_id"`
 	ApiSecretKey types.String `tfsdk:"api_secret_key"`
 	Region       types.String `tfsdk:"region"`
-	Project      types.String `tfsdk:"project"`
+	ProjectId    types.String `tfsdk:"project_id"`
 }
 
 func (p *ProDataProvider) Metadata(ctx context.Context, req provider.MetadataRequest, resp *provider.MetadataResponse) {
@@ -47,24 +44,24 @@ func (p *ProDataProvider) Schema(ctx context.Context, req provider.SchemaRequest
 		Attributes: map[string]schema.Attribute{
 			"api_base_url": schema.StringAttribute{
 				MarkdownDescription: "The base URL of the ProData API. Can also be set via `PRODATA_API_BASE_URL` environment variable.",
-				Required:            true,
+				Optional:            true,
 			},
 			"api_key_id": schema.StringAttribute{
 				MarkdownDescription: "The API Key ID for authentication. Can also be set via `PRODATA_API_KEY_ID` environment variable.",
-				Required:            true,
+				Optional:            true,
 			},
 			"api_secret_key": schema.StringAttribute{
 				MarkdownDescription: "The API Secret Key for authentication. Can also be set via `PRODATA_API_SECRET_KEY` environment variable.",
-				Required:            true,
+				Optional:            true,
 				Sensitive:           true,
 			},
 			"region": schema.StringAttribute{
 				MarkdownDescription: "The region to use. Can also be set via `PRODATA_REGION` environment variable.",
-				Required:            true,
+				Optional:            true,
 			},
-			"project": schema.StringAttribute{
-				MarkdownDescription: "The project to use. Can also be set via `PRODATA_PROJECT` environment variable.",
-				Required:            true,
+			"project_id": schema.StringAttribute{
+				MarkdownDescription: "The project to use. Can also be set via `PRODATA_PROJECT_ID` environment variable.",
+				Optional:            true,
 			},
 		},
 	}
@@ -83,7 +80,7 @@ func (p *ProDataProvider) Configure(ctx context.Context, req provider.ConfigureR
 	apiKeyId := os.Getenv("PRODATA_API_KEY_ID")
 	apiSecretKey := os.Getenv("PRODATA_API_SECRET_KEY")
 	region := os.Getenv("PRODATA_REGION")
-	project := os.Getenv("PRODATA_PROJECT")
+	projectId := os.Getenv("PRODATA_PROJECT_ID")
 
 	// Data values override environment variables
 	if !data.ApiBaseUrl.IsNull() {
@@ -98,8 +95,8 @@ func (p *ProDataProvider) Configure(ctx context.Context, req provider.ConfigureR
 	if !data.Region.IsNull() {
 		region = data.Region.ValueString()
 	}
-	if !data.Project.IsNull() {
-		project = data.Project.ValueString()
+	if !data.ProjectId.IsNull() {
+		projectId = data.ProjectId.ValueString()
 	}
 
 	// Validation
@@ -131,11 +128,11 @@ func (p *ProDataProvider) Configure(ctx context.Context, req provider.ConfigureR
 			"The provider requires region to be set either in the configuration or via PRODATA_REGION environment variable.",
 		)
 	}
-	if project == "" {
+	if projectId == "" {
 		resp.Diagnostics.AddAttributeError(
-			path.Root("project"),
+			path.Root("project_id"),
 			"Missing Project",
-			"The provider requires region to be set either in the configuration or via PRODATA_PROJECT environment variable.",
+			"The provider requires project to be set either in the configuration or via PRODATA_PROJECT_ID environment variable.",
 		)
 	}
 
@@ -149,7 +146,7 @@ func (p *ProDataProvider) Configure(ctx context.Context, req provider.ConfigureR
 		ApiKeyId:     apiKeyId,
 		ApiSecretKey: apiSecretKey,
 		Region:       region,
-		Project:      project,
+		Project:      projectId,
 	})
 	if err != nil {
 		resp.Diagnostics.AddError(
@@ -160,37 +157,18 @@ func (p *ProDataProvider) Configure(ctx context.Context, req provider.ConfigureR
 	}
 
 	// Make client available to resources
+	resp.DataSourceData = client
 	resp.ResourceData = client
 }
 
+// Resources defines the resources implemented in the provider.
 func (p *ProDataProvider) Resources(ctx context.Context) []func() resource.Resource {
-	return []func() resource.Resource{
-		NewExampleResource,
-	}
+	return []func() resource.Resource{}
 }
 
-func (p *ProDataProvider) EphemeralResources(ctx context.Context) []func() ephemeral.EphemeralResource {
-	return []func() ephemeral.EphemeralResource{
-		NewExampleEphemeralResource,
-	}
-}
-
+// DataSources defines the data sources implemented in the provider.
 func (p *ProDataProvider) DataSources(ctx context.Context) []func() datasource.DataSource {
-	return []func() datasource.DataSource{
-		NewExampleDataSource,
-	}
-}
-
-func (p *ProDataProvider) Functions(ctx context.Context) []func() function.Function {
-	return []func() function.Function{
-		NewExampleFunction,
-	}
-}
-
-func (p *ProDataProvider) Actions(ctx context.Context) []func() action.Action {
-	return []func() action.Action{
-		NewExampleAction,
-	}
+	return []func() datasource.DataSource{}
 }
 
 func New(version string) func() provider.Provider {

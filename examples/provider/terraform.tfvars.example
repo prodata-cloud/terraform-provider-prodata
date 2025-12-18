@@ -1,0 +1,8 @@
+# Example Terraform Variables File
+# Copy this file to terraform.tfvars and fill in your actual values
+# WARNING: Never commit terraform.tfvars with real credentials to version control
+
+prodata_api_key_id     = "ak_UCSDcax..."
+prodata_api_secret_key = "sk_XAsdxnj..."
+prodata_project_id     = "123"
+prodata_region         = "UZ-5"
