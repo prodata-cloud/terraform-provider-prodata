@@ -15,6 +15,8 @@ Lookup ProData images by slug (OS templates) or name (custom images).
 ```terraform
 data "prodata_image" "ubuntu" {
   slug = "ubuntu-22.04"
+  
+  region = "UZ-5"
 }
 
 output "image_id" {
@@ -39,12 +41,17 @@ output "image_info" {
 
 ## Schema
 
-### Optional
-
-You must specify exactly one of the following:
+### Required
 
 - `name` (String) Image name for custom images. Conflicts with `slug`.
 - `slug` (String) Image slug for OS templates (e.g., `ubuntu-22.04`, `debian-11`). Conflicts with `name`.
+
+### Optional
+
+- `region` (String) Region ID override. If not specified, uses the provider's default region.
+- `project_id` (Number) Project ID override. If not specified, uses the provider's default projectID.
+
+**Note:** You must specify exactly one of `name` or `slug`.
 
 ### Read-Only
 

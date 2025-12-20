@@ -26,8 +26,10 @@ type ImageDataSource struct {
 
 type ImageDataSourceModel struct {
 	// Input - one of these required
-	Name types.String `tfsdk:"name"`
-	Slug types.String `tfsdk:"slug"`
+	Name      types.String `tfsdk:"name"`
+	Slug      types.String `tfsdk:"slug"`
+	Region    types.String `tfsdk:"region"`
+	ProjectID types.Int64  `tfsdk:"project_id"`
 
 	// Computed output
 	ID       types.Int64 `tfsdk:"id"`
@@ -54,6 +56,14 @@ func (d *ImageDataSource) Schema(ctx context.Context, req datasource.SchemaReque
 			},
 			"slug": schema.StringAttribute{
 				MarkdownDescription: "The slug of the image. Used for OS template lookup (e.g., `ubuntu-22.04`, `debian-11`). Conflicts with `name`.",
+				Optional:            true,
+			},
+			"region": schema.StringAttribute{
+				MarkdownDescription: "Region ID override. If not specified, uses the provider's default region.",
+				Optional:            true,
+			},
+			"project_id": schema.Int64Attribute{
+				MarkdownDescription: "Project ID override. If not specified, uses the provider's default project id.",
 				Optional:            true,
 			},
 
@@ -104,13 +114,36 @@ func (d *ImageDataSource) Read(ctx context.Context, req datasource.ReadRequest, 
 		return
 	}
 
-	image, err := d.fetchImage(ctx, &data)
+	// Build query with optional overrides
+	query := client.ImageQuery{}
+	if !data.Slug.IsNull() {
+		query.Slug = data.Slug.ValueString()
+	}
+	if !data.Name.IsNull() {
+		query.Name = data.Name.ValueString()
+	}
+	if !data.Region.IsNull() {
+		query.Region = data.Region.ValueString()
+	}
+	if !data.ProjectID.IsNull() {
+		query.ProjectID = data.ProjectID.ValueInt64()
+	}
+
+	tflog.Debug(ctx, "Looking up image", map[string]interface{}{
+		"slug":       query.Slug,
+		"name":       query.Name,
+		"region":     query.Region,
+		"project_id": query.ProjectID,
+	})
+
+	image, err := d.client.GetImage(ctx, query)
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to Read Image", err.Error())
 		return
 	}
 
-	d.mapImageToModel(image, &data)
+	data.ID = types.Int64Value(image.ID)
+	data.IsCustom = types.BoolValue(image.IsCustom)
 
 	tflog.Debug(ctx, "Successfully read image", map[string]interface{}{
 		"id":        data.ID.ValueInt64(),
@@ -118,37 +151,4 @@ func (d *ImageDataSource) Read(ctx context.Context, req datasource.ReadRequest, 
 	})
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
-}
-
-func (d *ImageDataSource) fetchImage(ctx context.Context, data *ImageDataSourceModel) (*client.Image, error) {
-	if !data.Slug.IsNull() {
-		slug := data.Slug.ValueString()
-		tflog.Debug(ctx, "Looking up image by slug", map[string]interface{}{"slug": slug})
-
-		image, err := d.client.GetImageBySlug(ctx, slug)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get image by slug %q: %w", slug, err)
-		}
-		if image == nil {
-			return nil, fmt.Errorf("no image found with slug %q", slug)
-		}
-		return image, nil
-	}
-
-	name := data.Name.ValueString()
-	tflog.Debug(ctx, "Looking up image by name", map[string]interface{}{"name": name})
-
-	image, err := d.client.GetImageByName(ctx, name)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get image by name %q: %w", name, err)
-	}
-	if image == nil {
-		return nil, fmt.Errorf("no image found with name %q", name)
-	}
-	return image, nil
-}
-
-func (d *ImageDataSource) mapImageToModel(image *client.Image, data *ImageDataSourceModel) {
-	data.ID = types.Int64Value(image.ID)
-	data.IsCustom = types.BoolValue(image.IsCustom)
 }

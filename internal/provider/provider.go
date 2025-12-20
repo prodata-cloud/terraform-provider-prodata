@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"os"
+	"strconv"
 
 	"terraform-provider-prodata/internal/client"
 	"terraform-provider-prodata/internal/provider/datasources"
@@ -25,6 +26,8 @@ type ProDataProviderModel struct {
 	APIBaseURL   types.String `tfsdk:"api_base_url"`
 	APIKeyID     types.String `tfsdk:"api_key_id"`
 	APISecretKey types.String `tfsdk:"api_secret_key"`
+	Region       types.String `tfsdk:"region"`
+	ProjectID    types.Int64  `tfsdk:"project_id"`
 }
 
 func New(version string) func() provider.Provider {
@@ -44,16 +47,24 @@ func (p *ProDataProvider) Schema(ctx context.Context, req provider.SchemaRequest
 		Attributes: map[string]schema.Attribute{
 			"api_base_url": schema.StringAttribute{
 				MarkdownDescription: "ProData API base URL. Env: `PRODATA_API_BASE_URL`.",
-				Optional:            true,
+				Required:            true,
 			},
 			"api_key_id": schema.StringAttribute{
 				MarkdownDescription: "API Key ID. Env: `PRODATA_API_KEY_ID`.",
-				Optional:            true,
+				Required:            true,
 			},
 			"api_secret_key": schema.StringAttribute{
-				MarkdownDescription: "API Secret Key. Env: `PRODATA_API_SECRET`.",
-				Optional:            true,
+				MarkdownDescription: "API Secret Key. Env: `PRODATA_API_SECRET_KEY`.",
+				Required:            true,
 				Sensitive:           true,
+			},
+			"region": schema.StringAttribute{
+				MarkdownDescription: "Default region ID. Env: `PRODATA_REGION`.",
+				Optional:            true,
+			},
+			"project_id": schema.Int64Attribute{
+				MarkdownDescription: "Project ID. Env: `PRODATA_PROJECT_ID`.",
+				Optional:            true,
 			},
 		},
 	}
@@ -71,7 +82,9 @@ func (p *ProDataProvider) Configure(ctx context.Context, req provider.ConfigureR
 	cfg := client.Config{
 		APIBaseURL:   envOrValue("PRODATA_API_BASE_URL", data.APIBaseURL),
 		APIKeyID:     envOrValue("PRODATA_API_KEY_ID", data.APIKeyID),
-		APISecretKey: envOrValue("PRODATA_API_SECRET", data.APISecretKey),
+		APISecretKey: envOrValue("PRODATA_API_SECRET_KEY", data.APISecretKey),
+		Region:       envOrValue("PRODATA_REGION", data.Region),
+		ProjectID:    envOrInt64("PRODATA_PROJECT_ID", data.ProjectID),
 	}
 
 	// Validate required fields
@@ -84,9 +97,10 @@ func (p *ProDataProvider) Configure(ctx context.Context, req provider.ConfigureR
 			"Set api_key_id in config or PRODATA_API_KEY_ID environment variable.")
 	}
 	if cfg.APISecretKey == "" {
-		resp.Diagnostics.AddAttributeError(path.Root("api_secret_key"), "Missing API Secret",
-			"Set api_secret_key in config or PRODATA_API_SECRET environment variable.")
+		resp.Diagnostics.AddAttributeError(path.Root("api_secret_key"), "Missing API Secret Key",
+			"Set api_secret_key in config or PRODATA_API_SECRET_KEY environment variable.")
 	}
+
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -111,10 +125,24 @@ func (p *ProDataProvider) DataSources(ctx context.Context) []func() datasource.D
 	}
 }
 
-// envOrValue returns the config value if set, otherwise falls back to env var
 func envOrValue(envKey string, value types.String) string {
 	if !value.IsNull() {
 		return value.ValueString()
 	}
 	return os.Getenv(envKey)
+}
+
+func envOrInt64(envKey string, value types.Int64) int64 {
+	if !value.IsNull() {
+		return value.ValueInt64()
+	}
+	envVal := os.Getenv(envKey)
+	if envVal == "" {
+		return 0
+	}
+	i, err := strconv.ParseInt(envVal, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return i
 }
