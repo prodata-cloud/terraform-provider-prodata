@@ -160,5 +160,6 @@ func (p *ProDataProvider) Resources(ctx context.Context) []func() resource.Resou
 func (p *ProDataProvider) DataSources(ctx context.Context) []func() datasource.DataSource {
 	return []func() datasource.DataSource{
 		datasources.NewImageDataSource,
+		datasources.NewImagesDataSource,
 	}
 }

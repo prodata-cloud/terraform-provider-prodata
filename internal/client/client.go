@@ -177,3 +177,11 @@ func (c *Client) GetImage(ctx context.Context, q ImageQuery) (*Image, error) {
 	}
 	return &img, nil
 }
+
+func (c *Client) GetImages(ctx context.Context, opts *RequestOpts) ([]Image, error) {
+	var images []Image
+	if err := c.Do(ctx, http.MethodGet, "/api/v2/images", nil, &images, opts); err != nil {
+		return nil, err
+	}
+	return images, nil
+}
