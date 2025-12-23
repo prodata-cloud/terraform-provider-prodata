@@ -185,3 +185,20 @@ func (c *Client) GetImages(ctx context.Context, opts *RequestOpts) ([]Image, err
 	}
 	return images, nil
 }
+
+type Volume struct {
+	ID         int64  `json:"id"`
+	Name       string `json:"name"`
+	Type       string `json:"type"`
+	Size       int64  `json:"size"`
+	InUse      bool   `json:"inUse"`
+	AttachedID *int64 `json:"attachedId"`
+}
+
+func (c *Client) GetVolumes(ctx context.Context, opts *RequestOpts) ([]Volume, error) {
+	var volumes []Volume
+	if err := c.Do(ctx, http.MethodGet, "/api/v2/volumes", nil, &volumes, opts); err != nil {
+		return nil, err
+	}
+	return volumes, nil
+}

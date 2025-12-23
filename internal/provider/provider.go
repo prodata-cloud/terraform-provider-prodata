@@ -161,5 +161,6 @@ func (p *ProDataProvider) DataSources(ctx context.Context) []func() datasource.D
 	return []func() datasource.DataSource{
 		datasources.NewImageDataSource,
 		datasources.NewImagesDataSource,
+		datasources.NewVolumesDataSource,
 	}
 }
