@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -67,18 +68,25 @@ type RequestOpts struct {
 
 func (c *Client) Do(ctx context.Context, method, path string, body, result any, opts *RequestOpts) error {
 	var reqBody io.Reader
+	var reqBodyBytes []byte
 
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
+			log.Printf("[ERROR] Failed to marshal request body: %v", err)
+			log.Printf("[ERROR] Request: %s %s", method, path)
+			log.Printf("[ERROR] Body: %+v", body)
 			return fmt.Errorf("marshal request: %w", err)
 		}
+		reqBodyBytes = b
 		reqBody = bytes.NewReader(b)
 	}
 
 	fullURL := c.baseURL + path
 	req, err := http.NewRequestWithContext(ctx, method, fullURL, reqBody)
 	if err != nil {
+		log.Printf("[ERROR] Failed to create HTTP request: %v", err)
+		log.Printf("[ERROR] Request: %s %s", method, fullURL)
 		return fmt.Errorf("create request: %w", err)
 	}
 
@@ -101,28 +109,63 @@ func (c *Client) Do(ctx context.Context, method, path string, body, result any, 
 	req.Header.Set("X-Region", region)
 	req.Header.Set("X-Project-Id", strconv.FormatInt(projectID, 10))
 
+	log.Printf("[DEBUG] API Request: %s %s", method, fullURL)
+	log.Printf("[DEBUG] Headers: X-Region=%s, X-Project-Id=%d", region, projectID)
+	if len(reqBodyBytes) > 0 {
+		log.Printf("[DEBUG] Request Body: %s", string(reqBodyBytes))
+	}
+
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		log.Printf("[ERROR] HTTP request failed: %v", err)
+		log.Printf("[ERROR] Request: %s %s", method, fullURL)
+		log.Printf("[ERROR] Headers: X-Region=%s, X-Project-Id=%d", region, projectID)
+		if len(reqBodyBytes) > 0 {
+			log.Printf("[ERROR] Request Body: %s", string(reqBodyBytes))
+		}
 		return fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
+	log.Printf("[DEBUG] Response Status: %d %s", resp.StatusCode, resp.Status)
+
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
+		log.Printf("[ERROR] Failed to read response body: %v", err)
+		log.Printf("[ERROR] Request: %s %s", method, fullURL)
+		log.Printf("[ERROR] Response Status: %d", resp.StatusCode)
 		return fmt.Errorf("read response: %w", err)
 	}
 
+	log.Printf("[DEBUG] Response Body: %s", string(respBody))
+
 	var apiResp apiResponse[json.RawMessage]
 	if err := json.Unmarshal(respBody, &apiResp); err != nil {
+		log.Printf("[ERROR] Failed to parse response JSON: %v", err)
+		log.Printf("[ERROR] Request: %s %s", method, fullURL)
+		log.Printf("[ERROR] Response Status: %d", resp.StatusCode)
+		log.Printf("[ERROR] Response Body: %s", string(respBody))
 		return fmt.Errorf("parse response: %w", err)
 	}
 
 	if !apiResp.Success {
+		log.Printf("[ERROR] API returned error response")
+		log.Printf("[ERROR] Request: %s %s", method, fullURL)
+		log.Printf("[ERROR] Headers: X-Region=%s, X-Project-Id=%d", region, projectID)
+		if len(reqBodyBytes) > 0 {
+			log.Printf("[ERROR] Request Body: %s", string(reqBodyBytes))
+		}
+		log.Printf("[ERROR] Response Status: %d", resp.StatusCode)
+		log.Printf("[ERROR] Response Body: %s", string(respBody))
+		log.Printf("[ERROR] API Errors: %s", formatAPIErrors(apiResp.Errors))
 		return fmt.Errorf("api error: %s", formatAPIErrors(apiResp.Errors))
 	}
 
 	if result != nil {
 		if err := json.Unmarshal(apiResp.Data, result); err != nil {
+			log.Printf("[ERROR] Failed to parse response data: %v", err)
+			log.Printf("[ERROR] Request: %s %s", method, fullURL)
+			log.Printf("[ERROR] Response Data: %s", string(apiResp.Data))
 			return fmt.Errorf("parse data: %w", err)
 		}
 	}
@@ -211,3 +254,27 @@ func (c *Client) GetVolume(ctx context.Context, id int64, opts *RequestOpts) (*V
 	}
 	return &volume, nil
 }
+
+type CreateVolumeRequest struct {
+	Region    string `json:"region"`
+	ProjectID int64  `json:"projectId"`
+	Name      string `json:"name"`
+	Type      string `json:"type"`
+	Size      int64  `json:"size"`
+}
+
+func (c *Client) CreateVolume(ctx context.Context, req CreateVolumeRequest) (*Volume, error) {
+	if req.Region == "" {
+		req.Region = c.Region
+	}
+	if req.ProjectID == 0 {
+		req.ProjectID = c.ProjectID
+	}
+
+	var volume Volume
+	if err := c.Do(ctx, http.MethodPost, "/api/v2/volumes", req, &volume, nil); err != nil {
+		return nil, err
+	}
+	return &volume, nil
+}
+

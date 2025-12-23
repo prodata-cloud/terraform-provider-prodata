@@ -8,6 +8,7 @@ import (
 
 	"terraform-provider-prodata/internal/client"
 	"terraform-provider-prodata/internal/provider/datasources"
+	"terraform-provider-prodata/internal/provider/resources"
 
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/path"
@@ -154,7 +155,9 @@ func (p *ProDataProvider) Configure(ctx context.Context, req provider.ConfigureR
 }
 
 func (p *ProDataProvider) Resources(ctx context.Context) []func() resource.Resource {
-	return []func() resource.Resource{}
+	return []func() resource.Resource{
+		resources.NewVolumeResource,
+	}
 }
 
 func (p *ProDataProvider) DataSources(ctx context.Context) []func() datasource.DataSource {
