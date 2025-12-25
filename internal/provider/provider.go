@@ -158,6 +158,7 @@ func (p *ProDataProvider) Resources(ctx context.Context) []func() resource.Resou
 	return []func() resource.Resource{
 		resources.NewVolumeResource,
 		resources.NewLocalNetworkResource,
+		resources.NewPublicIPResource,
 	}
 }
 
@@ -169,5 +170,7 @@ func (p *ProDataProvider) DataSources(ctx context.Context) []func() datasource.D
 		datasources.NewVolumesDataSource,
 		datasources.NewLocalNetworkDataSource,
 		datasources.NewLocalNetworksDataSource,
+		datasources.NewPublicIPDataSource,
+		datasources.NewPublicIPsDataSource,
 	}
 }

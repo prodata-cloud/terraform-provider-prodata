@@ -10,41 +10,8 @@ List all available ProData images including OS templates and custom images.
 
 ## Example Usage
 
-### List All Images
-
 ```terraform
 data "prodata_images" "all" {}
-
-output "all_images" {
-  value = data.prodata_images.all.images
-}
-```
-
-### With Region Override
-
-```terraform
-data "prodata_images" "kz_images" {
-  region = "KZ-1"
-}
-
-output "kz_image_count" {
-  value = length(data.prodata_images.kz_images.images)
-}
-```
-
-### Filter Custom Images with Local
-
-```terraform
-data "prodata_images" "all" {}
-
-locals {
-  custom_images = [for img in data.prodata_images.all.images : img if img.is_custom]
-  os_templates  = [for img in data.prodata_images.all.images : img if !img.is_custom]
-}
-
-output "custom_image_names" {
-  value = [for img in local.custom_images : img.name]
-}
 ```
 
 ## Schema

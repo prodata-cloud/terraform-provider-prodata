@@ -10,36 +10,9 @@ Lookup a ProData image by slug (OS templates) or name (custom images).
 
 ## Example Usage
 
-### Lookup OS Template by Slug
-
 ```terraform
 data "prodata_image" "ubuntu" {
   slug = "ubuntu-22.04"
-}
-
-output "ubuntu_image_id" {
-  value = data.prodata_image.ubuntu.id
-}
-```
-
-### Lookup Custom Image by Name
-
-```terraform
-data "prodata_image" "my_image" {
-  name = "my-custom-image"
-}
-
-output "custom_image_id" {
-  value = data.prodata_image.my_image.id
-}
-```
-
-### With Region Override
-
-```terraform
-data "prodata_image" "debian" {
-  slug   = "debian-12"
-  region = "KZ-1"
 }
 ```
 

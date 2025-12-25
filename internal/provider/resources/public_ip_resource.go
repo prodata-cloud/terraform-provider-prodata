@@ -16,38 +16,39 @@ import (
 )
 
 var (
-	_ resource.Resource              = &LocalNetworkResource{}
-	_ resource.ResourceWithConfigure = &LocalNetworkResource{}
+	_ resource.Resource              = &PublicIPResource{}
+	_ resource.ResourceWithConfigure = &PublicIPResource{}
 )
 
-type LocalNetworkResource struct {
+type PublicIPResource struct {
 	client *client.Client
 }
 
-type LocalNetworkResourceModel struct {
+type PublicIPResourceModel struct {
 	ID        types.Int64  `tfsdk:"id"`
 	Region    types.String `tfsdk:"region"`
 	ProjectID types.Int64  `tfsdk:"project_id"`
 	Name      types.String `tfsdk:"name"`
-	CIDR      types.String `tfsdk:"cidr"`
+	IP        types.String `tfsdk:"ip"`
+	Mask      types.String `tfsdk:"mask"`
 	Gateway   types.String `tfsdk:"gateway"`
 }
 
-func NewLocalNetworkResource() resource.Resource {
-	return &LocalNetworkResource{}
+func NewPublicIPResource() resource.Resource {
+	return &PublicIPResource{}
 }
 
-func (r *LocalNetworkResource) Metadata(ctx context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
-	resp.TypeName = req.ProviderTypeName + "_local_network"
+func (r *PublicIPResource) Metadata(ctx context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
+	resp.TypeName = req.ProviderTypeName + "_public_ip"
 }
 
-func (r *LocalNetworkResource) Schema(ctx context.Context, req resource.SchemaRequest, resp *resource.SchemaResponse) {
+func (r *PublicIPResource) Schema(ctx context.Context, req resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		MarkdownDescription: "Manages a ProData local network.",
+		MarkdownDescription: "Manages a ProData public IP address.",
 
 		Attributes: map[string]schema.Attribute{
 			"id": schema.Int64Attribute{
-				MarkdownDescription: "The unique identifier of the local network.",
+				MarkdownDescription: "The unique identifier of the public IP.",
 				Computed:            true,
 				PlanModifiers: []planmodifier.Int64{
 					int64planmodifier.UseStateForUnknown(),
@@ -63,7 +64,7 @@ func (r *LocalNetworkResource) Schema(ctx context.Context, req resource.SchemaRe
 				},
 			},
 			"project_id": schema.Int64Attribute{
-				MarkdownDescription: "Project ID where the local network will be created. If not specified, uses the provider's default project_id.",
+				MarkdownDescription: "Project ID where the public IP will be created. If not specified, uses the provider's default project_id.",
 				Optional:            true,
 				Computed:            true,
 				PlanModifiers: []planmodifier.Int64{
@@ -72,28 +73,35 @@ func (r *LocalNetworkResource) Schema(ctx context.Context, req resource.SchemaRe
 				},
 			},
 			"name": schema.StringAttribute{
-				MarkdownDescription: "The name of the local network. This is the only attribute that can be updated in-place.",
+				MarkdownDescription: "The name of the public IP. This is the only attribute that can be updated in-place.",
 				Required:            true,
 			},
-			"cidr": schema.StringAttribute{
-				MarkdownDescription: "The CIDR block for the local network (e.g., 10.0.0.0/24).",
-				Required:            true,
+			"ip": schema.StringAttribute{
+				MarkdownDescription: "The allocated public IP address.",
+				Computed:            true,
 				PlanModifiers: []planmodifier.String{
-					stringplanmodifier.RequiresReplace(),
+					stringplanmodifier.UseStateForUnknown(),
+				},
+			},
+			"mask": schema.StringAttribute{
+				MarkdownDescription: "The subnet mask of the public IP (e.g., /24).",
+				Computed:            true,
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.UseStateForUnknown(),
 				},
 			},
 			"gateway": schema.StringAttribute{
-				MarkdownDescription: "The gateway IP address for the local network (e.g., 10.0.0.1).",
-				Required:            true,
+				MarkdownDescription: "The gateway IP address.",
+				Computed:            true,
 				PlanModifiers: []planmodifier.String{
-					stringplanmodifier.RequiresReplace(),
+					stringplanmodifier.UseStateForUnknown(),
 				},
 			},
 		},
 	}
 }
 
-func (r *LocalNetworkResource) Configure(ctx context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
+func (r *PublicIPResource) Configure(ctx context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
 	if req.ProviderData == nil {
 		return
 	}
@@ -110,8 +118,8 @@ func (r *LocalNetworkResource) Configure(ctx context.Context, req resource.Confi
 	r.client = c
 }
 
-func (r *LocalNetworkResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
-	var data LocalNetworkResourceModel
+func (r *PublicIPResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
+	var data PublicIPResourceModel
 
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &data)...)
 	if resp.Diagnostics.HasError() {
@@ -128,45 +136,43 @@ func (r *LocalNetworkResource) Create(ctx context.Context, req resource.CreateRe
 		projectID = r.client.ProjectID
 	}
 
-	createReq := client.CreateLocalNetworkRequest{
+	createReq := client.CreatePublicIPRequest{
 		Region:    region,
 		ProjectID: projectID,
 		Name:      data.Name.ValueString(),
-		CIDR:      data.CIDR.ValueString(),
-		Gateway:   data.Gateway.ValueString(),
 	}
 
-	tflog.Debug(ctx, "Creating local network", map[string]any{
+	tflog.Debug(ctx, "Creating public IP", map[string]any{
 		"name":       createReq.Name,
 		"region":     createReq.Region,
 		"project_id": createReq.ProjectID,
-		"cidr":       createReq.CIDR,
-		"gateway":    createReq.Gateway,
 	})
 
-	network, err := r.client.CreateLocalNetwork(ctx, createReq)
+	ip, err := r.client.CreatePublicIP(ctx, createReq)
 	if err != nil {
-		resp.Diagnostics.AddError("Unable to Create Local Network", err.Error())
+		resp.Diagnostics.AddError("Unable to Create Public IP", err.Error())
 		return
 	}
 
-	data.ID = types.Int64Value(network.ID)
+	data.ID = types.Int64Value(ip.ID)
 	data.Region = types.StringValue(region)
 	data.ProjectID = types.Int64Value(projectID)
-	data.Name = types.StringValue(network.Name)
-	data.CIDR = types.StringValue(network.CIDR)
-	data.Gateway = types.StringValue(network.Gateway)
+	data.Name = types.StringValue(ip.Name)
+	data.IP = types.StringValue(ip.IP)
+	data.Mask = types.StringValue(ip.Mask)
+	data.Gateway = types.StringValue(ip.Gateway)
 
-	tflog.Debug(ctx, "Created local network", map[string]any{
-		"id":   network.ID,
-		"name": network.Name,
+	tflog.Debug(ctx, "Created public IP", map[string]any{
+		"id":   ip.ID,
+		"name": ip.Name,
+		"ip":   ip.IP,
 	})
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
 
-func (r *LocalNetworkResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
-	var data LocalNetworkResourceModel
+func (r *PublicIPResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
+	var data PublicIPResourceModel
 
 	resp.Diagnostics.Append(req.State.Get(ctx, &data)...)
 	if resp.Diagnostics.HasError() {
@@ -182,35 +188,37 @@ func (r *LocalNetworkResource) Read(ctx context.Context, req resource.ReadReques
 		opts.ProjectID = data.ProjectID.ValueInt64()
 	}
 
-	networkID := data.ID.ValueInt64()
+	ipID := data.ID.ValueInt64()
 
-	tflog.Debug(ctx, "Reading local network", map[string]any{
-		"id":         networkID,
+	tflog.Debug(ctx, "Reading public IP", map[string]any{
+		"id":         ipID,
 		"region":     opts.Region,
 		"project_id": opts.ProjectID,
 	})
 
-	network, err := r.client.GetLocalNetwork(ctx, networkID, opts)
+	ip, err := r.client.GetPublicIP(ctx, ipID, opts)
 	if err != nil {
-		resp.Diagnostics.AddError("Unable to Read Local Network", err.Error())
+		resp.Diagnostics.AddError("Unable to Read Public IP", err.Error())
 		return
 	}
 
-	data.Name = types.StringValue(network.Name)
-	data.CIDR = types.StringValue(network.CIDR)
-	data.Gateway = types.StringValue(network.Gateway)
+	data.Name = types.StringValue(ip.Name)
+	data.IP = types.StringValue(ip.IP)
+	data.Mask = types.StringValue(ip.Mask)
+	data.Gateway = types.StringValue(ip.Gateway)
 
-	tflog.Debug(ctx, "Read local network", map[string]any{
-		"id":   networkID,
-		"name": network.Name,
+	tflog.Debug(ctx, "Read public IP", map[string]any{
+		"id":   ipID,
+		"name": ip.Name,
+		"ip":   ip.IP,
 	})
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
 
-func (r *LocalNetworkResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
-	var plan LocalNetworkResourceModel
-	var state LocalNetworkResourceModel
+func (r *PublicIPResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
+	var plan PublicIPResourceModel
+	var state PublicIPResourceModel
 
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
@@ -218,10 +226,10 @@ func (r *LocalNetworkResource) Update(ctx context.Context, req resource.UpdateRe
 		return
 	}
 
-	networkID := state.ID.ValueInt64()
+	ipID := state.ID.ValueInt64()
 
 	// Only name can be updated via API, region and projectId in request body
-	updateReq := client.UpdateLocalNetworkRequest{
+	updateReq := client.UpdatePublicIPRequest{
 		Name: plan.Name.ValueString(),
 	}
 	if !plan.Region.IsNull() && !plan.Region.IsUnknown() {
@@ -231,34 +239,35 @@ func (r *LocalNetworkResource) Update(ctx context.Context, req resource.UpdateRe
 		updateReq.ProjectID = plan.ProjectID.ValueInt64()
 	}
 
-	tflog.Debug(ctx, "Updating local network", map[string]any{
-		"id":         networkID,
+	tflog.Debug(ctx, "Updating public IP", map[string]any{
+		"id":         ipID,
 		"name":       updateReq.Name,
 		"region":     updateReq.Region,
 		"project_id": updateReq.ProjectID,
 	})
 
-	network, err := r.client.UpdateLocalNetwork(ctx, networkID, updateReq)
+	ip, err := r.client.UpdatePublicIP(ctx, ipID, updateReq)
 	if err != nil {
-		resp.Diagnostics.AddError("Unable to Update Local Network", err.Error())
+		resp.Diagnostics.AddError("Unable to Update Public IP", err.Error())
 		return
 	}
 
 	plan.ID = state.ID
-	plan.Name = types.StringValue(network.Name)
-	plan.CIDR = types.StringValue(network.CIDR)
-	plan.Gateway = types.StringValue(network.Gateway)
+	plan.Name = types.StringValue(ip.Name)
+	plan.IP = types.StringValue(ip.IP)
+	plan.Mask = types.StringValue(ip.Mask)
+	plan.Gateway = types.StringValue(ip.Gateway)
 
-	tflog.Debug(ctx, "Updated local network", map[string]any{
-		"id":   networkID,
-		"name": network.Name,
+	tflog.Debug(ctx, "Updated public IP", map[string]any{
+		"id":   ipID,
+		"name": ip.Name,
 	})
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
-func (r *LocalNetworkResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
-	var data LocalNetworkResourceModel
+func (r *PublicIPResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
+	var data PublicIPResourceModel
 
 	resp.Diagnostics.Append(req.State.Get(ctx, &data)...)
 	if resp.Diagnostics.HasError() {
@@ -274,21 +283,21 @@ func (r *LocalNetworkResource) Delete(ctx context.Context, req resource.DeleteRe
 		opts.ProjectID = data.ProjectID.ValueInt64()
 	}
 
-	networkID := data.ID.ValueInt64()
+	ipID := data.ID.ValueInt64()
 
-	tflog.Debug(ctx, "Deleting local network", map[string]any{
-		"id":         networkID,
+	tflog.Debug(ctx, "Deleting public IP", map[string]any{
+		"id":         ipID,
 		"region":     opts.Region,
 		"project_id": opts.ProjectID,
 	})
 
-	err := r.client.DeleteLocalNetwork(ctx, networkID, opts)
+	err := r.client.DeletePublicIP(ctx, ipID, opts)
 	if err != nil {
-		resp.Diagnostics.AddError("Unable to Delete Local Network", err.Error())
+		resp.Diagnostics.AddError("Unable to Delete Public IP", err.Error())
 		return
 	}
 
-	tflog.Debug(ctx, "Deleted local network", map[string]any{
-		"id": networkID,
+	tflog.Debug(ctx, "Deleted public IP", map[string]any{
+		"id": ipID,
 	})
 }

@@ -10,41 +10,8 @@ List all available ProData volumes in a project.
 
 ## Example Usage
 
-### List All Volumes
-
 ```terraform
 data "prodata_volumes" "all" {}
-
-output "all_volumes" {
-  value = data.prodata_volumes.all.volumes
-}
-```
-
-### With Region Override
-
-```terraform
-data "prodata_volumes" "uz_volumes" {
-  region = "UZ-5"
-}
-
-output "uz_volume_count" {
-  value = length(data.prodata_volumes.uz_volumes.volumes)
-}
-```
-
-### Filter Attached Volumes with Local
-
-```terraform
-data "prodata_volumes" "all" {}
-
-locals {
-  attached_volumes   = [for vol in data.prodata_volumes.all.volumes : vol if vol.in_use]
-  available_volumes  = [for vol in data.prodata_volumes.all.volumes : vol if !vol.in_use]
-}
-
-output "attached_volume_names" {
-  value = [for vol in local.attached_volumes : vol.name]
-}
 ```
 
 ## Schema

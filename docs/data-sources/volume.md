@@ -10,44 +10,9 @@ Lookup a ProData volume by its unique identifier.
 
 ## Example Usage
 
-### Basic Usage
-
 ```terraform
 data "prodata_volume" "example" {
-  id = 285098
-}
-
-output "volume_name" {
-  value = data.prodata_volume.example.name
-}
-
-output "volume_size" {
-  value = data.prodata_volume.example.size
-}
-```
-
-### With Region Override
-
-```terraform
-data "prodata_volume" "example" {
-  id     = 285098
-  region = "UZ-5"
-}
-```
-
-### Check Attachment Status
-
-```terraform
-data "prodata_volume" "example" {
-  id = 285098
-}
-
-output "is_attached" {
-  value = data.prodata_volume.example.in_use
-}
-
-output "attached_instance" {
-  value = data.prodata_volume.example.in_use ? data.prodata_volume.example.attached_id : null
+  id = 12345
 }
 ```
 

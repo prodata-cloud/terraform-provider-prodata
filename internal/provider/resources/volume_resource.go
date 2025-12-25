@@ -54,7 +54,7 @@ func (r *VolumeResource) Schema(ctx context.Context, req resource.SchemaRequest,
 				},
 			},
 			"region": schema.StringAttribute{
-				MarkdownDescription: "Region where the volume will be created (e.g., UZ5). If not specified, uses the provider's default region.",
+				MarkdownDescription: "Region ID override. If not specified, uses the provider's default region.",
 				Optional:            true,
 				Computed:            true,
 				PlanModifiers: []planmodifier.String{
@@ -218,30 +218,27 @@ func (r *VolumeResource) Update(ctx context.Context, req resource.UpdateRequest,
 		return
 	}
 
-	// Only set opts if explicitly provided in resource (overrides provider defaults)
-	opts := &client.RequestOpts{}
-	if !plan.Region.IsNull() && !plan.Region.IsUnknown() {
-		opts.Region = plan.Region.ValueString()
-	}
-	if !plan.ProjectID.IsNull() && !plan.ProjectID.IsUnknown() {
-		opts.ProjectID = plan.ProjectID.ValueInt64()
-	}
-
 	volumeID := state.ID.ValueInt64()
 
-	// Only name can be updated via API
+	// Only name can be updated via API, region and projectId in request body
 	updateReq := client.UpdateVolumeRequest{
 		Name: plan.Name.ValueString(),
+	}
+	if !plan.Region.IsNull() && !plan.Region.IsUnknown() {
+		updateReq.Region = plan.Region.ValueString()
+	}
+	if !plan.ProjectID.IsNull() && !plan.ProjectID.IsUnknown() {
+		updateReq.ProjectID = plan.ProjectID.ValueInt64()
 	}
 
 	tflog.Debug(ctx, "Updating volume", map[string]any{
 		"id":         volumeID,
 		"name":       updateReq.Name,
-		"region":     opts.Region,
-		"project_id": opts.ProjectID,
+		"region":     updateReq.Region,
+		"project_id": updateReq.ProjectID,
 	})
 
-	volume, err := r.client.UpdateVolume(ctx, volumeID, updateReq, opts)
+	volume, err := r.client.UpdateVolume(ctx, volumeID, updateReq)
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to Update Volume", err.Error())
 		return

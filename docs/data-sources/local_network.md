@@ -10,49 +10,9 @@ Lookup a ProData local network by its unique identifier.
 
 ## Example Usage
 
-### Basic Usage
-
 ```terraform
 data "prodata_local_network" "example" {
-  id = 114530
-}
-
-output "network_name" {
-  value = data.prodata_local_network.example.name
-}
-
-output "network_cidr" {
-  value = data.prodata_local_network.example.cidr
-}
-```
-
-### With Region Override
-
-```terraform
-data "prodata_local_network" "example" {
-  id     = 114530
-  region = "UZ5"
-}
-```
-
-### Check Link Status
-
-```terraform
-data "prodata_local_network" "example" {
-  id = 114530
-}
-
-output "is_linked" {
-  value = data.prodata_local_network.example.linked
-}
-
-output "network_info" {
-  value = {
-    name    = data.prodata_local_network.example.name
-    cidr    = data.prodata_local_network.example.cidr
-    gateway = data.prodata_local_network.example.gateway
-    linked  = data.prodata_local_network.example.linked
-  }
+  id = 12345
 }
 ```
 

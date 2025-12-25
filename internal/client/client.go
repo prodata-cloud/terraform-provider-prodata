@@ -279,26 +279,22 @@ func (c *Client) CreateVolume(ctx context.Context, req CreateVolumeRequest) (*Vo
 }
 
 type UpdateVolumeRequest struct {
-	Name string `json:"name"`
+	Region    string `json:"region,omitempty"`
+	ProjectID int64  `json:"projectId,omitempty"`
+	Name      string `json:"name"`
 }
 
-func (c *Client) UpdateVolume(ctx context.Context, id int64, req UpdateVolumeRequest, opts *RequestOpts) (*Volume, error) {
-	path := fmt.Sprintf("/api/v2/volumes/%d", id)
-
-	// Only add query params if explicitly provided in opts (overrides provider defaults)
-	if opts != nil && (opts.Region != "" || opts.ProjectID != 0) {
-		params := url.Values{}
-		if opts.Region != "" {
-			params.Set("region", opts.Region)
-		}
-		if opts.ProjectID != 0 {
-			params.Set("projectId", strconv.FormatInt(opts.ProjectID, 10))
-		}
-		path = path + "?" + params.Encode()
+func (c *Client) UpdateVolume(ctx context.Context, id int64, req UpdateVolumeRequest) (*Volume, error) {
+	if req.Region == "" {
+		req.Region = c.Region
+	}
+	if req.ProjectID == 0 {
+		req.ProjectID = c.ProjectID
 	}
 
+	path := fmt.Sprintf("/api/v2/volumes/%d", id)
 	var volume Volume
-	if err := c.Do(ctx, http.MethodPut, path, req, &volume, opts); err != nil {
+	if err := c.Do(ctx, http.MethodPut, path, req, &volume, nil); err != nil {
 		return nil, err
 	}
 	return &volume, nil
@@ -375,10 +371,28 @@ func (c *Client) GetLocalNetwork(ctx context.Context, id int64, opts *RequestOpt
 }
 
 type UpdateLocalNetworkRequest struct {
-	Name string `json:"name"`
+	Region    string `json:"region,omitempty"`
+	ProjectID int64  `json:"projectId,omitempty"`
+	Name      string `json:"name"`
 }
 
-func (c *Client) UpdateLocalNetwork(ctx context.Context, id int64, req UpdateLocalNetworkRequest, opts *RequestOpts) (*LocalNetwork, error) {
+func (c *Client) UpdateLocalNetwork(ctx context.Context, id int64, req UpdateLocalNetworkRequest) (*LocalNetwork, error) {
+	if req.Region == "" {
+		req.Region = c.Region
+	}
+	if req.ProjectID == 0 {
+		req.ProjectID = c.ProjectID
+	}
+
+	path := fmt.Sprintf("/api/v2/local-networks/%d", id)
+	var network LocalNetwork
+	if err := c.Do(ctx, http.MethodPut, path, req, &network, nil); err != nil {
+		return nil, err
+	}
+	return &network, nil
+}
+
+func (c *Client) DeleteLocalNetwork(ctx context.Context, id int64, opts *RequestOpts) error {
 	path := fmt.Sprintf("/api/v2/local-networks/%d", id)
 
 	// Only add query params if explicitly provided in opts (overrides provider defaults)
@@ -393,15 +407,83 @@ func (c *Client) UpdateLocalNetwork(ctx context.Context, id int64, req UpdateLoc
 		path = path + "?" + params.Encode()
 	}
 
-	var network LocalNetwork
-	if err := c.Do(ctx, http.MethodPut, path, req, &network, opts); err != nil {
-		return nil, err
+	if err := c.Do(ctx, http.MethodDelete, path, nil, nil, opts); err != nil {
+		return err
 	}
-	return &network, nil
+	return nil
 }
 
-func (c *Client) DeleteLocalNetwork(ctx context.Context, id int64, opts *RequestOpts) error {
-	path := fmt.Sprintf("/api/v2/local-networks/%d", id)
+// PublicIP represents a public IP resource.
+type PublicIP struct {
+	ID      int64  `json:"id"`
+	Name    string `json:"name"`
+	IP      string `json:"ip"`
+	Mask    string `json:"mask"`
+	Gateway string `json:"gateway"`
+}
+
+func (c *Client) GetPublicIPs(ctx context.Context, opts *RequestOpts) ([]PublicIP, error) {
+	var ips []PublicIP
+	if err := c.Do(ctx, http.MethodGet, "/api/v2/public-ips", nil, &ips, opts); err != nil {
+		return nil, err
+	}
+	return ips, nil
+}
+
+func (c *Client) GetPublicIP(ctx context.Context, id int64, opts *RequestOpts) (*PublicIP, error) {
+	var ip PublicIP
+	path := fmt.Sprintf("/api/v2/public-ips/%d", id)
+	if err := c.Do(ctx, http.MethodGet, path, nil, &ip, opts); err != nil {
+		return nil, err
+	}
+	return &ip, nil
+}
+
+type CreatePublicIPRequest struct {
+	Region    string `json:"region"`
+	ProjectID int64  `json:"projectId"`
+	Name      string `json:"name"`
+}
+
+func (c *Client) CreatePublicIP(ctx context.Context, req CreatePublicIPRequest) (*PublicIP, error) {
+	if req.Region == "" {
+		req.Region = c.Region
+	}
+	if req.ProjectID == 0 {
+		req.ProjectID = c.ProjectID
+	}
+
+	var ip PublicIP
+	if err := c.Do(ctx, http.MethodPost, "/api/v2/public-ips", req, &ip, nil); err != nil {
+		return nil, err
+	}
+	return &ip, nil
+}
+
+type UpdatePublicIPRequest struct {
+	Region    string `json:"region,omitempty"`
+	ProjectID int64  `json:"projectId,omitempty"`
+	Name      string `json:"name"`
+}
+
+func (c *Client) UpdatePublicIP(ctx context.Context, id int64, req UpdatePublicIPRequest) (*PublicIP, error) {
+	if req.Region == "" {
+		req.Region = c.Region
+	}
+	if req.ProjectID == 0 {
+		req.ProjectID = c.ProjectID
+	}
+
+	path := fmt.Sprintf("/api/v2/public-ips/%d", id)
+	var ip PublicIP
+	if err := c.Do(ctx, http.MethodPut, path, req, &ip, nil); err != nil {
+		return nil, err
+	}
+	return &ip, nil
+}
+
+func (c *Client) DeletePublicIP(ctx context.Context, id int64, opts *RequestOpts) error {
+	path := fmt.Sprintf("/api/v2/public-ips/%d", id)
 
 	// Only add query params if explicitly provided in opts (overrides provider defaults)
 	if opts != nil && (opts.Region != "" || opts.ProjectID != 0) {
