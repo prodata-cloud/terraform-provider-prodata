@@ -25,12 +25,12 @@ type VolumeResource struct {
 }
 
 type VolumeResourceModel struct {
-	ID        types.Int64  `tfsdk:"id"`
-	Region    types.String `tfsdk:"region"`
-	ProjectID types.Int64  `tfsdk:"project_id"`
-	Name      types.String `tfsdk:"name"`
-	Type      types.String `tfsdk:"type"`
-	Size      types.Int64  `tfsdk:"size"`
+	ID         types.Int64  `tfsdk:"id"`
+	Region     types.String `tfsdk:"region"`
+	ProjectTag types.String `tfsdk:"project_tag"`
+	Name       types.String `tfsdk:"name"`
+	Type       types.String `tfsdk:"type"`
+	Size       types.Int64  `tfsdk:"size"`
 }
 
 func NewVolumeResource() resource.Resource {
@@ -62,13 +62,13 @@ func (r *VolumeResource) Schema(ctx context.Context, req resource.SchemaRequest,
 					stringplanmodifier.UseStateForUnknown(),
 				},
 			},
-			"project_id": schema.Int64Attribute{
-				MarkdownDescription: "Project ID where the volume will be created. If not specified, uses the provider's default project_id.",
+			"project_tag": schema.StringAttribute{
+				MarkdownDescription: "Project tag where the volume will be created. If not specified, uses the provider's default project_tag.",
 				Optional:            true,
 				Computed:            true,
-				PlanModifiers: []planmodifier.Int64{
-					int64planmodifier.RequiresReplace(),
-					int64planmodifier.UseStateForUnknown(),
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.RequiresReplace(),
+					stringplanmodifier.UseStateForUnknown(),
 				},
 			},
 			"name": schema.StringAttribute{
@@ -123,25 +123,25 @@ func (r *VolumeResource) Create(ctx context.Context, req resource.CreateRequest,
 	if region == "" {
 		region = r.client.Region
 	}
-	projectID := data.ProjectID.ValueInt64()
-	if projectID == 0 {
-		projectID = r.client.ProjectID
+	projectTag := data.ProjectTag.ValueString()
+	if projectTag == "" {
+		projectTag = r.client.ProjectTag
 	}
 
 	createReq := client.CreateVolumeRequest{
-		Region:    region,
-		ProjectID: projectID,
-		Name:      data.Name.ValueString(),
-		Type:      data.Type.ValueString(),
-		Size:      data.Size.ValueInt64(),
+		Region:     region,
+		ProjectTag: projectTag,
+		Name:       data.Name.ValueString(),
+		Type:       data.Type.ValueString(),
+		Size:       data.Size.ValueInt64(),
 	}
 
 	tflog.Debug(ctx, "Creating volume", map[string]any{
-		"name":       createReq.Name,
-		"region":     createReq.Region,
-		"project_id": createReq.ProjectID,
-		"type":       createReq.Type,
-		"size":       createReq.Size,
+		"name":        createReq.Name,
+		"region":      createReq.Region,
+		"project_tag": createReq.ProjectTag,
+		"type":        createReq.Type,
+		"size":        createReq.Size,
 	})
 
 	volume, err := r.client.CreateVolume(ctx, createReq)
@@ -152,7 +152,7 @@ func (r *VolumeResource) Create(ctx context.Context, req resource.CreateRequest,
 
 	data.ID = types.Int64Value(volume.ID)
 	data.Region = types.StringValue(region)
-	data.ProjectID = types.Int64Value(projectID)
+	data.ProjectTag = types.StringValue(projectTag)
 	data.Name = types.StringValue(volume.Name)
 	data.Type = types.StringValue(volume.Type)
 	data.Size = types.Int64Value(volume.Size)
@@ -178,16 +178,16 @@ func (r *VolumeResource) Read(ctx context.Context, req resource.ReadRequest, res
 	if !data.Region.IsNull() && !data.Region.IsUnknown() {
 		opts.Region = data.Region.ValueString()
 	}
-	if !data.ProjectID.IsNull() && !data.ProjectID.IsUnknown() {
-		opts.ProjectID = data.ProjectID.ValueInt64()
+	if !data.ProjectTag.IsNull() && !data.ProjectTag.IsUnknown() {
+		opts.ProjectTag = data.ProjectTag.ValueString()
 	}
 
 	volumeID := data.ID.ValueInt64()
 
 	tflog.Debug(ctx, "Reading volume", map[string]any{
-		"id":         volumeID,
-		"region":     opts.Region,
-		"project_id": opts.ProjectID,
+		"id":          volumeID,
+		"region":      opts.Region,
+		"project_tag": opts.ProjectTag,
 	})
 
 	volume, err := r.client.GetVolume(ctx, volumeID, opts)
@@ -220,22 +220,22 @@ func (r *VolumeResource) Update(ctx context.Context, req resource.UpdateRequest,
 
 	volumeID := state.ID.ValueInt64()
 
-	// Only name can be updated via API, region and projectId in request body
+	// Only name can be updated via API, region and projectTag in request body
 	updateReq := client.UpdateVolumeRequest{
 		Name: plan.Name.ValueString(),
 	}
 	if !plan.Region.IsNull() && !plan.Region.IsUnknown() {
 		updateReq.Region = plan.Region.ValueString()
 	}
-	if !plan.ProjectID.IsNull() && !plan.ProjectID.IsUnknown() {
-		updateReq.ProjectID = plan.ProjectID.ValueInt64()
+	if !plan.ProjectTag.IsNull() && !plan.ProjectTag.IsUnknown() {
+		updateReq.ProjectTag = plan.ProjectTag.ValueString()
 	}
 
 	tflog.Debug(ctx, "Updating volume", map[string]any{
-		"id":         volumeID,
-		"name":       updateReq.Name,
-		"region":     updateReq.Region,
-		"project_id": updateReq.ProjectID,
+		"id":          volumeID,
+		"name":        updateReq.Name,
+		"region":      updateReq.Region,
+		"project_tag": updateReq.ProjectTag,
 	})
 
 	volume, err := r.client.UpdateVolume(ctx, volumeID, updateReq)
@@ -270,16 +270,16 @@ func (r *VolumeResource) Delete(ctx context.Context, req resource.DeleteRequest,
 	if !data.Region.IsNull() && !data.Region.IsUnknown() {
 		opts.Region = data.Region.ValueString()
 	}
-	if !data.ProjectID.IsNull() && !data.ProjectID.IsUnknown() {
-		opts.ProjectID = data.ProjectID.ValueInt64()
+	if !data.ProjectTag.IsNull() && !data.ProjectTag.IsUnknown() {
+		opts.ProjectTag = data.ProjectTag.ValueString()
 	}
 
 	volumeID := data.ID.ValueInt64()
 
 	tflog.Debug(ctx, "Deleting volume", map[string]any{
-		"id":         volumeID,
-		"region":     opts.Region,
-		"project_id": opts.ProjectID,
+		"id":          volumeID,
+		"region":      opts.Region,
+		"project_tag": opts.ProjectTag,
 	})
 
 	err := r.client.DeleteVolume(ctx, volumeID, opts)

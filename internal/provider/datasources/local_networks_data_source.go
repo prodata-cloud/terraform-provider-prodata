@@ -23,7 +23,7 @@ type LocalNetworksDataSource struct {
 
 type LocalNetworksDataSourceModel struct {
 	Region        types.String        `tfsdk:"region"`
-	ProjectID     types.Int64         `tfsdk:"project_id"`
+	ProjectTag    types.String        `tfsdk:"project_tag"`
 	LocalNetworks []LocalNetworkModel `tfsdk:"local_networks"`
 }
 
@@ -52,8 +52,8 @@ func (d *LocalNetworksDataSource) Schema(ctx context.Context, req datasource.Sch
 				MarkdownDescription: "Region ID override. If not specified, uses the provider's default region.",
 				Optional:            true,
 			},
-			"project_id": schema.Int64Attribute{
-				MarkdownDescription: "Project ID override. If not specified, uses the provider's default project id.",
+			"project_tag": schema.StringAttribute{
+				MarkdownDescription: "Project Tag override. If not specified, uses the provider's default project tag.",
 				Optional:            true,
 			},
 			"local_networks": schema.ListNestedAttribute{
@@ -117,13 +117,13 @@ func (d *LocalNetworksDataSource) Read(ctx context.Context, req datasource.ReadR
 	if !data.Region.IsNull() && !data.Region.IsUnknown() {
 		opts.Region = data.Region.ValueString()
 	}
-	if !data.ProjectID.IsNull() && !data.ProjectID.IsUnknown() {
-		opts.ProjectID = data.ProjectID.ValueInt64()
+	if !data.ProjectTag.IsNull() && !data.ProjectTag.IsUnknown() {
+		opts.ProjectTag = data.ProjectTag.ValueString()
 	}
 
 	tflog.Debug(ctx, "Listing local networks", map[string]any{
-		"region":     opts.Region,
-		"project_id": opts.ProjectID,
+		"region":      opts.Region,
+		"project_tag": opts.ProjectTag,
 	})
 
 	networks, err := d.client.GetLocalNetworks(ctx, opts)

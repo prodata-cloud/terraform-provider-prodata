@@ -24,7 +24,7 @@ type VolumeDataSource struct {
 type VolumeDataSourceModel struct {
 	ID         types.Int64  `tfsdk:"id"`
 	Region     types.String `tfsdk:"region"`
-	ProjectID  types.Int64  `tfsdk:"project_id"`
+	ProjectTag types.String `tfsdk:"project_tag"`
 	Name       types.String `tfsdk:"name"`
 	Type       types.String `tfsdk:"type"`
 	Size       types.Int64  `tfsdk:"size"`
@@ -53,8 +53,8 @@ func (d *VolumeDataSource) Schema(ctx context.Context, req datasource.SchemaRequ
 				MarkdownDescription: "Region ID override. If not specified, uses the provider's default region.",
 				Optional:            true,
 			},
-			"project_id": schema.Int64Attribute{
-				MarkdownDescription: "Project ID override. If not specified, uses the provider's default project id.",
+			"project_tag": schema.Int64Attribute{
+				MarkdownDescription: "Project Tag override. If not specified, uses the provider's default project tag.",
 				Optional:            true,
 			},
 			"name": schema.StringAttribute{
@@ -110,16 +110,16 @@ func (d *VolumeDataSource) Read(ctx context.Context, req datasource.ReadRequest,
 	if !data.Region.IsNull() && !data.Region.IsUnknown() {
 		opts.Region = data.Region.ValueString()
 	}
-	if !data.ProjectID.IsNull() && !data.ProjectID.IsUnknown() {
-		opts.ProjectID = data.ProjectID.ValueInt64()
+	if !data.ProjectTag.IsNull() && !data.ProjectTag.IsUnknown() {
+		opts.ProjectTag = data.ProjectTag.ValueString()
 	}
 
 	volumeID := data.ID.ValueInt64()
 
 	tflog.Debug(ctx, "Reading volume", map[string]any{
-		"id":         volumeID,
-		"region":     opts.Region,
-		"project_id": opts.ProjectID,
+		"id":          volumeID,
+		"region":      opts.Region,
+		"project_tag": opts.ProjectTag,
 	})
 
 	volume, err := d.client.GetVolume(ctx, volumeID, opts)

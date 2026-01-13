@@ -2,9 +2,7 @@ package provider
 
 import (
 	"context"
-	"fmt"
 	"os"
-	"strconv"
 
 	"terraform-provider-prodata/internal/client"
 	"terraform-provider-prodata/internal/provider/datasources"
@@ -29,7 +27,7 @@ type ProDataProviderModel struct {
 	APIKeyID     types.String `tfsdk:"api_key_id"`
 	APISecretKey types.String `tfsdk:"api_secret_key"`
 	Region       types.String `tfsdk:"region"`
-	ProjectID    types.Int64  `tfsdk:"project_id"`
+	ProjectTag   types.String `tfsdk:"project_tag"`
 }
 
 func New(version string) func() provider.Provider {
@@ -68,9 +66,9 @@ func (p *ProDataProvider) Schema(ctx context.Context, req provider.SchemaRequest
 					"Can also be set via `PRODATA_REGION` environment variable.",
 				Optional: true,
 			},
-			"project_id": schema.Int64Attribute{
-				MarkdownDescription: "Default project ID. " +
-					"Can also be set via `PRODATA_PROJECT_ID` environment variable.",
+			"project_tag": schema.StringAttribute{
+				MarkdownDescription: "Default project tag. " +
+					"Can also be set via `PRODATA_PROJECT_TAG` environment variable.",
 				Optional: true,
 			},
 		},
@@ -112,17 +110,10 @@ func (p *ProDataProvider) Configure(ctx context.Context, req provider.ConfigureR
 		cfg.Region = os.Getenv("PRODATA_REGION")
 	}
 
-	if !data.ProjectID.IsNull() && !data.ProjectID.IsUnknown() {
-		cfg.ProjectID = data.ProjectID.ValueInt64()
-	} else if env := os.Getenv("PRODATA_PROJECT_ID"); env != "" {
-		if v, err := strconv.ParseInt(env, 10, 64); err != nil {
-			resp.Diagnostics.AddWarning(
-				"Invalid PRODATA_PROJECT_ID",
-				fmt.Sprintf("Could not parse %q as integer: %s", env, err),
-			)
-		} else {
-			cfg.ProjectID = v
-		}
+	if !data.ProjectTag.IsNull() && !data.ProjectTag.IsUnknown() {
+		cfg.ProjectTag = data.ProjectTag.ValueString()
+	} else if env := os.Getenv("PRODATA_PROJECT_TAG"); env != "" {
+		cfg.ProjectTag = env
 	}
 
 	// Validate required fields.

@@ -6,10 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -20,7 +18,7 @@ type Client struct {
 	apiSecretKey string
 	userAgent    string
 	Region       string
-	ProjectID    int64
+	ProjectTag   string
 	httpClient   *http.Client
 }
 
@@ -30,7 +28,7 @@ type Config struct {
 	APISecretKey string
 	UserAgent    string
 	Region       string
-	ProjectID    int64
+	ProjectTag   string
 }
 
 func New(cfg Config) (*Client, error) {
@@ -44,7 +42,7 @@ func New(cfg Config) (*Client, error) {
 		apiSecretKey: cfg.APISecretKey,
 		userAgent:    cfg.UserAgent,
 		Region:       cfg.Region,
-		ProjectID:    cfg.ProjectID,
+		ProjectTag:   cfg.ProjectTag,
 		httpClient:   &http.Client{Timeout: 30 * time.Second},
 	}, nil
 }
@@ -62,43 +60,36 @@ type apiError struct {
 
 // RequestOpts allows per-request overrides of region and project.
 type RequestOpts struct {
-	Region    string
-	ProjectID int64
+	Region     string
+	ProjectTag string
 }
 
 func (c *Client) Do(ctx context.Context, method, path string, body, result any, opts *RequestOpts) error {
 	var reqBody io.Reader
-	var reqBodyBytes []byte
 
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
-			log.Printf("[ERROR] Failed to marshal request body: %v", err)
-			log.Printf("[ERROR] Request: %s %s", method, path)
-			log.Printf("[ERROR] Body: %+v", body)
 			return fmt.Errorf("marshal request: %w", err)
 		}
-		reqBodyBytes = b
 		reqBody = bytes.NewReader(b)
 	}
 
 	fullURL := c.baseURL + path
 	req, err := http.NewRequestWithContext(ctx, method, fullURL, reqBody)
 	if err != nil {
-		log.Printf("[ERROR] Failed to create HTTP request: %v", err)
-		log.Printf("[ERROR] Request: %s %s", method, fullURL)
 		return fmt.Errorf("create request: %w", err)
 	}
 
 	// Determine region and project: use per-request opts if provided, else client defaults.
 	region := c.Region
-	projectID := c.ProjectID
+	projectTag := c.ProjectTag
 	if opts != nil {
 		if opts.Region != "" {
 			region = opts.Region
 		}
-		if opts.ProjectID != 0 {
-			projectID = opts.ProjectID
+		if opts.ProjectTag != "" {
+			projectTag = opts.ProjectTag
 		}
 	}
 
@@ -107,81 +98,35 @@ func (c *Client) Do(ctx context.Context, method, path string, body, result any, 
 	req.Header.Set("X-Api-Key-Id", c.apiKeyID)
 	req.Header.Set("X-Api-Secret-Key", c.apiSecretKey)
 	req.Header.Set("X-Region", region)
-	req.Header.Set("X-Project-Id", strconv.FormatInt(projectID, 10))
-
-	log.Printf("[DEBUG] API Request: %s %s", method, fullURL)
-	log.Printf("[DEBUG] Headers: X-Region=%s, X-Project-Id=%d", region, projectID)
-	if len(reqBodyBytes) > 0 {
-		log.Printf("[DEBUG] Request Body: %s", string(reqBodyBytes))
-	}
+	req.Header.Set("X-Project-Tag", projectTag)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		log.Printf("[ERROR] HTTP request failed: %v", err)
-		log.Printf("[ERROR] Request: %s %s", method, fullURL)
-		log.Printf("[ERROR] Headers: X-Region=%s, X-Project-Id=%d", region, projectID)
-		if len(reqBodyBytes) > 0 {
-			log.Printf("[ERROR] Request Body: %s", string(reqBodyBytes))
-		}
 		return fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
-	log.Printf("[DEBUG] Response Status: %d %s", resp.StatusCode, resp.Status)
-
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		log.Printf("[ERROR] Failed to read response body: %v", err)
-		log.Printf("[ERROR] Request: %s %s", method, fullURL)
-		log.Printf("[ERROR] Response Status: %d", resp.StatusCode)
 		return fmt.Errorf("read response: %w", err)
 	}
 
-	log.Printf("[DEBUG] Response Body: %s", string(respBody))
-
 	var apiResp apiResponse[json.RawMessage]
 	if err := json.Unmarshal(respBody, &apiResp); err != nil {
-		log.Printf("[ERROR] Failed to parse response JSON: %v", err)
-		log.Printf("[ERROR] Request: %s %s", method, fullURL)
-		log.Printf("[ERROR] Response Status: %d", resp.StatusCode)
-		log.Printf("[ERROR] Response Body: %s", string(respBody))
 		return fmt.Errorf("parse response: %w", err)
 	}
 
 	if !apiResp.Success {
-		log.Printf("[ERROR] API returned error response")
-		log.Printf("[ERROR] Request: %s %s", method, fullURL)
-		log.Printf("[ERROR] Headers: X-Region=%s, X-Project-Id=%d", region, projectID)
-		if len(reqBodyBytes) > 0 {
-			log.Printf("[ERROR] Request Body: %s", string(reqBodyBytes))
-		}
-		log.Printf("[ERROR] Response Status: %d", resp.StatusCode)
-		log.Printf("[ERROR] Response Body: %s", string(respBody))
-		log.Printf("[ERROR] API Errors: %s", formatAPIErrors(apiResp.Errors))
-		return fmt.Errorf("api error: %s", formatAPIErrors(apiResp.Errors))
+		return fmt.Errorf("api error: %s", apiResp.Errors)
 	}
 
 	if result != nil {
 		if err := json.Unmarshal(apiResp.Data, result); err != nil {
-			log.Printf("[ERROR] Failed to parse response data: %v", err)
-			log.Printf("[ERROR] Request: %s %s", method, fullURL)
-			log.Printf("[ERROR] Response Data: %s", string(apiResp.Data))
 			return fmt.Errorf("parse data: %w", err)
 		}
 	}
 
 	return nil
-}
-
-func formatAPIErrors(errs []apiError) string {
-	if len(errs) == 0 {
-		return "unknown error"
-	}
-	msgs := make([]string, len(errs))
-	for i, e := range errs {
-		msgs[i] = fmt.Sprintf("[%d] %s", e.Code, e.Message)
-	}
-	return strings.Join(msgs, "; ")
 }
 
 type Image struct {
@@ -192,10 +137,10 @@ type Image struct {
 }
 
 type ImageQuery struct {
-	Slug      string
-	Name      string
-	Region    string
-	ProjectID int64
+	Slug       string
+	Name       string
+	Region     string
+	ProjectTag string
 }
 
 func (c *Client) GetImage(ctx context.Context, q ImageQuery) (*Image, error) {
@@ -210,8 +155,8 @@ func (c *Client) GetImage(ctx context.Context, q ImageQuery) (*Image, error) {
 	}
 
 	opts := &RequestOpts{
-		Region:    q.Region,
-		ProjectID: q.ProjectID,
+		Region:     q.Region,
+		ProjectTag: q.ProjectTag,
 	}
 
 	var img Image
@@ -256,19 +201,19 @@ func (c *Client) GetVolume(ctx context.Context, id int64, opts *RequestOpts) (*V
 }
 
 type CreateVolumeRequest struct {
-	Region    string `json:"region"`
-	ProjectID int64  `json:"projectId"`
-	Name      string `json:"name"`
-	Type      string `json:"type"`
-	Size      int64  `json:"size"`
+	Region     string `json:"region"`
+	ProjectTag string `json:"projectTag"`
+	Name       string `json:"name"`
+	Type       string `json:"type"`
+	Size       int64  `json:"size"`
 }
 
 func (c *Client) CreateVolume(ctx context.Context, req CreateVolumeRequest) (*Volume, error) {
 	if req.Region == "" {
 		req.Region = c.Region
 	}
-	if req.ProjectID == 0 {
-		req.ProjectID = c.ProjectID
+	if req.ProjectTag == "" {
+		req.ProjectTag = c.ProjectTag
 	}
 
 	var volume Volume
@@ -279,17 +224,17 @@ func (c *Client) CreateVolume(ctx context.Context, req CreateVolumeRequest) (*Vo
 }
 
 type UpdateVolumeRequest struct {
-	Region    string `json:"region,omitempty"`
-	ProjectID int64  `json:"projectId,omitempty"`
-	Name      string `json:"name"`
+	Region     string `json:"region,omitempty"`
+	ProjectTag string `json:"projectTag,omitempty"`
+	Name       string `json:"name"`
 }
 
 func (c *Client) UpdateVolume(ctx context.Context, id int64, req UpdateVolumeRequest) (*Volume, error) {
 	if req.Region == "" {
 		req.Region = c.Region
 	}
-	if req.ProjectID == 0 {
-		req.ProjectID = c.ProjectID
+	if req.ProjectTag == "" {
+		req.ProjectTag = c.ProjectTag
 	}
 
 	path := fmt.Sprintf("/api/v2/volumes/%d", id)
@@ -304,13 +249,13 @@ func (c *Client) DeleteVolume(ctx context.Context, id int64, opts *RequestOpts) 
 	path := fmt.Sprintf("/api/v2/volumes/%d", id)
 
 	// Only add query params if explicitly provided in opts (overrides provider defaults)
-	if opts != nil && (opts.Region != "" || opts.ProjectID != 0) {
+	if opts != nil && (opts.Region != "" || opts.ProjectTag != "") {
 		params := url.Values{}
 		if opts.Region != "" {
 			params.Set("region", opts.Region)
 		}
-		if opts.ProjectID != 0 {
-			params.Set("projectId", strconv.FormatInt(opts.ProjectID, 10))
+		if opts.ProjectTag != "" {
+			params.Set("projectTag", opts.ProjectTag)
 		}
 		path = path + "?" + params.Encode()
 	}
@@ -339,19 +284,19 @@ func (c *Client) GetLocalNetworks(ctx context.Context, opts *RequestOpts) ([]Loc
 }
 
 type CreateLocalNetworkRequest struct {
-	Region    string `json:"region"`
-	ProjectID int64  `json:"projectId"`
-	Name      string `json:"name"`
-	CIDR      string `json:"cidr"`
-	Gateway   string `json:"gateway"`
+	Region     string `json:"region"`
+	ProjectTag string `json:"projectTag"`
+	Name       string `json:"name"`
+	CIDR       string `json:"cidr"`
+	Gateway    string `json:"gateway"`
 }
 
 func (c *Client) CreateLocalNetwork(ctx context.Context, req CreateLocalNetworkRequest) (*LocalNetwork, error) {
 	if req.Region == "" {
 		req.Region = c.Region
 	}
-	if req.ProjectID == 0 {
-		req.ProjectID = c.ProjectID
+	if req.ProjectTag == "" {
+		req.ProjectTag = c.ProjectTag
 	}
 
 	var network LocalNetwork
@@ -371,17 +316,17 @@ func (c *Client) GetLocalNetwork(ctx context.Context, id int64, opts *RequestOpt
 }
 
 type UpdateLocalNetworkRequest struct {
-	Region    string `json:"region,omitempty"`
-	ProjectID int64  `json:"projectId,omitempty"`
-	Name      string `json:"name"`
+	Region     string `json:"region,omitempty"`
+	ProjectTag string `json:"projectTag,omitempty"`
+	Name       string `json:"name"`
 }
 
 func (c *Client) UpdateLocalNetwork(ctx context.Context, id int64, req UpdateLocalNetworkRequest) (*LocalNetwork, error) {
 	if req.Region == "" {
 		req.Region = c.Region
 	}
-	if req.ProjectID == 0 {
-		req.ProjectID = c.ProjectID
+	if req.ProjectTag == "" {
+		req.ProjectTag = c.ProjectTag
 	}
 
 	path := fmt.Sprintf("/api/v2/local-networks/%d", id)
@@ -396,13 +341,13 @@ func (c *Client) DeleteLocalNetwork(ctx context.Context, id int64, opts *Request
 	path := fmt.Sprintf("/api/v2/local-networks/%d", id)
 
 	// Only add query params if explicitly provided in opts (overrides provider defaults)
-	if opts != nil && (opts.Region != "" || opts.ProjectID != 0) {
+	if opts != nil && (opts.Region != "" || opts.ProjectTag != "") {
 		params := url.Values{}
 		if opts.Region != "" {
 			params.Set("region", opts.Region)
 		}
-		if opts.ProjectID != 0 {
-			params.Set("projectId", strconv.FormatInt(opts.ProjectID, 10))
+		if opts.ProjectTag != "" {
+			params.Set("projectTag", opts.ProjectTag)
 		}
 		path = path + "?" + params.Encode()
 	}
@@ -440,17 +385,17 @@ func (c *Client) GetPublicIP(ctx context.Context, id int64, opts *RequestOpts) (
 }
 
 type CreatePublicIPRequest struct {
-	Region    string `json:"region"`
-	ProjectID int64  `json:"projectId"`
-	Name      string `json:"name"`
+	Region     string `json:"region"`
+	ProjectTag string `json:"projectTag"`
+	Name       string `json:"name"`
 }
 
 func (c *Client) CreatePublicIP(ctx context.Context, req CreatePublicIPRequest) (*PublicIP, error) {
 	if req.Region == "" {
 		req.Region = c.Region
 	}
-	if req.ProjectID == 0 {
-		req.ProjectID = c.ProjectID
+	if req.ProjectTag == "" {
+		req.ProjectTag = c.ProjectTag
 	}
 
 	var ip PublicIP
@@ -461,17 +406,17 @@ func (c *Client) CreatePublicIP(ctx context.Context, req CreatePublicIPRequest) 
 }
 
 type UpdatePublicIPRequest struct {
-	Region    string `json:"region,omitempty"`
-	ProjectID int64  `json:"projectId,omitempty"`
-	Name      string `json:"name"`
+	Region     string `json:"region,omitempty"`
+	ProjectTag string `json:"projectTag,omitempty"`
+	Name       string `json:"name"`
 }
 
 func (c *Client) UpdatePublicIP(ctx context.Context, id int64, req UpdatePublicIPRequest) (*PublicIP, error) {
 	if req.Region == "" {
 		req.Region = c.Region
 	}
-	if req.ProjectID == 0 {
-		req.ProjectID = c.ProjectID
+	if req.ProjectTag == "" {
+		req.ProjectTag = c.ProjectTag
 	}
 
 	path := fmt.Sprintf("/api/v2/public-ips/%d", id)
@@ -486,13 +431,13 @@ func (c *Client) DeletePublicIP(ctx context.Context, id int64, opts *RequestOpts
 	path := fmt.Sprintf("/api/v2/public-ips/%d", id)
 
 	// Only add query params if explicitly provided in opts (overrides provider defaults)
-	if opts != nil && (opts.Region != "" || opts.ProjectID != 0) {
+	if opts != nil && (opts.Region != "" || opts.ProjectTag != "") {
 		params := url.Values{}
 		if opts.Region != "" {
 			params.Set("region", opts.Region)
 		}
-		if opts.ProjectID != 0 {
-			params.Set("projectId", strconv.FormatInt(opts.ProjectID, 10))
+		if opts.ProjectTag != "" {
+			params.Set("projectTag", opts.ProjectTag)
 		}
 		path = path + "?" + params.Encode()
 	}
@@ -502,4 +447,3 @@ func (c *Client) DeletePublicIP(ctx context.Context, id int64, opts *RequestOpts
 	}
 	return nil
 }
-

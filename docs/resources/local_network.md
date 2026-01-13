@@ -8,7 +8,7 @@ description: |-
 
 Manages a ProData local network.
 
-~> **Note:** Only the `name` attribute can be updated in-place. Changing `cidr`, `gateway`, `region`, or `project_id` will force the creation of a new local network (destroy and recreate).
+~> **Note:** Only the `name` attribute can be updated in-place. Changing `cidr`, `gateway`, `region`, or `project_tag` will force the creation of a new local network (destroy and recreate).
 
 ## Example Usage
 
@@ -31,7 +31,7 @@ resource "prodata_local_network" "example" {
 ### Optional
 
 - `region` (String) Region where the local network will be created. If not specified, uses the provider's default region. Changing this forces a new resource.
-- `project_id` (Number) Project ID where the local network will be created. If not specified, uses the provider's default project_id. Changing this forces a new resource.
+- `project_tag` (String) Project tag where the local network will be created. If not specified, uses the provider's default project_tag. Changing this forces a new resource.
 
 ### Read-Only
 

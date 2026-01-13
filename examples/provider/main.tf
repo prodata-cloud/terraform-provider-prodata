@@ -12,7 +12,7 @@ provider "prodata" {
   api_key_id     = "ak_xxxxxxxxxxxxx"
   api_secret_key = "sk_xxxxxxxxxxxxx"
   region         = "UZ-5"
-  project_id     = 123
+  project_tag    = "your-project-tag"
 }
 
 # Alternatively, use environment variables:
@@ -20,4 +20,4 @@ provider "prodata" {
 # PRODATA_API_KEY_ID
 # PRODATA_API_SECRET_KEY
 # PRODATA_REGION
-# PRODATA_PROJECT_ID
+# PRODATA_PROJECT_TAG

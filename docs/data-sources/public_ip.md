@@ -25,7 +25,7 @@ data "prodata_public_ip" "example" {
 ### Optional
 
 - `region` (String) Region ID override. If not specified, uses the provider's default region.
-- `project_id` (Number) Project ID override. If not specified, uses the provider's default project ID.
+- `project_tag` (String) Project tag override. If not specified, uses the provider's default project tag.
 
 ### Read-Only
 

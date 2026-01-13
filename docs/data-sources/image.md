@@ -25,7 +25,7 @@ Exactly one of `name` or `slug` must be specified.
 - `name` (String) Image name. Use for looking up custom images. Conflicts with `slug`.
 - `slug` (String) Image slug (e.g., `ubuntu-22.04`, `debian-12`). Use for looking up OS templates. Conflicts with `name`.
 - `region` (String) Region ID override. If not specified, uses the provider's default region.
-- `project_id` (Number) Project ID override. If not specified, uses the provider's default project ID.
+- `project_tag` (String) Project tag override. If not specified, uses the provider's default project tag.
 
 ### Read-Only
 

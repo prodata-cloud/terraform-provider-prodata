@@ -22,9 +22,9 @@ type PublicIPsDataSource struct {
 }
 
 type PublicIPsDataSourceModel struct {
-	Region    types.String    `tfsdk:"region"`
-	ProjectID types.Int64     `tfsdk:"project_id"`
-	PublicIPs []PublicIPModel `tfsdk:"public_ips"`
+	Region     types.String    `tfsdk:"region"`
+	ProjectTag types.String    `tfsdk:"project_tag"`
+	PublicIPs  []PublicIPModel `tfsdk:"public_ips"`
 }
 
 type PublicIPModel struct {
@@ -52,7 +52,7 @@ func (d *PublicIPsDataSource) Schema(ctx context.Context, req datasource.SchemaR
 				MarkdownDescription: "Region ID override. If not specified, uses the provider's default region.",
 				Optional:            true,
 			},
-			"project_id": schema.Int64Attribute{
+			"project_tag": schema.StringAttribute{
 				MarkdownDescription: "Project ID override. If not specified, uses the provider's default project id.",
 				Optional:            true,
 			},
@@ -117,13 +117,13 @@ func (d *PublicIPsDataSource) Read(ctx context.Context, req datasource.ReadReque
 	if !data.Region.IsNull() && !data.Region.IsUnknown() {
 		opts.Region = data.Region.ValueString()
 	}
-	if !data.ProjectID.IsNull() && !data.ProjectID.IsUnknown() {
-		opts.ProjectID = data.ProjectID.ValueInt64()
+	if !data.ProjectTag.IsNull() && !data.ProjectTag.IsUnknown() {
+		opts.ProjectTag = data.ProjectTag.ValueString()
 	}
 
 	tflog.Debug(ctx, "Listing public IPs", map[string]any{
-		"region":     opts.Region,
-		"project_id": opts.ProjectID,
+		"region":      opts.Region,
+		"project_tag": opts.ProjectTag,
 	})
 
 	ips, err := d.client.GetPublicIPs(ctx, opts)

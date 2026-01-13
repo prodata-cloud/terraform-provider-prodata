@@ -8,7 +8,7 @@ description: |-
 
 Manages a ProData volume.
 
-~> **Note:** Only the `name` attribute can be updated in-place. Changing `type`, `size`, `region`, or `project_id` will force the creation of a new volume (destroy and recreate).
+~> **Note:** Only the `name` attribute can be updated in-place. Changing `type`, `size`, `region`, or `project_tag` will force the creation of a new volume (destroy and recreate).
 
 ## Example Usage
 
@@ -31,7 +31,7 @@ resource "prodata_volume" "example" {
 ### Optional
 
 - `region` (String) Region where the volume will be created. If not specified, uses the provider's default region. Changing this forces a new resource.
-- `project_id` (Number) Project ID where the volume will be created. If not specified, uses the provider's default project_id. Changing this forces a new resource.
+- `project_tag` (String) Project tag where the volume will be created. If not specified, uses the provider's default project_tag. Changing this forces a new resource.
 
 ### Read-Only
 

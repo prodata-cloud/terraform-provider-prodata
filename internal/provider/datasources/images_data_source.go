@@ -22,9 +22,9 @@ type ImagesDataSource struct {
 }
 
 type ImagesDataSourceModel struct {
-	Region    types.String `tfsdk:"region"`
-	ProjectID types.Int64  `tfsdk:"project_id"`
-	Images    []ImageModel `tfsdk:"images"`
+	Region     types.String `tfsdk:"region"`
+	ProjectTag types.String `tfsdk:"project_tag"`
+	Images     []ImageModel `tfsdk:"images"`
 }
 
 type ImageModel struct {
@@ -51,8 +51,8 @@ func (d *ImagesDataSource) Schema(ctx context.Context, req datasource.SchemaRequ
 				MarkdownDescription: "Region ID override. If not specified, uses the provider's default region.",
 				Optional:            true,
 			},
-			"project_id": schema.Int64Attribute{
-				MarkdownDescription: "Project ID override. If not specified, uses the provider's default project id.",
+			"project_tag": schema.StringAttribute{
+				MarkdownDescription: "Project Tag override. If not specified, uses the provider's default project tag.",
 				Optional:            true,
 			},
 			"images": schema.ListNestedAttribute{
@@ -112,13 +112,13 @@ func (d *ImagesDataSource) Read(ctx context.Context, req datasource.ReadRequest,
 	if !data.Region.IsNull() && !data.Region.IsUnknown() {
 		opts.Region = data.Region.ValueString()
 	}
-	if !data.ProjectID.IsNull() && !data.ProjectID.IsUnknown() {
-		opts.ProjectID = data.ProjectID.ValueInt64()
+	if !data.ProjectTag.IsNull() && !data.ProjectTag.IsUnknown() {
+		opts.ProjectTag = data.ProjectTag.ValueString()
 	}
 
 	tflog.Debug(ctx, "Listing images", map[string]any{
-		"region":     opts.Region,
-		"project_id": opts.ProjectID,
+		"region":      opts.Region,
+		"project_tag": opts.ProjectTag,
 	})
 
 	images, err := d.client.GetImages(ctx, opts)

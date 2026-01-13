@@ -25,12 +25,12 @@ type LocalNetworkResource struct {
 }
 
 type LocalNetworkResourceModel struct {
-	ID        types.Int64  `tfsdk:"id"`
-	Region    types.String `tfsdk:"region"`
-	ProjectID types.Int64  `tfsdk:"project_id"`
-	Name      types.String `tfsdk:"name"`
-	CIDR      types.String `tfsdk:"cidr"`
-	Gateway   types.String `tfsdk:"gateway"`
+	ID         types.Int64  `tfsdk:"id"`
+	Region     types.String `tfsdk:"region"`
+	ProjectTag types.String `tfsdk:"project_tag"`
+	Name       types.String `tfsdk:"name"`
+	CIDR       types.String `tfsdk:"cidr"`
+	Gateway    types.String `tfsdk:"gateway"`
 }
 
 func NewLocalNetworkResource() resource.Resource {
@@ -62,13 +62,13 @@ func (r *LocalNetworkResource) Schema(ctx context.Context, req resource.SchemaRe
 					stringplanmodifier.UseStateForUnknown(),
 				},
 			},
-			"project_id": schema.Int64Attribute{
-				MarkdownDescription: "Project ID where the local network will be created. If not specified, uses the provider's default project_id.",
+			"project_tag": schema.StringAttribute{
+				MarkdownDescription: "Project tag where the local network will be created. If not specified, uses the provider's default project_tag.",
 				Optional:            true,
 				Computed:            true,
-				PlanModifiers: []planmodifier.Int64{
-					int64planmodifier.RequiresReplace(),
-					int64planmodifier.UseStateForUnknown(),
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.RequiresReplace(),
+					stringplanmodifier.UseStateForUnknown(),
 				},
 			},
 			"name": schema.StringAttribute{
@@ -123,25 +123,25 @@ func (r *LocalNetworkResource) Create(ctx context.Context, req resource.CreateRe
 	if region == "" {
 		region = r.client.Region
 	}
-	projectID := data.ProjectID.ValueInt64()
-	if projectID == 0 {
-		projectID = r.client.ProjectID
+	projectTag := data.ProjectTag.ValueString()
+	if projectTag == "" {
+		projectTag = r.client.ProjectTag
 	}
 
 	createReq := client.CreateLocalNetworkRequest{
-		Region:    region,
-		ProjectID: projectID,
-		Name:      data.Name.ValueString(),
-		CIDR:      data.CIDR.ValueString(),
-		Gateway:   data.Gateway.ValueString(),
+		Region:     region,
+		ProjectTag: projectTag,
+		Name:       data.Name.ValueString(),
+		CIDR:       data.CIDR.ValueString(),
+		Gateway:    data.Gateway.ValueString(),
 	}
 
 	tflog.Debug(ctx, "Creating local network", map[string]any{
-		"name":       createReq.Name,
-		"region":     createReq.Region,
-		"project_id": createReq.ProjectID,
-		"cidr":       createReq.CIDR,
-		"gateway":    createReq.Gateway,
+		"name":        createReq.Name,
+		"region":      createReq.Region,
+		"project_tag": createReq.ProjectTag,
+		"cidr":        createReq.CIDR,
+		"gateway":     createReq.Gateway,
 	})
 
 	network, err := r.client.CreateLocalNetwork(ctx, createReq)
@@ -152,7 +152,7 @@ func (r *LocalNetworkResource) Create(ctx context.Context, req resource.CreateRe
 
 	data.ID = types.Int64Value(network.ID)
 	data.Region = types.StringValue(region)
-	data.ProjectID = types.Int64Value(projectID)
+	data.ProjectTag = types.StringValue(projectTag)
 	data.Name = types.StringValue(network.Name)
 	data.CIDR = types.StringValue(network.CIDR)
 	data.Gateway = types.StringValue(network.Gateway)
@@ -178,16 +178,16 @@ func (r *LocalNetworkResource) Read(ctx context.Context, req resource.ReadReques
 	if !data.Region.IsNull() && !data.Region.IsUnknown() {
 		opts.Region = data.Region.ValueString()
 	}
-	if !data.ProjectID.IsNull() && !data.ProjectID.IsUnknown() {
-		opts.ProjectID = data.ProjectID.ValueInt64()
+	if !data.ProjectTag.IsNull() && !data.ProjectTag.IsUnknown() {
+		opts.ProjectTag = data.ProjectTag.ValueString()
 	}
 
 	networkID := data.ID.ValueInt64()
 
 	tflog.Debug(ctx, "Reading local network", map[string]any{
-		"id":         networkID,
-		"region":     opts.Region,
-		"project_id": opts.ProjectID,
+		"id":          networkID,
+		"region":      opts.Region,
+		"project_tag": opts.ProjectTag,
 	})
 
 	network, err := r.client.GetLocalNetwork(ctx, networkID, opts)
@@ -220,22 +220,22 @@ func (r *LocalNetworkResource) Update(ctx context.Context, req resource.UpdateRe
 
 	networkID := state.ID.ValueInt64()
 
-	// Only name can be updated via API, region and projectId in request body
+	// Only name can be updated via API, region and projectTag in request body
 	updateReq := client.UpdateLocalNetworkRequest{
 		Name: plan.Name.ValueString(),
 	}
 	if !plan.Region.IsNull() && !plan.Region.IsUnknown() {
 		updateReq.Region = plan.Region.ValueString()
 	}
-	if !plan.ProjectID.IsNull() && !plan.ProjectID.IsUnknown() {
-		updateReq.ProjectID = plan.ProjectID.ValueInt64()
+	if !plan.ProjectTag.IsNull() && !plan.ProjectTag.IsUnknown() {
+		updateReq.ProjectTag = plan.ProjectTag.ValueString()
 	}
 
 	tflog.Debug(ctx, "Updating local network", map[string]any{
-		"id":         networkID,
-		"name":       updateReq.Name,
-		"region":     updateReq.Region,
-		"project_id": updateReq.ProjectID,
+		"id":          networkID,
+		"name":        updateReq.Name,
+		"region":      updateReq.Region,
+		"project_tag": updateReq.ProjectTag,
 	})
 
 	network, err := r.client.UpdateLocalNetwork(ctx, networkID, updateReq)
@@ -270,16 +270,16 @@ func (r *LocalNetworkResource) Delete(ctx context.Context, req resource.DeleteRe
 	if !data.Region.IsNull() && !data.Region.IsUnknown() {
 		opts.Region = data.Region.ValueString()
 	}
-	if !data.ProjectID.IsNull() && !data.ProjectID.IsUnknown() {
-		opts.ProjectID = data.ProjectID.ValueInt64()
+	if !data.ProjectTag.IsNull() && !data.ProjectTag.IsUnknown() {
+		opts.ProjectTag = data.ProjectTag.ValueString()
 	}
 
 	networkID := data.ID.ValueInt64()
 
 	tflog.Debug(ctx, "Deleting local network", map[string]any{
-		"id":         networkID,
-		"region":     opts.Region,
-		"project_id": opts.ProjectID,
+		"id":          networkID,
+		"region":      opts.Region,
+		"project_tag": opts.ProjectTag,
 	})
 
 	err := r.client.DeleteLocalNetwork(ctx, networkID, opts)

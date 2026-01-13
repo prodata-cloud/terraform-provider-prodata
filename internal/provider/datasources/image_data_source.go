@@ -26,10 +26,10 @@ type ImageDataSource struct {
 
 type ImageDataSourceModel struct {
 	// Input - one of these required
-	Name      types.String `tfsdk:"name"`
-	Slug      types.String `tfsdk:"slug"`
-	Region    types.String `tfsdk:"region"`
-	ProjectID types.Int64  `tfsdk:"project_id"`
+	Name       types.String `tfsdk:"name"`
+	Slug       types.String `tfsdk:"slug"`
+	Region     types.String `tfsdk:"region"`
+	ProjectTag types.String `tfsdk:"project_tag"`
 
 	// Computed output
 	ID       types.Int64 `tfsdk:"id"`
@@ -62,8 +62,8 @@ func (d *ImageDataSource) Schema(ctx context.Context, req datasource.SchemaReque
 				MarkdownDescription: "Region ID override. If not specified, uses the provider's default region.",
 				Optional:            true,
 			},
-			"project_id": schema.Int64Attribute{
-				MarkdownDescription: "Project ID override. If not specified, uses the provider's default project id.",
+			"project_tag": schema.StringAttribute{
+				MarkdownDescription: "Project Tag override. If not specified, uses the provider's default project tag.",
 				Optional:            true,
 			},
 
@@ -122,15 +122,15 @@ func (d *ImageDataSource) Read(ctx context.Context, req datasource.ReadRequest, 
 	if !data.Region.IsNull() && !data.Region.IsUnknown() {
 		query.Region = data.Region.ValueString()
 	}
-	if !data.ProjectID.IsNull() && !data.ProjectID.IsUnknown() {
-		query.ProjectID = data.ProjectID.ValueInt64()
+	if !data.ProjectTag.IsNull() && !data.ProjectTag.IsUnknown() {
+		query.ProjectTag = data.ProjectTag.ValueString()
 	}
 
 	tflog.Debug(ctx, "Looking up image", map[string]any{
-		"slug":       query.Slug,
-		"name":       query.Name,
-		"region":     query.Region,
-		"project_id": query.ProjectID,
+		"slug":        query.Slug,
+		"name":        query.Name,
+		"region":      query.Region,
+		"project_tag": query.ProjectTag,
 	})
 
 	image, err := d.client.GetImage(ctx, query)
