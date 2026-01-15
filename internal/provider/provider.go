@@ -163,5 +163,7 @@ func (p *ProDataProvider) DataSources(ctx context.Context) []func() datasource.D
 		datasources.NewLocalNetworksDataSource,
 		datasources.NewPublicIPDataSource,
 		datasources.NewPublicIPsDataSource,
+		datasources.NewVmDataSource,
+		datasources.NewVmsDataSource,
 	}
 }
