@@ -450,8 +450,33 @@ func (c *Client) DeletePublicIP(ctx context.Context, id int64, opts *RequestOpts
 
 // Vm represents a virtual machine.
 type Vm struct {
-	ID   int64  `json:"id"`
-	Name string `json:"name"`
+	ID        int64  `json:"id"`
+	Name      string `json:"name"`
+	Status    string `json:"status"`
+	CPUCores  int64  `json:"cpuCores"`
+	RAM       int64  `json:"ram"`
+	DiskSize  int64  `json:"diskSize"`
+	DiskType  string `json:"diskType"`
+	PrivateIP string `json:"privateIp"`
+	PublicIP  string `json:"publicIp"`
+}
+
+// CreateVmRequest represents the request to create a VM.
+type CreateVmRequest struct {
+	Region         string  `json:"region,omitempty"`
+	ProjectTag     string  `json:"projectTag,omitempty"`
+	Name           string  `json:"name"`
+	ImageID        int64   `json:"imageId"`
+	CPUCores       int64   `json:"cpuCores"`
+	RAM            int64   `json:"ram"`
+	DiskSize       int64   `json:"diskSize"`
+	DiskType       string  `json:"diskType"`
+	LocalNetworkID int64   `json:"localNetworkId"`
+	PrivateIP      string  `json:"privateIp"`
+	PublicIPID     *int64  `json:"publicIpId,omitempty"`
+	Password       string  `json:"password"`
+	SSHPublicKey   *string `json:"sshPublicKey,omitempty"`
+	Description    *string `json:"description,omitempty"`
 }
 
 func (c *Client) GetVms(ctx context.Context, opts *RequestOpts) ([]Vm, error) {
@@ -493,6 +518,21 @@ func (c *Client) GetVm(ctx context.Context, id int64, opts *RequestOpts) (*Vm, e
 
 	var vm Vm
 	if err := c.Do(ctx, http.MethodGet, path, nil, &vm, opts); err != nil {
+		return nil, err
+	}
+	return &vm, nil
+}
+
+func (c *Client) CreateVm(ctx context.Context, req CreateVmRequest) (*Vm, error) {
+	if req.Region == "" {
+		req.Region = c.Region
+	}
+	if req.ProjectTag == "" {
+		req.ProjectTag = c.ProjectTag
+	}
+
+	var vm Vm
+	if err := c.Do(ctx, http.MethodPost, "/api/v2/vms", req, &vm, nil); err != nil {
 		return nil, err
 	}
 	return &vm, nil
