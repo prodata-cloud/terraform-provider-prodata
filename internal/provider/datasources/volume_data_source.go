@@ -53,7 +53,7 @@ func (d *VolumeDataSource) Schema(ctx context.Context, req datasource.SchemaRequ
 				MarkdownDescription: "Region ID override. If not specified, uses the provider's default region.",
 				Optional:            true,
 			},
-			"project_tag": schema.Int64Attribute{
+			"project_tag": schema.StringAttribute{
 				MarkdownDescription: "Project Tag override. If not specified, uses the provider's default project tag.",
 				Optional:            true,
 			},
