@@ -95,8 +95,8 @@ func (c *Client) Do(ctx context.Context, method, path string, body, result any, 
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", c.userAgent)
-	req.Header.Set("X-Api-Key-Id", c.apiKeyID)
-	req.Header.Set("X-Api-Secret-Key", c.apiSecretKey)
+	req.Header.Set("X-API-KEY", c.apiKeyID)
+	req.Header.Set("X-API-SECRET", c.apiSecretKey)
 	req.Header.Set("X-Region", region)
 	req.Header.Set("X-Project-Tag", projectTag)
 
@@ -111,13 +111,25 @@ func (c *Client) Do(ctx context.Context, method, path string, body, result any, 
 		return fmt.Errorf("read response: %w", err)
 	}
 
+	// Check HTTP status code first
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("http error %d: %s", resp.StatusCode, string(respBody))
+	}
+
 	var apiResp apiResponse[json.RawMessage]
 	if err := json.Unmarshal(respBody, &apiResp); err != nil {
-		return fmt.Errorf("parse response: %w", err)
+		return fmt.Errorf("parse response (status %d): %s", resp.StatusCode, string(respBody))
 	}
 
 	if !apiResp.Success {
-		return fmt.Errorf("api error: %s", apiResp.Errors)
+		var errMsgs []string
+		for _, e := range apiResp.Errors {
+			errMsgs = append(errMsgs, e.Message)
+		}
+		if len(errMsgs) == 0 {
+			return fmt.Errorf("api error (status %d): %s", resp.StatusCode, string(respBody))
+		}
+		return fmt.Errorf("api error: %s", strings.Join(errMsgs, "; "))
 	}
 
 	if result != nil {
