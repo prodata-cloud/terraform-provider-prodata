@@ -549,3 +549,24 @@ func (c *Client) CreateVm(ctx context.Context, req CreateVmRequest) (*Vm, error)
 	}
 	return &vm, nil
 }
+
+func (c *Client) DeleteVm(ctx context.Context, id int64, opts *RequestOpts) error {
+	path := fmt.Sprintf("/api/v2/vms/%d", id)
+
+	// Only add query params if explicitly provided in opts (overrides provider defaults)
+	if opts != nil && (opts.Region != "" || opts.ProjectTag != "") {
+		params := url.Values{}
+		if opts.Region != "" {
+			params.Set("region", opts.Region)
+		}
+		if opts.ProjectTag != "" {
+			params.Set("projectTag", opts.ProjectTag)
+		}
+		path = path + "?" + params.Encode()
+	}
+
+	if err := c.Do(ctx, http.MethodDelete, path, nil, nil, opts); err != nil {
+		return err
+	}
+	return nil
+}

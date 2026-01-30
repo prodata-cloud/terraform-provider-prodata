@@ -344,15 +344,28 @@ func (r *VmResource) Delete(ctx context.Context, req resource.DeleteRequest, res
 		return
 	}
 
+	// Only set opts if explicitly provided in resource (overrides provider defaults)
+	opts := &client.RequestOpts{}
+	if !data.Region.IsNull() && !data.Region.IsUnknown() {
+		opts.Region = data.Region.ValueString()
+	}
+	if !data.ProjectTag.IsNull() && !data.ProjectTag.IsUnknown() {
+		opts.ProjectTag = data.ProjectTag.ValueString()
+	}
+
 	vmID := data.ID.ValueInt64()
 
 	tflog.Debug(ctx, "Deleting virtual machine", map[string]any{
 		"id": vmID,
 	})
 
-	// Note: Delete API is not yet implemented in the backend
-	// For now, we just remove the resource from state
-	tflog.Warn(ctx, "VM delete API not yet implemented - removing from state only", map[string]any{
+	err := r.client.DeleteVm(ctx, vmID, opts)
+	if err != nil {
+		resp.Diagnostics.AddError("Unable to Delete Virtual Machine", err.Error())
+		return
+	}
+
+	tflog.Debug(ctx, "Deleted virtual machine", map[string]any{
 		"id": vmID,
 	})
 }
