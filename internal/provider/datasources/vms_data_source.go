@@ -28,8 +28,17 @@ type VmsDataSourceModel struct {
 }
 
 type VmModel struct {
-	ID   types.Int64  `tfsdk:"id"`
-	Name types.String `tfsdk:"name"`
+	ID             types.Int64  `tfsdk:"id"`
+	Name           types.String `tfsdk:"name"`
+	Status         types.String `tfsdk:"status"`
+	CPUCores       types.Int64  `tfsdk:"cpu_cores"`
+	RAM            types.Int64  `tfsdk:"ram"`
+	DiskSize       types.Int64  `tfsdk:"disk_size"`
+	DiskType       types.String `tfsdk:"disk_type"`
+	PrivateIP      types.String `tfsdk:"private_ip"`
+	PublicIP       types.String `tfsdk:"public_ip"`
+	LocalNetworkID types.Int64  `tfsdk:"local_network_id"`
+	Description    types.String `tfsdk:"description"`
 }
 
 func NewVmsDataSource() datasource.DataSource {
@@ -64,6 +73,42 @@ func (d *VmsDataSource) Schema(ctx context.Context, req datasource.SchemaRequest
 						},
 						"name": schema.StringAttribute{
 							MarkdownDescription: "The name of the virtual machine.",
+							Computed:            true,
+						},
+						"status": schema.StringAttribute{
+							MarkdownDescription: "The current status of the virtual machine.",
+							Computed:            true,
+						},
+						"cpu_cores": schema.Int64Attribute{
+							MarkdownDescription: "The number of CPU cores.",
+							Computed:            true,
+						},
+						"ram": schema.Int64Attribute{
+							MarkdownDescription: "The amount of RAM in GB.",
+							Computed:            true,
+						},
+						"disk_size": schema.Int64Attribute{
+							MarkdownDescription: "The size of the disk in GB.",
+							Computed:            true,
+						},
+						"disk_type": schema.StringAttribute{
+							MarkdownDescription: "The type of disk (HDD, SSD, or NVME).",
+							Computed:            true,
+						},
+						"private_ip": schema.StringAttribute{
+							MarkdownDescription: "The private IP address of the virtual machine.",
+							Computed:            true,
+						},
+						"public_ip": schema.StringAttribute{
+							MarkdownDescription: "The public IP address of the virtual machine (if any).",
+							Computed:            true,
+						},
+						"local_network_id": schema.Int64Attribute{
+							MarkdownDescription: "The ID of the local network the VM is attached to.",
+							Computed:            true,
+						},
+						"description": schema.StringAttribute{
+							MarkdownDescription: "Description of the virtual machine.",
 							Computed:            true,
 						},
 					},
@@ -119,10 +164,31 @@ func (d *VmsDataSource) Read(ctx context.Context, req datasource.ReadRequest, re
 
 	data.Vms = make([]VmModel, len(vms))
 	for i, vm := range vms {
-		data.Vms[i] = VmModel{
-			ID:   types.Int64Value(vm.ID),
-			Name: types.StringValue(vm.Name),
+		vmModel := VmModel{
+			ID:             types.Int64Value(vm.ID),
+			Name:           types.StringValue(vm.Name),
+			Status:         types.StringValue(vm.Status),
+			CPUCores:       types.Int64Value(vm.CPUCores),
+			RAM:            types.Int64Value(vm.RAM),
+			DiskSize:       types.Int64Value(vm.DiskSize),
+			DiskType:       types.StringValue(vm.DiskType),
+			PrivateIP:      types.StringValue(vm.PrivateIP),
+			LocalNetworkID: types.Int64Value(vm.LocalNetworkID),
 		}
+
+		if vm.PublicIP != "" {
+			vmModel.PublicIP = types.StringValue(vm.PublicIP)
+		} else {
+			vmModel.PublicIP = types.StringNull()
+		}
+
+		if vm.Description != "" {
+			vmModel.Description = types.StringValue(vm.Description)
+		} else {
+			vmModel.Description = types.StringNull()
+		}
+
+		data.Vms[i] = vmModel
 	}
 
 	tflog.Debug(ctx, "Successfully listed virtual machines", map[string]any{

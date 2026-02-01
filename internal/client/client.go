@@ -462,15 +462,17 @@ func (c *Client) DeletePublicIP(ctx context.Context, id int64, opts *RequestOpts
 
 // Vm represents a virtual machine.
 type Vm struct {
-	ID        int64  `json:"id"`
-	Name      string `json:"name"`
-	Status    string `json:"status"`
-	CPUCores  int64  `json:"cpuCores"`
-	RAM       int64  `json:"ram"`
-	DiskSize  int64  `json:"diskSize"`
-	DiskType  string `json:"diskType"`
-	PrivateIP string `json:"privateIp"`
-	PublicIP  string `json:"publicIp"`
+	ID             int64  `json:"id"`
+	Name           string `json:"name"`
+	Status         string `json:"status"`
+	CPUCores       int64  `json:"cpuCores"`
+	RAM            int64  `json:"ram"`
+	DiskSize       int64  `json:"diskSize"`
+	DiskType       string `json:"diskType"`
+	PrivateIP      string `json:"privateIp"`
+	PublicIP       string `json:"publicIp"`
+	LocalNetworkID int64  `json:"localNetworkId"`
+	Description    string `json:"description"`
 }
 
 // CreateVmRequest represents the request to create a VM.

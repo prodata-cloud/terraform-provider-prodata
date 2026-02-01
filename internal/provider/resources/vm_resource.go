@@ -319,10 +319,30 @@ func (r *VmResource) Read(ctx context.Context, req resource.ReadRequest, resp *r
 	}
 
 	data.Name = types.StringValue(vm.Name)
+	data.Status = types.StringValue(vm.Status)
+	data.CPUCores = types.Int64Value(vm.CPUCores)
+	data.RAM = types.Int64Value(vm.RAM)
+	data.DiskSize = types.Int64Value(vm.DiskSize)
+	data.DiskType = types.StringValue(vm.DiskType)
+	data.PrivateIP = types.StringValue(vm.PrivateIP)
+	data.LocalNetworkID = types.Int64Value(vm.LocalNetworkID)
+
+	if vm.PublicIP != "" {
+		data.PublicIP = types.StringValue(vm.PublicIP)
+	} else {
+		data.PublicIP = types.StringNull()
+	}
+
+	if vm.Description != "" {
+		data.Description = types.StringValue(vm.Description)
+	} else if !data.Description.IsNull() {
+		data.Description = types.StringNull()
+	}
 
 	tflog.Debug(ctx, "Read virtual machine", map[string]any{
-		"id":   vmID,
-		"name": vm.Name,
+		"id":     vmID,
+		"name":   vm.Name,
+		"status": vm.Status,
 	})
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
