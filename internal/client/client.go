@@ -486,7 +486,7 @@ type CreateVmRequest struct {
 	DiskSize       int64   `json:"diskSize"`
 	DiskType       string  `json:"diskType"`
 	LocalNetworkID int64   `json:"localNetworkId"`
-	PrivateIP      string  `json:"privateIp"`
+	PrivateIP      *string `json:"privateIp,omitempty"`
 	PublicIPID     *int64  `json:"publicIpId,omitempty"`
 	Password       string  `json:"password"`
 	SSHPublicKey   *string `json:"sshPublicKey,omitempty"`

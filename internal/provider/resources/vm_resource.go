@@ -132,10 +132,12 @@ func (r *VmResource) Schema(ctx context.Context, req resource.SchemaRequest, res
 				},
 			},
 			"private_ip": schema.StringAttribute{
-				MarkdownDescription: "The private IP address for the virtual machine.",
-				Required:            true,
+				MarkdownDescription: "The private IP address for the virtual machine. If not specified, an available IP will be auto-assigned from the local network.",
+				Optional:            true,
+				Computed:            true,
 				PlanModifiers: []planmodifier.String{
 					stringplanmodifier.RequiresReplace(),
+					stringplanmodifier.UseStateForUnknown(),
 				},
 			},
 			"public_ip_id": schema.Int64Attribute{
@@ -224,8 +226,12 @@ func (r *VmResource) Create(ctx context.Context, req resource.CreateRequest, res
 		DiskSize:       data.DiskSize.ValueInt64(),
 		DiskType:       data.DiskType.ValueString(),
 		LocalNetworkID: data.LocalNetworkID.ValueInt64(),
-		PrivateIP:      data.PrivateIP.ValueString(),
 		Password:       data.Password.ValueString(),
+	}
+
+	if !data.PrivateIP.IsNull() && !data.PrivateIP.IsUnknown() {
+		privateIP := data.PrivateIP.ValueString()
+		createReq.PrivateIP = &privateIP
 	}
 
 	if !data.PublicIPID.IsNull() && !data.PublicIPID.IsUnknown() {
@@ -253,7 +259,7 @@ func (r *VmResource) Create(ctx context.Context, req resource.CreateRequest, res
 		"disk_size":        createReq.DiskSize,
 		"disk_type":        createReq.DiskType,
 		"local_network_id": createReq.LocalNetworkID,
-		"private_ip":       createReq.PrivateIP,
+		"private_ip":       createReq.PrivateIP, // may be nil if auto-assigning
 	})
 
 	vm, err := r.client.CreateVm(ctx, createReq)
