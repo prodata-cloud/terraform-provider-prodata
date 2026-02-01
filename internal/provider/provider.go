@@ -150,6 +150,7 @@ func (p *ProDataProvider) Resources(ctx context.Context) []func() resource.Resou
 		resources.NewVolumeResource,
 		resources.NewLocalNetworkResource,
 		resources.NewPublicIPResource,
+		resources.NewPublicIPAttachmentResource,
 		resources.NewVmResource,
 	}
 }

@@ -552,6 +552,54 @@ func (c *Client) CreateVm(ctx context.Context, req CreateVmRequest) (*Vm, error)
 	return &vm, nil
 }
 
+// AttachPublicIPRequest represents the request to attach a public IP to a VM.
+type AttachPublicIPRequest struct {
+	PublicIPID int64 `json:"publicIpId"`
+}
+
+func (c *Client) AttachPublicIP(ctx context.Context, vmID int64, req AttachPublicIPRequest, opts *RequestOpts) (*Vm, error) {
+	path := fmt.Sprintf("/api/v2/vms/%d/public-ip", vmID)
+	params := url.Values{}
+	if opts != nil {
+		if opts.Region != "" {
+			params.Set("region", opts.Region)
+		}
+		if opts.ProjectTag != "" {
+			params.Set("projectTag", opts.ProjectTag)
+		}
+	}
+	if len(params) > 0 {
+		path = path + "?" + params.Encode()
+	}
+
+	var vm Vm
+	if err := c.Do(ctx, http.MethodPost, path, req, &vm, opts); err != nil {
+		return nil, err
+	}
+	return &vm, nil
+}
+
+func (c *Client) DetachPublicIP(ctx context.Context, vmID int64, opts *RequestOpts) error {
+	path := fmt.Sprintf("/api/v2/vms/%d/public-ip", vmID)
+	params := url.Values{}
+	if opts != nil {
+		if opts.Region != "" {
+			params.Set("region", opts.Region)
+		}
+		if opts.ProjectTag != "" {
+			params.Set("projectTag", opts.ProjectTag)
+		}
+	}
+	if len(params) > 0 {
+		path = path + "?" + params.Encode()
+	}
+
+	if err := c.Do(ctx, http.MethodDelete, path, nil, nil, opts); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (c *Client) DeleteVm(ctx context.Context, id int64, opts *RequestOpts) error {
 	path := fmt.Sprintf("/api/v2/vms/%d", id)
 
