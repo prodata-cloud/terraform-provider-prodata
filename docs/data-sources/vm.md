@@ -30,3 +30,12 @@ data "prodata_vm" "example" {
 ### Read-Only
 
 - `name` (String) The name of the virtual machine.
+- `status` (String) The current status of the virtual machine (RUNNING, STOPPED, etc.).
+- `cpu_cores` (Number) The number of CPU cores.
+- `ram` (Number) The amount of RAM in GB.
+- `disk_size` (Number) The size of the disk in GB.
+- `disk_type` (String) The type of disk (HDD, SSD, or NVME).
+- `private_ip` (String) The private IP address of the virtual machine.
+- `public_ip` (String) The public IP address assigned to the virtual machine (if any).
+- `local_network_id` (Number) The ID of the local network the VM is attached to.
+- `description` (String) Description of the virtual machine.
