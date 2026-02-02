@@ -537,6 +537,29 @@ func (c *Client) GetVm(ctx context.Context, id int64, opts *RequestOpts) (*Vm, e
 	return &vm, nil
 }
 
+// GetVmStatus returns a VM by ID, including VMs in ERROR status. Used for polling creation status.
+func (c *Client) GetVmStatus(ctx context.Context, id int64, opts *RequestOpts) (*Vm, error) {
+	path := fmt.Sprintf("/api/v2/vms/%d/status", id)
+	params := url.Values{}
+	if opts != nil {
+		if opts.Region != "" {
+			params.Set("region", opts.Region)
+		}
+		if opts.ProjectTag != "" {
+			params.Set("projectTag", opts.ProjectTag)
+		}
+	}
+	if len(params) > 0 {
+		path = path + "?" + params.Encode()
+	}
+
+	var vm Vm
+	if err := c.Do(ctx, http.MethodGet, path, nil, &vm, opts); err != nil {
+		return nil, err
+	}
+	return &vm, nil
+}
+
 func (c *Client) CreateVm(ctx context.Context, req CreateVmRequest) (*Vm, error) {
 	if req.Region == "" {
 		req.Region = c.Region
@@ -643,6 +666,30 @@ func (c *Client) DetachVolume(ctx context.Context, vmID int64, vmDiskID int64, o
 	}
 
 	if err := c.Do(ctx, http.MethodDelete, path, nil, nil, opts); err != nil {
+		return err
+	}
+	return nil
+}
+
+type RenameVmRequest struct {
+	Name string `json:"name"`
+}
+
+func (c *Client) RenameVm(ctx context.Context, id int64, req RenameVmRequest, opts *RequestOpts) error {
+	path := fmt.Sprintf("/api/v2/vms/%d/name", id)
+	params := url.Values{}
+	if opts != nil {
+		if opts.Region != "" {
+			params.Set("region", opts.Region)
+		}
+		if opts.ProjectTag != "" {
+			params.Set("projectTag", opts.ProjectTag)
+		}
+	}
+	if len(params) > 0 {
+		path = path + "?" + params.Encode()
+	}
+	if err := c.Do(ctx, http.MethodPatch, path, req, nil, opts); err != nil {
 		return err
 	}
 	return nil

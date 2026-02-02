@@ -3,6 +3,8 @@ package resources
 import (
 	"context"
 	"fmt"
+	"strings"
+	"time"
 
 	"terraform-provider-prodata/internal/client"
 
@@ -16,8 +18,9 @@ import (
 )
 
 var (
-	_ resource.Resource              = &VmResource{}
-	_ resource.ResourceWithConfigure = &VmResource{}
+	_ resource.Resource               = &VmResource{}
+	_ resource.ResourceWithConfigure  = &VmResource{}
+	_ resource.ResourceWithModifyPlan = &VmResource{}
 )
 
 type VmResource struct {
@@ -181,6 +184,33 @@ func (r *VmResource) Schema(ctx context.Context, req resource.SchemaRequest, res
 	}
 }
 
+func (r *VmResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	// Skip if creating or destroying (not replacing)
+	if req.State.Raw.IsNull() || req.Plan.Raw.IsNull() {
+		return
+	}
+
+	// This is a replacement (both state and plan exist, but RequiresReplace triggered).
+	// Warn that create_before_destroy will fail due to VM name uniqueness constraint.
+	var stateData, planData VmResourceModel
+	resp.Diagnostics.Append(req.State.Get(ctx, &stateData)...)
+	resp.Diagnostics.Append(req.Plan.Get(ctx, &planData)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	// If the name stays the same during replacement with create_before_destroy,
+	// the existing VM will be automatically renamed to "{name}-replacing" to avoid conflict.
+	if stateData.Name.Equal(planData.Name) {
+		resp.Diagnostics.AddWarning(
+			"Resource replacement with same name",
+			"This VM is being replaced but the name is unchanged. If you are using "+
+				"lifecycle { create_before_destroy = true }, the existing VM will be automatically "+
+				"renamed to allow the new VM to be created with the original name.",
+		)
+	}
+}
+
 func (r *VmResource) Configure(ctx context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
 	if req.ProviderData == nil {
 		return
@@ -196,6 +226,45 @@ func (r *VmResource) Configure(ctx context.Context, req resource.ConfigureReques
 	}
 
 	r.client = c
+}
+
+const (
+	vmPollInterval  = 5 * time.Second
+	vmCreateTimeout = 5 * time.Minute
+)
+
+// waitForVmReady polls the VM until it reaches a terminal state (RUNNING, STOPPED, or ERROR).
+func (r *VmResource) waitForVmReady(ctx context.Context, vmID int64, opts *client.RequestOpts) (*client.Vm, error) {
+	deadline := time.Now().Add(vmCreateTimeout)
+
+	for {
+		vm, err := r.client.GetVmStatus(ctx, vmID, opts)
+		if err != nil {
+			return nil, fmt.Errorf("polling VM status: %w", err)
+		}
+
+		tflog.Debug(ctx, "Polling VM status", map[string]any{
+			"id":     vmID,
+			"status": vm.Status,
+		})
+
+		switch vm.Status {
+		case "RUNNING", "STOPPED":
+			return vm, nil
+		case "ERROR":
+			return nil, fmt.Errorf("VM creation failed (id=%d, status=ERROR)", vmID)
+		}
+
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("timed out waiting for VM %d to become ready (last status: %s)", vmID, vm.Status)
+		}
+
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(vmPollInterval):
+		}
+	}
 }
 
 func (r *VmResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
@@ -263,32 +332,83 @@ func (r *VmResource) Create(ctx context.Context, req resource.CreateRequest, res
 	})
 
 	vm, err := r.client.CreateVm(ctx, createReq)
+	if err != nil && strings.Contains(err.Error(), "666") {
+		// Name conflict — likely a create_before_destroy replacement.
+		// Find the existing VM with that name and rename it, then retry.
+		tflog.Info(ctx, "VM name conflict detected, attempting to rename existing VM", map[string]any{
+			"name": createReq.Name,
+		})
+
+		opts := &client.RequestOpts{Region: region, ProjectTag: projectTag}
+		vms, listErr := r.client.GetVms(ctx, opts)
+		if listErr == nil {
+			for _, existing := range vms {
+				if existing.Name == createReq.Name {
+					newName := existing.Name + "-replacing"
+					tflog.Info(ctx, "Renaming existing VM", map[string]any{
+						"id":       existing.ID,
+						"old_name": existing.Name,
+						"new_name": newName,
+					})
+					renameErr := r.client.RenameVm(ctx, existing.ID, client.RenameVmRequest{Name: newName}, opts)
+					if renameErr != nil {
+						resp.Diagnostics.AddError(
+							"Unable to Create Virtual Machine",
+							fmt.Sprintf("Name conflict: a VM with name %q already exists (id=%d). "+
+								"Attempted to rename it but failed: %s", createReq.Name, existing.ID, renameErr.Error()),
+						)
+						return
+					}
+					// Retry create after rename
+					vm, err = r.client.CreateVm(ctx, createReq)
+					break
+				}
+			}
+		}
+	}
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to Create Virtual Machine", err.Error())
 		return
 	}
 
-	data.ID = types.Int64Value(vm.ID)
+	tflog.Info(ctx, "VM creation initiated, waiting for it to become ready", map[string]any{
+		"id":     vm.ID,
+		"name":   vm.Name,
+		"status": vm.Status,
+	})
+
+	// Poll until the VM reaches a ready state (RUNNING/STOPPED) or fails (ERROR).
+	opts := &client.RequestOpts{Region: region, ProjectTag: projectTag}
+	readyVm, waitErr := r.waitForVmReady(ctx, vm.ID, opts)
+	if waitErr != nil {
+		resp.Diagnostics.AddError(
+			"Virtual Machine Not Ready",
+			fmt.Sprintf("VM was created (id=%d) but failed to reach a ready state: %s", vm.ID, waitErr.Error()),
+		)
+		return
+	}
+
+	data.ID = types.Int64Value(readyVm.ID)
 	data.Region = types.StringValue(region)
 	data.ProjectTag = types.StringValue(projectTag)
-	data.Name = types.StringValue(vm.Name)
-	data.Status = types.StringValue(vm.Status)
-	data.CPUCores = types.Int64Value(vm.CPUCores)
-	data.RAM = types.Int64Value(vm.RAM)
-	data.DiskSize = types.Int64Value(vm.DiskSize)
-	data.DiskType = types.StringValue(vm.DiskType)
-	data.PrivateIP = types.StringValue(vm.PrivateIP)
+	data.Name = types.StringValue(readyVm.Name)
+	data.Status = types.StringValue(readyVm.Status)
+	data.CPUCores = types.Int64Value(readyVm.CPUCores)
+	data.RAM = types.Int64Value(readyVm.RAM)
+	data.DiskSize = types.Int64Value(readyVm.DiskSize)
+	data.DiskType = types.StringValue(readyVm.DiskType)
+	data.PrivateIP = types.StringValue(readyVm.PrivateIP)
 
-	if vm.PublicIP != "" {
-		data.PublicIP = types.StringValue(vm.PublicIP)
+	if readyVm.PublicIP != "" {
+		data.PublicIP = types.StringValue(readyVm.PublicIP)
 	} else {
 		data.PublicIP = types.StringNull()
 	}
 
-	tflog.Debug(ctx, "Created virtual machine", map[string]any{
-		"id":     vm.ID,
-		"name":   vm.Name,
-		"status": vm.Status,
+	tflog.Info(ctx, "Virtual machine is ready", map[string]any{
+		"id":     readyVm.ID,
+		"name":   readyVm.Name,
+		"status": readyVm.Status,
 	})
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
