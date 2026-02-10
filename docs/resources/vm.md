@@ -8,7 +8,7 @@ description: |-
 
 Manages a ProData virtual machine.
 
-~> **Note:** All attributes except computed ones require resource replacement when changed. VM updates are not supported - any change will destroy and recreate the VM.
+~> **Note:** Most attributes require resource replacement when changed (destroy and recreate). The `name` attribute can be updated in-place without recreating the VM.
 
 ## Example Usage
 
@@ -49,7 +49,7 @@ resource "prodata_vm" "web_server" {
 
 ### Required
 
-- `name` (String) The name of the virtual machine. Must be 3-63 characters, contain at least one letter, only letters, numbers, and hyphens. Changing this forces a new resource.
+- `name` (String) The name of the virtual machine. Must be 3-63 characters, contain at least one letter, only letters, numbers, and hyphens. Can be updated in-place.
 - `image_id` (Number) The ID of the image to use for the virtual machine. Changing this forces a new resource.
 - `cpu_cores` (Number) The number of CPU cores for the virtual machine. Minimum 1. Changing this forces a new resource.
 - `ram` (Number) The amount of RAM in GB for the virtual machine. Minimum 1. Changing this forces a new resource.

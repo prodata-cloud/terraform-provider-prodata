@@ -10,7 +10,7 @@ Attaches a ProData volume to a virtual machine. Destroying this resource detache
 
 ~> **Note:** All attributes require resource replacement when changed. Any change will detach and reattach the volume.
 
-~> **Warning:** Detaching a volume requires the VM to be stopped (Proxmox SCSI limitation). Stop the VM before destroying this resource.
+~> **Note:** If the VM is running when this resource is destroyed, the provider will automatically stop the VM, detach the volume, and restart the VM.
 
 ## Example Usage
 

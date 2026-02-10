@@ -715,3 +715,43 @@ func (c *Client) DeleteVm(ctx context.Context, id int64, opts *RequestOpts) erro
 	}
 	return nil
 }
+
+func (c *Client) StopVm(ctx context.Context, id int64, opts *RequestOpts) error {
+	path := fmt.Sprintf("/api/v2/vms/%d/stop", id)
+	params := url.Values{}
+	if opts != nil {
+		if opts.Region != "" {
+			params.Set("region", opts.Region)
+		}
+		if opts.ProjectTag != "" {
+			params.Set("projectTag", opts.ProjectTag)
+		}
+	}
+	if len(params) > 0 {
+		path = path + "?" + params.Encode()
+	}
+	if err := c.Do(ctx, http.MethodPost, path, nil, nil, opts); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (c *Client) StartVm(ctx context.Context, id int64, opts *RequestOpts) error {
+	path := fmt.Sprintf("/api/v2/vms/%d/start", id)
+	params := url.Values{}
+	if opts != nil {
+		if opts.Region != "" {
+			params.Set("region", opts.Region)
+		}
+		if opts.ProjectTag != "" {
+			params.Set("projectTag", opts.ProjectTag)
+		}
+	}
+	if len(params) > 0 {
+		path = path + "?" + params.Encode()
+	}
+	if err := c.Do(ctx, http.MethodPost, path, nil, nil, opts); err != nil {
+		return err
+	}
+	return nil
+}

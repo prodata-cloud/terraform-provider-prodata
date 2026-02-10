@@ -88,9 +88,6 @@ func (r *VmResource) Schema(ctx context.Context, req resource.SchemaRequest, res
 			"name": schema.StringAttribute{
 				MarkdownDescription: "The name of the virtual machine. Must be 3-63 characters, contain at least one letter, only letters, numbers, and hyphens.",
 				Required:            true,
-				PlanModifiers: []planmodifier.String{
-					stringplanmodifier.RequiresReplace(),
-				},
 			},
 			"image_id": schema.Int64Attribute{
 				MarkdownDescription: "The ID of the image to use for the virtual machine.",
@@ -475,11 +472,72 @@ func (r *VmResource) Read(ctx context.Context, req resource.ReadRequest, resp *r
 }
 
 func (r *VmResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
-	// VM updates are not supported - all changes require replacement
-	resp.Diagnostics.AddError(
-		"Update Not Supported",
-		"Virtual machine updates are not supported. All changes require resource replacement.",
-	)
+	var state, plan VmResourceModel
+
+	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	opts := &client.RequestOpts{}
+	if !state.Region.IsNull() && !state.Region.IsUnknown() {
+		opts.Region = state.Region.ValueString()
+	}
+	if !state.ProjectTag.IsNull() && !state.ProjectTag.IsUnknown() {
+		opts.ProjectTag = state.ProjectTag.ValueString()
+	}
+
+	// Rename VM if name changed
+	if !state.Name.Equal(plan.Name) {
+		vmID := state.ID.ValueInt64()
+		newName := plan.Name.ValueString()
+
+		tflog.Info(ctx, "Renaming virtual machine", map[string]any{
+			"id":       vmID,
+			"old_name": state.Name.ValueString(),
+			"new_name": newName,
+		})
+
+		err := r.client.RenameVm(ctx, vmID, client.RenameVmRequest{Name: newName}, opts)
+		if err != nil {
+			resp.Diagnostics.AddError("Unable to Rename Virtual Machine", err.Error())
+			return
+		}
+	}
+
+	// Read back the current VM state
+	vm, err := r.client.GetVm(ctx, state.ID.ValueInt64(), opts)
+	if err != nil {
+		resp.Diagnostics.AddError("Unable to Read Virtual Machine after update", err.Error())
+		return
+	}
+
+	plan.ID = state.ID
+	plan.Region = state.Region
+	plan.ProjectTag = state.ProjectTag
+	plan.Name = types.StringValue(vm.Name)
+	plan.Status = types.StringValue(vm.Status)
+	plan.CPUCores = types.Int64Value(vm.CPUCores)
+	plan.RAM = types.Int64Value(vm.RAM)
+	plan.DiskSize = types.Int64Value(vm.DiskSize)
+	plan.DiskType = types.StringValue(vm.DiskType)
+	plan.PrivateIP = types.StringValue(vm.PrivateIP)
+	plan.LocalNetworkID = types.Int64Value(vm.LocalNetworkID)
+
+	if vm.PublicIP != "" {
+		plan.PublicIP = types.StringValue(vm.PublicIP)
+	} else {
+		plan.PublicIP = types.StringNull()
+	}
+
+	if vm.Description != "" {
+		plan.Description = types.StringValue(vm.Description)
+	} else if !plan.Description.IsNull() {
+		plan.Description = types.StringNull()
+	}
+
+	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
 func (r *VmResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {

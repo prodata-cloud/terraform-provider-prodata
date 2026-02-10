@@ -3,6 +3,7 @@ package resources
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"terraform-provider-prodata/internal/client"
 
@@ -228,8 +229,37 @@ func (r *VolumeAttachmentResource) Delete(ctx context.Context, req resource.Dele
 		"attached_volume_id": attachedVolumeID,
 	})
 
-	err := r.client.DetachVolume(ctx, vmID, attachedVolumeID, opts)
+	// Check VM status — if running, stop it first (SCSI hot-unplug not supported)
+	vm, err := r.client.GetVm(ctx, vmID, opts)
 	if err != nil {
+		resp.Diagnostics.AddError("Unable to Read VM before detach", err.Error())
+		return
+	}
+
+	needsRestart := false
+	if vm.Status == "RUNNING" {
+		tflog.Info(ctx, "VM is running, stopping before volume detach", map[string]any{"vm_id": vmID})
+
+		if err := r.client.StopVm(ctx, vmID, opts); err != nil {
+			resp.Diagnostics.AddError("Unable to Stop VM for volume detach", err.Error())
+			return
+		}
+		needsRestart = true
+
+		// Poll until VM is STOPPED (timeout 5 minutes)
+		if err := r.waitForVmStatus(ctx, vmID, "STOPPED", 5*time.Minute, opts); err != nil {
+			resp.Diagnostics.AddError("VM did not reach STOPPED state", err.Error())
+			return
+		}
+	}
+
+	err = r.client.DetachVolume(ctx, vmID, attachedVolumeID, opts)
+	if err != nil {
+		// Try to restart VM even if detach fails
+		if needsRestart {
+			tflog.Warn(ctx, "Detach failed, attempting to restart VM", map[string]any{"vm_id": vmID})
+			_ = r.client.StartVm(ctx, vmID, opts)
+		}
 		resp.Diagnostics.AddError("Unable to Detach Volume", err.Error())
 		return
 	}
@@ -238,6 +268,47 @@ func (r *VolumeAttachmentResource) Delete(ctx context.Context, req resource.Dele
 		"vm_id":              vmID,
 		"attached_volume_id": attachedVolumeID,
 	})
+
+	// Restart VM if we stopped it
+	if needsRestart {
+		tflog.Info(ctx, "Restarting VM after volume detach", map[string]any{"vm_id": vmID})
+		if err := r.client.StartVm(ctx, vmID, opts); err != nil {
+			resp.Diagnostics.AddWarning(
+				"Volume detached but VM could not be restarted",
+				fmt.Sprintf("The volume was detached successfully, but the VM failed to start: %s. Please start it manually.", err.Error()),
+			)
+		}
+	}
+}
+
+func (r *VolumeAttachmentResource) waitForVmStatus(ctx context.Context, vmID int64, targetStatus string, timeout time.Duration, opts *client.RequestOpts) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timed out waiting for VM %d to reach status %s", vmID, targetStatus)
+		}
+
+		vm, err := r.client.GetVm(ctx, vmID, opts)
+		if err != nil {
+			return fmt.Errorf("failed to get VM status: %w", err)
+		}
+
+		tflog.Debug(ctx, "Polling VM status", map[string]any{
+			"vm_id":         vmID,
+			"current_status": vm.Status,
+			"target_status":  targetStatus,
+		})
+
+		if vm.Status == targetStatus {
+			return nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(5 * time.Second):
+		}
+	}
 }
 
 func (r *VolumeAttachmentResource) buildOpts(data *VolumeAttachmentResourceModel) *client.RequestOpts {
