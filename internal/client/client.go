@@ -319,8 +319,21 @@ func (c *Client) CreateLocalNetwork(ctx context.Context, req CreateLocalNetworkR
 }
 
 func (c *Client) GetLocalNetwork(ctx context.Context, id int64, opts *RequestOpts) (*LocalNetwork, error) {
-	var network LocalNetwork
 	path := fmt.Sprintf("/api/v2/local-networks/%d", id)
+	params := url.Values{}
+	if opts != nil {
+		if opts.Region != "" {
+			params.Set("region", opts.Region)
+		}
+		if opts.ProjectTag != "" {
+			params.Set("projectTag", opts.ProjectTag)
+		}
+	}
+	if len(params) > 0 {
+		path = path + "?" + params.Encode()
+	}
+
+	var network LocalNetwork
 	if err := c.Do(ctx, http.MethodGet, path, nil, &network, opts); err != nil {
 		return nil, err
 	}
@@ -388,8 +401,21 @@ func (c *Client) GetPublicIPs(ctx context.Context, opts *RequestOpts) ([]PublicI
 }
 
 func (c *Client) GetPublicIP(ctx context.Context, id int64, opts *RequestOpts) (*PublicIP, error) {
-	var ip PublicIP
 	path := fmt.Sprintf("/api/v2/public-ips/%d", id)
+	params := url.Values{}
+	if opts != nil {
+		if opts.Region != "" {
+			params.Set("region", opts.Region)
+		}
+		if opts.ProjectTag != "" {
+			params.Set("projectTag", opts.ProjectTag)
+		}
+	}
+	if len(params) > 0 {
+		path = path + "?" + params.Encode()
+	}
+
+	var ip PublicIP
 	if err := c.Do(ctx, http.MethodGet, path, nil, &ip, opts); err != nil {
 		return nil, err
 	}
