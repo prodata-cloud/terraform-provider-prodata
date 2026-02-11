@@ -249,7 +249,7 @@ func (r *VmResource) waitForVmReady(ctx context.Context, vmID int64, opts *clien
 		case "RUNNING", "STOPPED":
 			return vm, nil
 		case "ERROR":
-			return nil, fmt.Errorf("VM creation failed (id=%d, status=ERROR)", vmID)
+			return vm, fmt.Errorf("VM creation failed (id=%d, status=ERROR)", vmID)
 		}
 
 		if time.Now().After(deadline) {
@@ -377,38 +377,50 @@ func (r *VmResource) Create(ctx context.Context, req resource.CreateRequest, res
 	// Poll until the VM reaches a ready state (RUNNING/STOPPED) or fails (ERROR).
 	opts := &client.RequestOpts{Region: region, ProjectTag: projectTag}
 	readyVm, waitErr := r.waitForVmReady(ctx, vm.ID, opts)
-	if waitErr != nil {
-		resp.Diagnostics.AddError(
-			"Virtual Machine Not Ready",
-			fmt.Sprintf("VM was created (id=%d) but failed to reach a ready state: %s", vm.ID, waitErr.Error()),
-		)
-		return
+
+	// Save state even if VM ended up in ERROR — prevents desync on retry.
+	resultVm := readyVm
+	if resultVm == nil {
+		resultVm = vm
 	}
 
-	data.ID = types.Int64Value(readyVm.ID)
+	data.ID = types.Int64Value(resultVm.ID)
 	data.Region = types.StringValue(region)
 	data.ProjectTag = types.StringValue(projectTag)
-	data.Name = types.StringValue(readyVm.Name)
-	data.Status = types.StringValue(readyVm.Status)
-	data.CPUCores = types.Int64Value(readyVm.CPUCores)
-	data.RAM = types.Int64Value(readyVm.RAM)
-	data.DiskSize = types.Int64Value(readyVm.DiskSize)
-	data.DiskType = types.StringValue(readyVm.DiskType)
-	data.PrivateIP = types.StringValue(readyVm.PrivateIP)
+	data.Name = types.StringValue(resultVm.Name)
+	data.Status = types.StringValue(resultVm.Status)
+	data.CPUCores = types.Int64Value(resultVm.CPUCores)
+	data.RAM = types.Int64Value(resultVm.RAM)
+	data.DiskSize = types.Int64Value(resultVm.DiskSize)
+	data.DiskType = types.StringValue(resultVm.DiskType)
+	data.PrivateIP = types.StringValue(resultVm.PrivateIP)
 
-	if readyVm.PublicIP != "" {
-		data.PublicIP = types.StringValue(readyVm.PublicIP)
+	if resultVm.PublicIP != "" {
+		data.PublicIP = types.StringValue(resultVm.PublicIP)
 	} else {
 		data.PublicIP = types.StringNull()
 	}
 
-	tflog.Info(ctx, "Virtual machine is ready", map[string]any{
-		"id":     readyVm.ID,
-		"name":   readyVm.Name,
-		"status": readyVm.Status,
-	})
+	if resultVm.Description != "" {
+		data.Description = types.StringValue(resultVm.Description)
+	}
 
+	// Save state BEFORE returning error — prevents desync on retry
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
+
+	if waitErr != nil {
+		resp.Diagnostics.AddError(
+			"Virtual Machine Not Ready",
+			fmt.Sprintf("VM was created (id=%d) but failed to reach a ready state: %s", resultVm.ID, waitErr.Error()),
+		)
+		return
+	}
+
+	tflog.Info(ctx, "Virtual machine is ready", map[string]any{
+		"id":     resultVm.ID,
+		"name":   resultVm.Name,
+		"status": resultVm.Status,
+	})
 }
 
 func (r *VmResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
