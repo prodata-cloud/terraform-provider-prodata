@@ -384,15 +384,11 @@ func (r *VmResource) Create(ctx context.Context, req resource.CreateRequest, res
 		resultVm = vm
 	}
 
+	// Set Computed-only attributes from API response
 	data.ID = types.Int64Value(resultVm.ID)
 	data.Region = types.StringValue(region)
 	data.ProjectTag = types.StringValue(projectTag)
-	data.Name = types.StringValue(resultVm.Name)
 	data.Status = types.StringValue(resultVm.Status)
-	data.CPUCores = types.Int64Value(resultVm.CPUCores)
-	data.RAM = types.Int64Value(resultVm.RAM)
-	data.DiskSize = types.Int64Value(resultVm.DiskSize)
-	data.DiskType = types.StringValue(resultVm.DiskType)
 	data.PrivateIP = types.StringValue(resultVm.PrivateIP)
 
 	if resultVm.PublicIP != "" {
@@ -401,6 +397,12 @@ func (r *VmResource) Create(ctx context.Context, req resource.CreateRequest, res
 		data.PublicIP = types.StringNull()
 	}
 
+	// Keep plan values for Required+ForceNew attributes (name, cpu_cores, ram,
+	// disk_size, disk_type). The API may temporarily return different values during
+	// provisioning (e.g., template defaults before final config is applied).
+	// These attributes are immutable (RequiresReplace), so the plan values are
+	// the source of truth.
+	data.Name = types.StringValue(resultVm.Name)
 	if resultVm.Description != "" {
 		data.Description = types.StringValue(resultVm.Description)
 	}
