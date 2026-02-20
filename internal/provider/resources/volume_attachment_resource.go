@@ -3,6 +3,7 @@ package resources
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"terraform-provider-prodata/internal/client"
@@ -14,6 +15,11 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-log/tflog"
+)
+
+const (
+	volumeAttachRetryInterval = 5 * time.Second
+	volumeAttachTimeout       = 2 * time.Minute
 )
 
 var (
@@ -129,7 +135,9 @@ func (r *VolumeAttachmentResource) Create(ctx context.Context, req resource.Crea
 		"volume_id": attachReq.VolumeID,
 	})
 
-	volume, err := r.client.AttachVolume(ctx, vmID, attachReq, opts)
+	// Retry on error 627 (VM locked by another operation) — happens when
+	// Terraform attaches multiple volumes to the same VM in parallel.
+	volume, err := r.attachVolumeWithRetry(ctx, vmID, attachReq, opts)
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to Attach Volume", err.Error())
 		return
@@ -155,6 +163,41 @@ func (r *VolumeAttachmentResource) Create(ctx context.Context, req resource.Crea
 	})
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
+}
+
+// attachVolumeWithRetry retries volume attachment when the VM is locked by
+// another operation (error 627). This handles the case where Terraform sends
+// multiple volume attachment requests for the same VM in parallel.
+func (r *VolumeAttachmentResource) attachVolumeWithRetry(ctx context.Context, vmID int64, req client.AttachVolumeRequest, opts *client.RequestOpts) (*client.Volume, error) {
+	deadline := time.Now().Add(volumeAttachTimeout)
+
+	for {
+		volume, err := r.client.AttachVolume(ctx, vmID, req, opts)
+		if err == nil {
+			return volume, nil
+		}
+
+		// Only retry on error 627 (VM locked / unhandled error during concurrent ops)
+		if !strings.Contains(err.Error(), "627") {
+			return nil, err
+		}
+
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("timed out waiting to attach volume (VM %d is busy): %w", vmID, err)
+		}
+
+		tflog.Info(ctx, "VM is busy (error 627), retrying volume attachment", map[string]any{
+			"vm_id":     vmID,
+			"volume_id": req.VolumeID,
+			"retry_in":  volumeAttachRetryInterval.String(),
+		})
+
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(volumeAttachRetryInterval):
+		}
+	}
 }
 
 func (r *VolumeAttachmentResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
