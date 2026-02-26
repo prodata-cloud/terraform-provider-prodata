@@ -65,7 +65,7 @@ resource "prodata_volume_attachment" "data" {
 - `region` (String) Region ID override. If not specified, uses the provider's default region. Changing this forces a new resource.
 - `project_tag` (String) Project tag override. If not specified, uses the provider's default project_tag. Changing this forces a new resource.
 
-### Read-Only
+### Attribute Reference
 
 - `attached_volume_id` (Number) The server-generated ID of the attached volume (VmDisk). This differs from `volume_id` and is computed upon successful attachment.
 

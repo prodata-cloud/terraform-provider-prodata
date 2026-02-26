@@ -27,7 +27,7 @@ data "prodata_vm" "example" {
 - `region` (String) Region ID override. If not specified, uses the provider's default region.
 - `project_tag` (String) Project tag override. If not specified, uses the provider's default project tag.
 
-### Read-Only
+### Attribute Reference
 
 - `name` (String) The name of the virtual machine.
 - `status` (String) The current status of the virtual machine (RUNNING, STOPPED, etc.).

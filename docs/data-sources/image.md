@@ -27,7 +27,7 @@ Exactly one of `name` or `slug` must be specified.
 - `region` (String) Region ID override. If not specified, uses the provider's default region.
 - `project_tag` (String) Project tag override. If not specified, uses the provider's default project tag.
 
-### Read-Only
+### Attribute Reference
 
 - `id` (Number) The unique identifier of the image.
 - `is_custom` (Boolean) `true` if this is a custom image, `false` if it's an OS template.

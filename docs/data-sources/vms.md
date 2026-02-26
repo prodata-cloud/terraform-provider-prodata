@@ -21,7 +21,7 @@ data "prodata_vms" "all" {}
 - `region` (String) Region ID override. If not specified, uses the provider's default region.
 - `project_tag` (String) Project tag override. If not specified, uses the provider's default project tag.
 
-### Read-Only
+### Attribute Reference
 
 - `vms` (List of Object) List of available virtual machines. Each virtual machine has the following attributes:
   - `id` (Number) The unique identifier of the virtual machine.

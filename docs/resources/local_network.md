@@ -33,7 +33,7 @@ resource "prodata_local_network" "example" {
 - `region` (String) Region where the local network will be created. If not specified, uses the provider's default region. Changing this forces a new resource.
 - `project_tag` (String) Project tag where the local network will be created. If not specified, uses the provider's default project_tag. Changing this forces a new resource.
 
-### Read-Only
+### Attribute Reference
 
 - `id` (Number) The unique identifier of the local network.
 

@@ -21,7 +21,7 @@ data "prodata_public_ips" "all" {}
 - `region` (String) Region ID override. If not specified, uses the provider's default region.
 - `project_tag` (String) Project tag override. If not specified, uses the provider's default project tag.
 
-### Read-Only
+### Attribute Reference
 
 - `public_ips` (List of Object) List of available public IPs. Each public IP has the following attributes:
   - `id` (Number) The unique identifier of the public IP.

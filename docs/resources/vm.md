@@ -67,7 +67,7 @@ resource "prodata_vm" "web_server" {
 - `ssh_public_key` (String) SSH public key for authentication. Changing this forces a new resource.
 - `description` (String) Description of the virtual machine. Changing this forces a new resource.
 
-### Read-Only
+### Attribute Reference
 
 - `id` (Number) The unique identifier of the virtual machine.
 - `status` (String) The current status of the virtual machine (CREATING, RUNNING, STOPPED, etc.).

@@ -21,7 +21,7 @@ data "prodata_volumes" "all" {}
 - `region` (String) Region ID override. If not specified, uses the provider's default region.
 - `project_tag` (String) Project tag override. If not specified, uses the provider's default project tag.
 
-### Read-Only
+### Attribute Reference
 
 - `volumes` (List of Object) List of available volumes. Each volume has the following attributes:
   - `id` (Number) The unique identifier of the volume.

@@ -3,6 +3,8 @@ package resources
 import (
 	"context"
 	"fmt"
+	"strings"
+	"time"
 
 	"terraform-provider-prodata/internal/client"
 
@@ -13,6 +15,11 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-log/tflog"
+)
+
+const (
+	localNetworkRetryInterval = 5 * time.Second
+	localNetworkRetryTimeout  = 2 * time.Minute
 )
 
 var (
@@ -144,7 +151,9 @@ func (r *LocalNetworkResource) Create(ctx context.Context, req resource.CreateRe
 		"gateway":     createReq.Gateway,
 	})
 
-	network, err := r.client.CreateLocalNetwork(ctx, createReq)
+	// Retry on error 627 (locked by another operation) — happens when
+	// Terraform creates multiple local networks in parallel.
+	network, err := r.createLocalNetworkWithRetry(ctx, createReq)
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to Create Local Network", err.Error())
 		return
@@ -163,6 +172,39 @@ func (r *LocalNetworkResource) Create(ctx context.Context, req resource.CreateRe
 	})
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
+}
+
+// createLocalNetworkWithRetry retries local network creation when the server
+// returns error 627 (another network operation is in progress for this user/region).
+func (r *LocalNetworkResource) createLocalNetworkWithRetry(ctx context.Context, req client.CreateLocalNetworkRequest) (*client.LocalNetwork, error) {
+	deadline := time.Now().Add(localNetworkRetryTimeout)
+
+	for {
+		network, err := r.client.CreateLocalNetwork(ctx, req)
+		if err == nil {
+			return network, nil
+		}
+
+		// Only retry on error 627 (locked by another operation)
+		if !strings.Contains(err.Error(), "627") {
+			return nil, err
+		}
+
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("timed out waiting to create local network %q (another operation in progress): %w", req.Name, err)
+		}
+
+		tflog.Info(ctx, "Another network operation in progress (error 627), retrying", map[string]any{
+			"name":     req.Name,
+			"retry_in": localNetworkRetryInterval.String(),
+		})
+
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(localNetworkRetryInterval):
+		}
+	}
 }
 
 func (r *LocalNetworkResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
@@ -282,8 +324,8 @@ func (r *LocalNetworkResource) Delete(ctx context.Context, req resource.DeleteRe
 		"project_tag": opts.ProjectTag,
 	})
 
-	err := r.client.DeleteLocalNetwork(ctx, networkID, opts)
-	if err != nil {
+	// Retry on error 627 (locked by another operation)
+	if err := r.deleteLocalNetworkWithRetry(ctx, networkID, opts); err != nil {
 		resp.Diagnostics.AddError("Unable to Delete Local Network", err.Error())
 		return
 	}
@@ -291,4 +333,34 @@ func (r *LocalNetworkResource) Delete(ctx context.Context, req resource.DeleteRe
 	tflog.Debug(ctx, "Deleted local network", map[string]any{
 		"id": networkID,
 	})
+}
+
+func (r *LocalNetworkResource) deleteLocalNetworkWithRetry(ctx context.Context, id int64, opts *client.RequestOpts) error {
+	deadline := time.Now().Add(localNetworkRetryTimeout)
+
+	for {
+		err := r.client.DeleteLocalNetwork(ctx, id, opts)
+		if err == nil {
+			return nil
+		}
+
+		if !strings.Contains(err.Error(), "627") {
+			return err
+		}
+
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timed out waiting to delete local network %d (another operation in progress): %w", id, err)
+		}
+
+		tflog.Info(ctx, "Another network operation in progress (error 627), retrying delete", map[string]any{
+			"id":       id,
+			"retry_in": localNetworkRetryInterval.String(),
+		})
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(localNetworkRetryInterval):
+		}
+	}
 }

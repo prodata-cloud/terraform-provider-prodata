@@ -21,7 +21,7 @@ data "prodata_local_networks" "all" {}
 - `region` (String) Region ID override. If not specified, uses the provider's default region.
 - `project_tag` (String) Project tag override. If not specified, uses the provider's default project tag.
 
-### Read-Only
+### Attribute Reference
 
 - `local_networks` (List of Object) List of available local networks. Each local network has the following attributes:
   - `id` (Number) The unique identifier of the local network.

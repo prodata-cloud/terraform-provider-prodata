@@ -61,7 +61,7 @@ resource "prodata_public_ip_attachment" "example" {
 - `region` (String) Region ID override. If not specified, uses the provider's default region. Changing this forces a new resource.
 - `project_tag` (String) Project tag override. If not specified, uses the provider's default project_tag. Changing this forces a new resource.
 
-### Read-Only
+### Attribute Reference
 
 - `public_ip` (String) The public IP address string assigned to the VM.
 

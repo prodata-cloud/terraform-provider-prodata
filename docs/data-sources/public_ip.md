@@ -27,7 +27,7 @@ data "prodata_public_ip" "example" {
 - `region` (String) Region ID override. If not specified, uses the provider's default region.
 - `project_tag` (String) Project tag override. If not specified, uses the provider's default project tag.
 
-### Read-Only
+### Attribute Reference
 
 - `name` (String) The name of the public IP.
 - `ip` (String) The allocated public IP address.
