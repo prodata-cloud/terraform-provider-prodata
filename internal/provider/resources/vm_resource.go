@@ -451,6 +451,13 @@ func (r *VmResource) Read(ctx context.Context, req resource.ReadRequest, resp *r
 
 	vm, err := r.client.GetVm(ctx, vmID, opts)
 	if err != nil {
+		if strings.Contains(err.Error(), "601") || strings.Contains(err.Error(), "404") {
+			tflog.Warn(ctx, "VM not found, removing from state", map[string]any{
+				"id": vmID,
+			})
+			resp.State.RemoveResource(ctx)
+			return
+		}
 		resp.Diagnostics.AddError("Unable to Read Virtual Machine", err.Error())
 		return
 	}

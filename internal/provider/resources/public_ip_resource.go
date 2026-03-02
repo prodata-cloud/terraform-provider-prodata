@@ -3,6 +3,7 @@ package resources
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"terraform-provider-prodata/internal/client"
 
@@ -198,6 +199,13 @@ func (r *PublicIPResource) Read(ctx context.Context, req resource.ReadRequest, r
 
 	ip, err := r.client.GetPublicIP(ctx, ipID, opts)
 	if err != nil {
+		if strings.Contains(err.Error(), "703") || strings.Contains(err.Error(), "404") {
+			tflog.Warn(ctx, "Public IP not found, removing from state", map[string]any{
+				"id": ipID,
+			})
+			resp.State.RemoveResource(ctx)
+			return
+		}
 		resp.Diagnostics.AddError("Unable to Read Public IP", err.Error())
 		return
 	}

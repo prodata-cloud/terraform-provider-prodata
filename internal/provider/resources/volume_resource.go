@@ -3,6 +3,8 @@ package resources
 import (
 	"context"
 	"fmt"
+	"strings"
+	"time"
 
 	"terraform-provider-prodata/internal/client"
 
@@ -13,6 +15,11 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-log/tflog"
+)
+
+const (
+	volumeRetryInterval = 5 * time.Second
+	volumeRetryTimeout  = 2 * time.Minute
 )
 
 var (
@@ -144,7 +151,7 @@ func (r *VolumeResource) Create(ctx context.Context, req resource.CreateRequest,
 		"size":        createReq.Size,
 	})
 
-	volume, err := r.client.CreateVolume(ctx, createReq)
+	volume, err := r.createVolumeWithRetry(ctx, createReq)
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to Create Volume", err.Error())
 		return
@@ -192,6 +199,13 @@ func (r *VolumeResource) Read(ctx context.Context, req resource.ReadRequest, res
 
 	volume, err := r.client.GetVolume(ctx, volumeID, opts)
 	if err != nil {
+		if strings.Contains(err.Error(), "703") || strings.Contains(err.Error(), "404") {
+			tflog.Warn(ctx, "Volume not found, removing from state", map[string]any{
+				"id": volumeID,
+			})
+			resp.State.RemoveResource(ctx)
+			return
+		}
 		resp.Diagnostics.AddError("Unable to Read Volume", err.Error())
 		return
 	}
@@ -291,4 +305,35 @@ func (r *VolumeResource) Delete(ctx context.Context, req resource.DeleteRequest,
 	tflog.Debug(ctx, "Deleted volume", map[string]any{
 		"id": volumeID,
 	})
+}
+
+// createVolumeWithRetry retries volume creation when the server returns error 627.
+func (r *VolumeResource) createVolumeWithRetry(ctx context.Context, req client.CreateVolumeRequest) (*client.Volume, error) {
+	deadline := time.Now().Add(volumeRetryTimeout)
+
+	for {
+		volume, err := r.client.CreateVolume(ctx, req)
+		if err == nil {
+			return volume, nil
+		}
+
+		if !strings.Contains(err.Error(), "627") {
+			return nil, err
+		}
+
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("timed out waiting to create volume %q (error 627): %w", req.Name, err)
+		}
+
+		tflog.Info(ctx, "Volume creation failed with error 627, retrying", map[string]any{
+			"name":     req.Name,
+			"retry_in": volumeRetryInterval.String(),
+		})
+
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(volumeRetryInterval):
+		}
+	}
 }

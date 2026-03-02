@@ -234,6 +234,13 @@ func (r *LocalNetworkResource) Read(ctx context.Context, req resource.ReadReques
 
 	network, err := r.client.GetLocalNetwork(ctx, networkID, opts)
 	if err != nil {
+		if strings.Contains(err.Error(), "703") || strings.Contains(err.Error(), "404") {
+			tflog.Warn(ctx, "Local network not found, removing from state", map[string]any{
+				"id": networkID,
+			})
+			resp.State.RemoveResource(ctx)
+			return
+		}
 		resp.Diagnostics.AddError("Unable to Read Local Network", err.Error())
 		return
 	}
