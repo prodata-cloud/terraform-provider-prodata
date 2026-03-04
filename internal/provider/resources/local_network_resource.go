@@ -155,8 +155,25 @@ func (r *LocalNetworkResource) Create(ctx context.Context, req resource.CreateRe
 	// Terraform creates multiple local networks in parallel.
 	network, err := r.createLocalNetworkWithRetry(ctx, createReq)
 	if err != nil {
-		resp.Diagnostics.AddError("Unable to Create Local Network", err.Error())
-		return
+		// Error 614: network with this name already exists — adopt it into state.
+		// This happens when a previous create succeeded on the server but Terraform
+		// lost track of the state (e.g., timeout, interrupted apply).
+		if strings.Contains(err.Error(), "614") {
+			existing, adoptErr := r.findLocalNetworkByName(ctx, createReq.Name, createReq.Region, createReq.ProjectTag)
+			if adoptErr != nil {
+				resp.Diagnostics.AddError("Unable to Create Local Network",
+					fmt.Sprintf("network %q already exists but failed to look it up: %s (original error: %s)", createReq.Name, adoptErr, err))
+				return
+			}
+			tflog.Info(ctx, "Local network already exists, adopting into state", map[string]any{
+				"id":   existing.ID,
+				"name": existing.Name,
+			})
+			network = existing
+		} else {
+			resp.Diagnostics.AddError("Unable to Create Local Network", err.Error())
+			return
+		}
 	}
 
 	data.ID = types.Int64Value(network.ID)
@@ -172,6 +189,24 @@ func (r *LocalNetworkResource) Create(ctx context.Context, req resource.CreateRe
 	})
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
+}
+
+// findLocalNetworkByName looks up an existing local network by name.
+func (r *LocalNetworkResource) findLocalNetworkByName(ctx context.Context, name, region, projectTag string) (*client.LocalNetwork, error) {
+	opts := &client.RequestOpts{
+		Region:     region,
+		ProjectTag: projectTag,
+	}
+	networks, err := r.client.GetLocalNetworks(ctx, opts)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list local networks: %w", err)
+	}
+	for i := range networks {
+		if networks[i].Name == name {
+			return &networks[i], nil
+		}
+	}
+	return nil, fmt.Errorf("local network %q not found in list", name)
 }
 
 // createLocalNetworkWithRetry retries local network creation when the server
