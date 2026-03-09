@@ -721,6 +721,56 @@ func (c *Client) RenameVm(ctx context.Context, id int64, req RenameVmRequest, op
 	return nil
 }
 
+type UpdateVmResourcesRequest struct {
+	CPUCores int64 `json:"cpuCores"`
+	RAM      int64 `json:"ram"`
+}
+
+func (c *Client) UpdateVmResources(ctx context.Context, id int64, req UpdateVmResourcesRequest, opts *RequestOpts) error {
+	path := fmt.Sprintf("/api/v2/vms/%d/resources", id)
+	params := url.Values{}
+	if opts != nil {
+		if opts.Region != "" {
+			params.Set("region", opts.Region)
+		}
+		if opts.ProjectTag != "" {
+			params.Set("projectTag", opts.ProjectTag)
+		}
+	}
+	if len(params) > 0 {
+		path = path + "?" + params.Encode()
+	}
+	if err := c.Do(ctx, http.MethodPatch, path, req, nil, opts); err != nil {
+		return err
+	}
+	return nil
+}
+
+type UpdateVmDiskRequest struct {
+	DiskSize *int64  `json:"diskSize,omitempty"`
+	DiskType *string `json:"diskType,omitempty"`
+}
+
+func (c *Client) UpdateVmDisk(ctx context.Context, id int64, req UpdateVmDiskRequest, opts *RequestOpts) error {
+	path := fmt.Sprintf("/api/v2/vms/%d/disk", id)
+	params := url.Values{}
+	if opts != nil {
+		if opts.Region != "" {
+			params.Set("region", opts.Region)
+		}
+		if opts.ProjectTag != "" {
+			params.Set("projectTag", opts.ProjectTag)
+		}
+	}
+	if len(params) > 0 {
+		path = path + "?" + params.Encode()
+	}
+	if err := c.Do(ctx, http.MethodPatch, path, req, nil, opts); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (c *Client) DeleteVm(ctx context.Context, id int64, opts *RequestOpts) error {
 	path := fmt.Sprintf("/api/v2/vms/%d", id)
 

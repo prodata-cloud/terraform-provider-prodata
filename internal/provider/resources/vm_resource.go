@@ -99,30 +99,18 @@ func (r *VmResource) Schema(ctx context.Context, req resource.SchemaRequest, res
 			"cpu_cores": schema.Int64Attribute{
 				MarkdownDescription: "The number of CPU cores for the virtual machine. Minimum 1.",
 				Required:            true,
-				PlanModifiers: []planmodifier.Int64{
-					int64planmodifier.RequiresReplace(),
-				},
 			},
 			"ram": schema.Int64Attribute{
 				MarkdownDescription: "The amount of RAM in GB for the virtual machine. Minimum 1.",
 				Required:            true,
-				PlanModifiers: []planmodifier.Int64{
-					int64planmodifier.RequiresReplace(),
-				},
 			},
 			"disk_size": schema.Int64Attribute{
-				MarkdownDescription: "The size of the disk in GB. Minimum 10.",
+				MarkdownDescription: "The size of the disk in GB. Minimum 10. Can only be increased.",
 				Required:            true,
-				PlanModifiers: []planmodifier.Int64{
-					int64planmodifier.RequiresReplace(),
-				},
 			},
 			"disk_type": schema.StringAttribute{
-				MarkdownDescription: "The type of disk (HDD, SSD, or NVME).",
+				MarkdownDescription: "The type of disk (HDD, SSD, or NVME). Can only be upgraded (e.g. HDD -> SSD).",
 				Required:            true,
-				PlanModifiers: []planmodifier.String{
-					stringplanmodifier.RequiresReplace(),
-				},
 			},
 			"local_network_id": schema.Int64Attribute{
 				MarkdownDescription: "The ID of the local network to attach the VM to.",
@@ -259,6 +247,37 @@ func (r *VmResource) waitForVmReady(ctx context.Context, vmID int64, opts *clien
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
+		case <-time.After(vmPollInterval):
+		}
+	}
+}
+
+// waitForVmStatus polls the VM until it reaches the target status (e.g. STOPPED, RUNNING).
+func (r *VmResource) waitForVmStatus(ctx context.Context, vmID int64, targetStatus string, timeout time.Duration, opts *client.RequestOpts) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timed out waiting for VM %d to reach status %s", vmID, targetStatus)
+		}
+
+		vm, err := r.client.GetVm(ctx, vmID, opts)
+		if err != nil {
+			return fmt.Errorf("failed to get VM status: %w", err)
+		}
+
+		tflog.Debug(ctx, "Polling VM status", map[string]any{
+			"id":             vmID,
+			"current_status": vm.Status,
+			"target_status":  targetStatus,
+		})
+
+		if vm.Status == targetStatus {
+			return nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
 		case <-time.After(vmPollInterval):
 		}
 	}
@@ -509,9 +528,10 @@ func (r *VmResource) Update(ctx context.Context, req resource.UpdateRequest, res
 		opts.ProjectTag = state.ProjectTag.ValueString()
 	}
 
+	vmID := state.ID.ValueInt64()
+
 	// Rename VM if name changed
 	if !state.Name.Equal(plan.Name) {
-		vmID := state.ID.ValueInt64()
 		newName := plan.Name.ValueString()
 
 		tflog.Info(ctx, "Renaming virtual machine", map[string]any{
@@ -525,6 +545,174 @@ func (r *VmResource) Update(ctx context.Context, req resource.UpdateRequest, res
 			resp.Diagnostics.AddError("Unable to Rename Virtual Machine", err.Error())
 			return
 		}
+	}
+
+	// Update CPU/RAM if changed
+	cpuChanged := !state.CPUCores.Equal(plan.CPUCores)
+	ramChanged := !state.RAM.Equal(plan.RAM)
+
+	if cpuChanged || ramChanged {
+		tflog.Info(ctx, "Updating VM resources", map[string]any{
+			"id":      vmID,
+			"old_cpu": state.CPUCores.ValueInt64(),
+			"new_cpu": plan.CPUCores.ValueInt64(),
+			"old_ram": state.RAM.ValueInt64(),
+			"new_ram": plan.RAM.ValueInt64(),
+		})
+
+		// Check current VM status — if running, stop it first
+		vm, err := r.client.GetVm(ctx, vmID, opts)
+		if err != nil {
+			resp.Diagnostics.AddError("Unable to Read VM before resource update", err.Error())
+			return
+		}
+
+		needsRestart := false
+		if vm.Status == "RUNNING" {
+			tflog.Info(ctx, "VM is running, stopping before resource update", map[string]any{"id": vmID})
+
+			if err := r.client.StopVm(ctx, vmID, opts); err != nil {
+				resp.Diagnostics.AddError("Unable to Stop VM for resource update", err.Error())
+				return
+			}
+			needsRestart = true
+
+			if err := r.waitForVmStatus(ctx, vmID, "STOPPED", 5*time.Minute, opts); err != nil {
+				resp.Diagnostics.AddError("VM did not reach STOPPED state", err.Error())
+				return
+			}
+		}
+
+		// Call update resources API
+		updateReq := client.UpdateVmResourcesRequest{
+			CPUCores: plan.CPUCores.ValueInt64(),
+			RAM:      plan.RAM.ValueInt64(),
+		}
+
+		if err := r.client.UpdateVmResources(ctx, vmID, updateReq, opts); err != nil {
+			// Try to restart VM even if update fails
+			if needsRestart {
+				tflog.Warn(ctx, "Resource update failed, attempting to restart VM", map[string]any{"id": vmID})
+				_ = r.client.StartVm(ctx, vmID, opts)
+			}
+			resp.Diagnostics.AddError("Unable to Update VM Resources", err.Error())
+			return
+		}
+
+		// Restart VM if we stopped it
+		if needsRestart {
+			tflog.Info(ctx, "Restarting VM after resource update", map[string]any{"id": vmID})
+			if err := r.client.StartVm(ctx, vmID, opts); err != nil {
+				resp.Diagnostics.AddWarning(
+					"Resources updated but VM could not be restarted",
+					fmt.Sprintf("CPU/RAM were updated successfully, but the VM failed to start: %s. Please start it manually.", err.Error()),
+				)
+			} else {
+				if err := r.waitForVmStatus(ctx, vmID, "RUNNING", 5*time.Minute, opts); err != nil {
+					resp.Diagnostics.AddWarning(
+						"Resources updated but VM did not reach RUNNING state",
+						fmt.Sprintf("CPU/RAM were updated and start was initiated, but VM did not reach RUNNING state: %s", err.Error()),
+					)
+				}
+			}
+		}
+
+		tflog.Info(ctx, "VM resources updated", map[string]any{
+			"id":        vmID,
+			"cpu_cores": plan.CPUCores.ValueInt64(),
+			"ram":       plan.RAM.ValueInt64(),
+		})
+	}
+
+	// Update disk size/type if changed
+	diskSizeChanged := !state.DiskSize.Equal(plan.DiskSize)
+	diskTypeChanged := !state.DiskType.Equal(plan.DiskType)
+
+	if diskSizeChanged || diskTypeChanged {
+		// Validate disk size can only increase
+		if diskSizeChanged && plan.DiskSize.ValueInt64() < state.DiskSize.ValueInt64() {
+			resp.Diagnostics.AddError(
+				"Invalid Disk Size",
+				fmt.Sprintf("Disk size can only be increased. Current: %d GB, requested: %d GB.",
+					state.DiskSize.ValueInt64(), plan.DiskSize.ValueInt64()),
+			)
+			return
+		}
+
+		tflog.Info(ctx, "Updating VM disk", map[string]any{
+			"id":            vmID,
+			"old_disk_size": state.DiskSize.ValueInt64(),
+			"new_disk_size": plan.DiskSize.ValueInt64(),
+			"old_disk_type": state.DiskType.ValueString(),
+			"new_disk_type": plan.DiskType.ValueString(),
+		})
+
+		// Check current VM status — if running, stop it first
+		vm, err := r.client.GetVm(ctx, vmID, opts)
+		if err != nil {
+			resp.Diagnostics.AddError("Unable to Read VM before disk update", err.Error())
+			return
+		}
+
+		needsRestart := false
+		if vm.Status == "RUNNING" {
+			tflog.Info(ctx, "VM is running, stopping before disk update", map[string]any{"id": vmID})
+
+			if err := r.client.StopVm(ctx, vmID, opts); err != nil {
+				resp.Diagnostics.AddError("Unable to Stop VM for disk update", err.Error())
+				return
+			}
+			needsRestart = true
+
+			if err := r.waitForVmStatus(ctx, vmID, "STOPPED", 5*time.Minute, opts); err != nil {
+				resp.Diagnostics.AddError("VM did not reach STOPPED state", err.Error())
+				return
+			}
+		}
+
+		// Build update request
+		updateReq := client.UpdateVmDiskRequest{}
+		if diskSizeChanged {
+			size := plan.DiskSize.ValueInt64()
+			updateReq.DiskSize = &size
+		}
+		if diskTypeChanged {
+			dt := plan.DiskType.ValueString()
+			updateReq.DiskType = &dt
+		}
+
+		if err := r.client.UpdateVmDisk(ctx, vmID, updateReq, opts); err != nil {
+			if needsRestart {
+				tflog.Warn(ctx, "Disk update failed, attempting to restart VM", map[string]any{"id": vmID})
+				_ = r.client.StartVm(ctx, vmID, opts)
+			}
+			resp.Diagnostics.AddError("Unable to Update VM Disk", err.Error())
+			return
+		}
+
+		// Restart VM if we stopped it
+		if needsRestart {
+			tflog.Info(ctx, "Restarting VM after disk update", map[string]any{"id": vmID})
+			if err := r.client.StartVm(ctx, vmID, opts); err != nil {
+				resp.Diagnostics.AddWarning(
+					"Disk updated but VM could not be restarted",
+					fmt.Sprintf("Disk was updated successfully, but the VM failed to start: %s. Please start it manually.", err.Error()),
+				)
+			} else {
+				if err := r.waitForVmStatus(ctx, vmID, "RUNNING", 5*time.Minute, opts); err != nil {
+					resp.Diagnostics.AddWarning(
+						"Disk updated but VM did not reach RUNNING state",
+						fmt.Sprintf("Disk was updated and start was initiated, but VM did not reach RUNNING state: %s", err.Error()),
+					)
+				}
+			}
+		}
+
+		tflog.Info(ctx, "VM disk updated", map[string]any{
+			"id":        vmID,
+			"disk_size": plan.DiskSize.ValueInt64(),
+			"disk_type": plan.DiskType.ValueString(),
+		})
 	}
 
 	// Read back the current VM state
