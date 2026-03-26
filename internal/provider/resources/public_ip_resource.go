@@ -3,7 +3,6 @@ package resources
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"terraform-provider-prodata/internal/client"
 
@@ -127,7 +126,6 @@ func (r *PublicIPResource) Create(ctx context.Context, req resource.CreateReques
 		return
 	}
 
-	// Use provider defaults if not specified in resource
 	region := data.Region.ValueString()
 	if region == "" {
 		region = r.client.Region
@@ -149,7 +147,9 @@ func (r *PublicIPResource) Create(ctx context.Context, req resource.CreateReques
 		"project_tag": createReq.ProjectTag,
 	})
 
-	ip, err := r.client.CreatePublicIP(ctx, createReq)
+	ip, err := client.RetryOnBusy(ctx, client.RetryTimeoutLong, func() (*client.PublicIP, error) {
+		return r.client.CreatePublicIP(ctx, createReq)
+	})
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to Create Public IP", err.Error())
 		return
@@ -180,7 +180,6 @@ func (r *PublicIPResource) Read(ctx context.Context, req resource.ReadRequest, r
 		return
 	}
 
-	// Only set opts if explicitly provided in resource (overrides provider defaults)
 	opts := &client.RequestOpts{}
 	if !data.Region.IsNull() && !data.Region.IsUnknown() {
 		opts.Region = data.Region.ValueString()
@@ -199,10 +198,8 @@ func (r *PublicIPResource) Read(ctx context.Context, req resource.ReadRequest, r
 
 	ip, err := r.client.GetPublicIP(ctx, ipID, opts)
 	if err != nil {
-		if strings.Contains(err.Error(), "703") || strings.Contains(err.Error(), "404") {
-			tflog.Warn(ctx, "Public IP not found, removing from state", map[string]any{
-				"id": ipID,
-			})
+		if client.IsNotFound(err) {
+			tflog.Warn(ctx, "Public IP not found, removing from state", map[string]any{"id": ipID})
 			resp.State.RemoveResource(ctx)
 			return
 		}
@@ -236,7 +233,6 @@ func (r *PublicIPResource) Update(ctx context.Context, req resource.UpdateReques
 
 	ipID := state.ID.ValueInt64()
 
-	// Only name can be updated via API, region and projectTag in request body
 	updateReq := client.UpdatePublicIPRequest{
 		Name: plan.Name.ValueString(),
 	}
@@ -282,7 +278,6 @@ func (r *PublicIPResource) Delete(ctx context.Context, req resource.DeleteReques
 		return
 	}
 
-	// Only set opts if explicitly provided in resource (overrides provider defaults)
 	opts := &client.RequestOpts{}
 	if !data.Region.IsNull() && !data.Region.IsUnknown() {
 		opts.Region = data.Region.ValueString()
@@ -301,11 +296,12 @@ func (r *PublicIPResource) Delete(ctx context.Context, req resource.DeleteReques
 
 	err := r.client.DeletePublicIP(ctx, ipID, opts)
 	if err != nil {
+		if client.IsNotFound(err) {
+			return
+		}
 		resp.Diagnostics.AddError("Unable to Delete Public IP", err.Error())
 		return
 	}
 
-	tflog.Debug(ctx, "Deleted public IP", map[string]any{
-		"id": ipID,
-	})
+	tflog.Debug(ctx, "Deleted public IP", map[string]any{"id": ipID})
 }
