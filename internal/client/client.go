@@ -43,7 +43,7 @@ func New(cfg Config) (*Client, error) {
 		userAgent:    cfg.UserAgent,
 		Region:       cfg.Region,
 		ProjectTag:   cfg.ProjectTag,
-		httpClient:   &http.Client{Timeout: 30 * time.Second},
+		httpClient:   &http.Client{Timeout: 60 * time.Second},
 	}, nil
 }
 
@@ -111,28 +111,35 @@ func (c *Client) Do(ctx context.Context, method, path string, body, result any, 
 		return fmt.Errorf("read response: %w", err)
 	}
 
-	// Check HTTP status code first
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("http error %d: %s", resp.StatusCode, string(respBody))
-	}
-
+	// Always try to parse as structured API response.
 	var apiResp apiResponse[json.RawMessage]
-	if err := json.Unmarshal(respBody, &apiResp); err != nil {
-		return fmt.Errorf("parse response (status %d): %s", resp.StatusCode, string(respBody))
-	}
+	parsed := json.Unmarshal(respBody, &apiResp) == nil
 
-	if !apiResp.Success {
-		var errMsgs []string
-		for _, e := range apiResp.Errors {
-			errMsgs = append(errMsgs, e.Message)
+	isHTTPError := resp.StatusCode < 200 || resp.StatusCode >= 300
+	isAPIFailure := parsed && !apiResp.Success
+
+	if isHTTPError || isAPIFailure {
+		apiErr := &APIError{
+			StatusCode: resp.StatusCode,
+			RawBody:    string(respBody),
 		}
-		if len(errMsgs) == 0 {
-			return fmt.Errorf("api error (status %d): %s", resp.StatusCode, string(respBody))
+		if parsed && len(apiResp.Errors) > 0 {
+			msgs := make([]string, len(apiResp.Errors))
+			for i, e := range apiResp.Errors {
+				apiErr.Codes = append(apiErr.Codes, e.Code)
+				msgs[i] = e.Message
+			}
+			apiErr.Message = strings.Join(msgs, "; ")
+		} else {
+			apiErr.Message = string(respBody)
 		}
-		return fmt.Errorf("api error: %s", strings.Join(errMsgs, "; "))
+		return apiErr
 	}
 
 	if result != nil {
+		if !parsed {
+			return fmt.Errorf("unexpected response format (status %d): %s", resp.StatusCode, string(respBody))
+		}
 		if err := json.Unmarshal(apiResp.Data, result); err != nil {
 			return fmt.Errorf("parse data: %w", err)
 		}
@@ -497,7 +504,11 @@ type Vm struct {
 	DiskType       string `json:"diskType"`
 	PrivateIP      string `json:"privateIp"`
 	PublicIP       string `json:"publicIp"`
+	PublicIPID     int64  `json:"publicIpId"`
 	LocalNetworkID int64  `json:"localNetworkId"`
+	ImageID        int64  `json:"imageId"`
+	ImageName      string `json:"imageName"`
+	ImageSlug      string `json:"imageSlug"`
 	Description    string `json:"description"`
 }
 
@@ -830,4 +841,41 @@ func (c *Client) StartVm(ctx context.Context, id int64, opts *RequestOpts) error
 		return err
 	}
 	return nil
+}
+
+// WaitForVmStatus polls the VM until it reaches targetStatus or timeout.
+// Tolerates up to 3 consecutive transient errors during polling.
+func (c *Client) WaitForVmStatus(ctx context.Context, vmID int64, targetStatus string, timeout time.Duration, opts *RequestOpts) error {
+	const (
+		pollInterval       = 5 * time.Second
+		maxConsecutiveErrs = 3
+	)
+
+	deadline := time.Now().Add(timeout)
+	consecutiveErrs := 0
+
+	for {
+		vm, err := c.GetVm(ctx, vmID, opts)
+		if err != nil {
+			consecutiveErrs++
+			if consecutiveErrs >= maxConsecutiveErrs {
+				return fmt.Errorf("polling VM %d: %w (after %d consecutive failures)", vmID, err, consecutiveErrs)
+			}
+		} else {
+			consecutiveErrs = 0
+			if vm.Status == targetStatus {
+				return nil
+			}
+		}
+
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timed out waiting for VM %d to reach %s", vmID, targetStatus)
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(pollInterval):
+		}
+	}
 }
