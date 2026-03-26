@@ -103,10 +103,16 @@ func (r *VmResource) Schema(ctx context.Context, req resource.SchemaRequest, res
 			"image_name": schema.StringAttribute{
 				MarkdownDescription: "The name of the OS image (e.g., 'Ubuntu 22.04'). Populated from the API.",
 				Computed:            true,
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.UseStateForUnknown(),
+				},
 			},
 			"image_slug": schema.StringAttribute{
 				MarkdownDescription: "The slug of the OS template (e.g., 'ubuntu-22.04'). Null for custom images and VMs created before this feature.",
 				Computed:            true,
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.UseStateForUnknown(),
+				},
 			},
 			"cpu_cores": schema.Int64Attribute{
 				MarkdownDescription: "The number of CPU cores for the virtual machine. Minimum 1.",
@@ -150,6 +156,9 @@ func (r *VmResource) Schema(ctx context.Context, req resource.SchemaRequest, res
 			"public_ip": schema.StringAttribute{
 				MarkdownDescription: "The public IP address assigned to the virtual machine (if any).",
 				Computed:            true,
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.UseStateForUnknown(),
+				},
 			},
 			"password": schema.StringAttribute{
 				MarkdownDescription: "The password for the virtual machine. Required when creating. Write-only: not read back from API.",
@@ -176,6 +185,9 @@ func (r *VmResource) Schema(ctx context.Context, req resource.SchemaRequest, res
 			"status": schema.StringAttribute{
 				MarkdownDescription: "The current status of the virtual machine.",
 				Computed:            true,
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.UseStateForUnknown(),
+				},
 			},
 		},
 	}
@@ -424,6 +436,23 @@ func (r *VmResource) Create(ctx context.Context, req resource.CreateRequest, res
 		data.PublicIP = types.StringValue(resultVm.PublicIP)
 	} else {
 		data.PublicIP = types.StringNull()
+	}
+
+	if resultVm.PublicIPID != 0 {
+		data.PublicIPID = types.Int64Value(resultVm.PublicIPID)
+	} else {
+		data.PublicIPID = types.Int64Null()
+	}
+
+	if resultVm.ImageName != "" {
+		data.ImageName = types.StringValue(resultVm.ImageName)
+	} else {
+		data.ImageName = types.StringNull()
+	}
+	if resultVm.ImageSlug != "" {
+		data.ImageSlug = types.StringValue(resultVm.ImageSlug)
+	} else {
+		data.ImageSlug = types.StringNull()
 	}
 
 	// Keep plan values for Required+ForceNew attributes (name, cpu_cores, ram,
