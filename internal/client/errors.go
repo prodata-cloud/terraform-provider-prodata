@@ -1,0 +1,55 @@
+package client
+
+import (
+	"errors"
+	"fmt"
+)
+
+// APIError is a structured error returned by the ProData API.
+// It carries HTTP status code and business-logic error codes,
+// enabling callers to match on specific codes without string parsing.
+type APIError struct {
+	StatusCode int
+	Codes      []int
+	Message    string
+	RawBody    string
+}
+
+func (e *APIError) Error() string {
+	if len(e.Codes) > 0 {
+		return fmt.Sprintf("api error %v (http %d): %s", e.Codes, e.StatusCode, e.Message)
+	}
+	return fmt.Sprintf("api error (http %d): %s", e.StatusCode, e.Message)
+}
+
+// HasCode reports whether this API error contains the given error code.
+func (e *APIError) HasCode(code int) bool {
+	for _, c := range e.Codes {
+		if c == code {
+			return true
+		}
+	}
+	return false
+}
+
+// IsAPIError reports whether err is (or wraps) an APIError with the given code.
+func IsAPIError(err error, code int) bool {
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.HasCode(code)
+	}
+	return false
+}
+
+// IsNotFound reports whether err indicates that the resource does not exist
+// (HTTP 404, or API codes 601/703).
+func IsNotFound(err error) bool {
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	if apiErr.StatusCode == 404 {
+		return true
+	}
+	return apiErr.HasCode(601) || apiErr.HasCode(703)
+}

@@ -3,11 +3,12 @@ package resources
 import (
 	"context"
 	"fmt"
-	"strings"
+	"strconv"
 	"time"
 
 	"terraform-provider-prodata/internal/client"
 
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
@@ -18,9 +19,10 @@ import (
 )
 
 var (
-	_ resource.Resource               = &VmResource{}
-	_ resource.ResourceWithConfigure  = &VmResource{}
-	_ resource.ResourceWithModifyPlan = &VmResource{}
+	_ resource.Resource                = &VmResource{}
+	_ resource.ResourceWithConfigure   = &VmResource{}
+	_ resource.ResourceWithModifyPlan  = &VmResource{}
+	_ resource.ResourceWithImportState = &VmResource{}
 )
 
 type VmResource struct {
@@ -33,6 +35,8 @@ type VmResourceModel struct {
 	ProjectTag     types.String `tfsdk:"project_tag"`
 	Name           types.String `tfsdk:"name"`
 	ImageID        types.Int64  `tfsdk:"image_id"`
+	ImageName      types.String `tfsdk:"image_name"`
+	ImageSlug      types.String `tfsdk:"image_slug"`
 	CPUCores       types.Int64  `tfsdk:"cpu_cores"`
 	RAM            types.Int64  `tfsdk:"ram"`
 	DiskSize       types.Int64  `tfsdk:"disk_size"`
@@ -96,6 +100,20 @@ func (r *VmResource) Schema(ctx context.Context, req resource.SchemaRequest, res
 					int64planmodifier.RequiresReplace(),
 				},
 			},
+			"image_name": schema.StringAttribute{
+				MarkdownDescription: "The name of the OS image (e.g., 'Ubuntu 22.04'). Populated from the API.",
+				Computed:            true,
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.UseStateForUnknown(),
+				},
+			},
+			"image_slug": schema.StringAttribute{
+				MarkdownDescription: "The slug of the OS template (e.g., 'ubuntu-22.04'). Null for custom images and VMs created before this feature.",
+				Computed:            true,
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.UseStateForUnknown(),
+				},
+			},
 			"cpu_cores": schema.Int64Attribute{
 				MarkdownDescription: "The number of CPU cores for the virtual machine. Minimum 1.",
 				Required:            true,
@@ -138,20 +156,23 @@ func (r *VmResource) Schema(ctx context.Context, req resource.SchemaRequest, res
 			"public_ip": schema.StringAttribute{
 				MarkdownDescription: "The public IP address assigned to the virtual machine (if any).",
 				Computed:            true,
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.UseStateForUnknown(),
+				},
 			},
 			"password": schema.StringAttribute{
-				MarkdownDescription: "The password for the virtual machine.",
-				Required:            true,
+				MarkdownDescription: "The password for the virtual machine. Required when creating. Write-only: not read back from API.",
+				Optional:            true,
 				Sensitive:           true,
 				PlanModifiers: []planmodifier.String{
-					stringplanmodifier.RequiresReplace(),
+					WriteOnceString(),
 				},
 			},
 			"ssh_public_key": schema.StringAttribute{
-				MarkdownDescription: "SSH public key for authentication (optional).",
+				MarkdownDescription: "SSH public key for authentication (optional). Write-only: not read back from API.",
 				Optional:            true,
 				PlanModifiers: []planmodifier.String{
-					stringplanmodifier.RequiresReplace(),
+					WriteOnceString(),
 				},
 			},
 			"description": schema.StringAttribute{
@@ -164,6 +185,9 @@ func (r *VmResource) Schema(ctx context.Context, req resource.SchemaRequest, res
 			"status": schema.StringAttribute{
 				MarkdownDescription: "The current status of the virtual machine.",
 				Computed:            true,
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.UseStateForUnknown(),
+				},
 			},
 		},
 	}
@@ -219,29 +243,43 @@ const (
 )
 
 // waitForVmReady polls the VM until it reaches a terminal state (RUNNING, STOPPED, or ERROR).
+// Tolerates up to 3 consecutive transient polling errors.
 func (r *VmResource) waitForVmReady(ctx context.Context, vmID int64, opts *client.RequestOpts) (*client.Vm, error) {
+	const maxConsecutiveErrs = 3
+
 	deadline := time.Now().Add(vmCreateTimeout)
+	consecutiveErrs := 0
 
 	for {
 		vm, err := r.client.GetVmStatus(ctx, vmID, opts)
 		if err != nil {
-			return nil, fmt.Errorf("polling VM status: %w", err)
-		}
+			consecutiveErrs++
+			tflog.Warn(ctx, "Transient error polling VM status", map[string]any{
+				"id":                vmID,
+				"error":             err.Error(),
+				"consecutive_errors": consecutiveErrs,
+			})
+			if consecutiveErrs >= maxConsecutiveErrs {
+				return nil, fmt.Errorf("polling VM %d status: %w (after %d consecutive failures)", vmID, err, consecutiveErrs)
+			}
+		} else {
+			consecutiveErrs = 0
 
-		tflog.Debug(ctx, "Polling VM status", map[string]any{
-			"id":     vmID,
-			"status": vm.Status,
-		})
+			tflog.Debug(ctx, "Polling VM status", map[string]any{
+				"id":     vmID,
+				"status": vm.Status,
+			})
 
-		switch vm.Status {
-		case "RUNNING", "STOPPED":
-			return vm, nil
-		case "ERROR":
-			return vm, fmt.Errorf("VM creation failed (id=%d, status=ERROR)", vmID)
+			switch vm.Status {
+			case "RUNNING", "STOPPED":
+				return vm, nil
+			case "ERROR":
+				return vm, fmt.Errorf("VM creation failed (id=%d, status=ERROR)", vmID)
+			}
 		}
 
 		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("timed out waiting for VM %d to become ready (last status: %s)", vmID, vm.Status)
+			return nil, fmt.Errorf("timed out waiting for VM %d to become ready", vmID)
 		}
 
 		select {
@@ -252,42 +290,20 @@ func (r *VmResource) waitForVmReady(ctx context.Context, vmID int64, opts *clien
 	}
 }
 
-// waitForVmStatus polls the VM until it reaches the target status (e.g. STOPPED, RUNNING).
-func (r *VmResource) waitForVmStatus(ctx context.Context, vmID int64, targetStatus string, timeout time.Duration, opts *client.RequestOpts) error {
-	deadline := time.Now().Add(timeout)
-	for {
-		if time.Now().After(deadline) {
-			return fmt.Errorf("timed out waiting for VM %d to reach status %s", vmID, targetStatus)
-		}
-
-		vm, err := r.client.GetVm(ctx, vmID, opts)
-		if err != nil {
-			return fmt.Errorf("failed to get VM status: %w", err)
-		}
-
-		tflog.Debug(ctx, "Polling VM status", map[string]any{
-			"id":             vmID,
-			"current_status": vm.Status,
-			"target_status":  targetStatus,
-		})
-
-		if vm.Status == targetStatus {
-			return nil
-		}
-
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(vmPollInterval):
-		}
-	}
-}
-
 func (r *VmResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	var data VmResourceModel
 
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &data)...)
 	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	// Validate password is provided (Required for creation, Optional for import)
+	if data.Password.IsNull() || data.Password.ValueString() == "" {
+		resp.Diagnostics.AddError(
+			"Password Required",
+			"The password attribute is required when creating a new virtual machine.",
+		)
 		return
 	}
 
@@ -344,13 +360,20 @@ func (r *VmResource) Create(ctx context.Context, req resource.CreateRequest, res
 		"disk_size":        createReq.DiskSize,
 		"disk_type":        createReq.DiskType,
 		"local_network_id": createReq.LocalNetworkID,
-		"private_ip":       createReq.PrivateIP, // may be nil if auto-assigning
+		"private_ip":       createReq.PrivateIP,
 	})
 
-	vm, err := r.client.CreateVm(ctx, createReq)
-	if err != nil && strings.Contains(err.Error(), "666") {
-		// Name conflict — likely a create_before_destroy replacement.
-		// Find the existing VM with that name and rename it, then retry.
+	createVm := func() (*client.Vm, error) {
+		return client.RetryOnBusy(ctx, client.RetryTimeoutLong, func() (*client.Vm, error) {
+			return r.client.CreateVm(ctx, createReq)
+		})
+	}
+
+	vm, err := createVm()
+
+	// Error 666: name conflict — likely a create_before_destroy replacement.
+	// Rename the existing VM, then retry.
+	if err != nil && client.IsAPIError(err, 666) {
 		tflog.Info(ctx, "VM name conflict detected, attempting to rename existing VM", map[string]any{
 			"name": createReq.Name,
 		})
@@ -375,8 +398,7 @@ func (r *VmResource) Create(ctx context.Context, req resource.CreateRequest, res
 						)
 						return
 					}
-					// Retry create after rename
-					vm, err = r.client.CreateVm(ctx, createReq)
+					vm, err = createVm()
 					break
 				}
 			}
@@ -416,6 +438,23 @@ func (r *VmResource) Create(ctx context.Context, req resource.CreateRequest, res
 		data.PublicIP = types.StringNull()
 	}
 
+	if resultVm.PublicIPID != 0 {
+		data.PublicIPID = types.Int64Value(resultVm.PublicIPID)
+	} else {
+		data.PublicIPID = types.Int64Null()
+	}
+
+	if resultVm.ImageName != "" {
+		data.ImageName = types.StringValue(resultVm.ImageName)
+	} else {
+		data.ImageName = types.StringNull()
+	}
+	if resultVm.ImageSlug != "" {
+		data.ImageSlug = types.StringValue(resultVm.ImageSlug)
+	} else {
+		data.ImageSlug = types.StringNull()
+	}
+
 	// Keep plan values for Required+ForceNew attributes (name, cpu_cores, ram,
 	// disk_size, disk_type). The API may temporarily return different values during
 	// provisioning (e.g., template defaults before final config is applied).
@@ -452,6 +491,11 @@ func (r *VmResource) Read(ctx context.Context, req resource.ReadRequest, resp *r
 		return
 	}
 
+	// Preserve write-only / create-time attributes before API call
+	password := data.Password
+	sshPublicKey := data.SSHPublicKey
+	publicIPID := data.PublicIPID
+
 	opts := &client.RequestOpts{}
 	if !data.Region.IsNull() && !data.Region.IsUnknown() {
 		opts.Region = data.Region.ValueString()
@@ -470,10 +514,8 @@ func (r *VmResource) Read(ctx context.Context, req resource.ReadRequest, resp *r
 
 	vm, err := r.client.GetVm(ctx, vmID, opts)
 	if err != nil {
-		if strings.Contains(err.Error(), "601") || strings.Contains(err.Error(), "404") {
-			tflog.Warn(ctx, "VM not found, removing from state", map[string]any{
-				"id": vmID,
-			})
+		if client.IsNotFound(err) {
+			tflog.Warn(ctx, "VM not found, removing from state", map[string]any{"id": vmID})
 			resp.State.RemoveResource(ctx)
 			return
 		}
@@ -490,6 +532,21 @@ func (r *VmResource) Read(ctx context.Context, req resource.ReadRequest, resp *r
 	data.PrivateIP = types.StringValue(vm.PrivateIP)
 	data.LocalNetworkID = types.Int64Value(vm.LocalNetworkID)
 
+	// Populate image fields from API (supports import + drift detection)
+	if vm.ImageID != 0 {
+		data.ImageID = types.Int64Value(vm.ImageID)
+	}
+	if vm.ImageName != "" {
+		data.ImageName = types.StringValue(vm.ImageName)
+	} else {
+		data.ImageName = types.StringNull()
+	}
+	if vm.ImageSlug != "" {
+		data.ImageSlug = types.StringValue(vm.ImageSlug)
+	} else {
+		data.ImageSlug = types.StringNull()
+	}
+
 	if vm.PublicIP != "" {
 		data.PublicIP = types.StringValue(vm.PublicIP)
 	} else {
@@ -501,6 +558,11 @@ func (r *VmResource) Read(ctx context.Context, req resource.ReadRequest, resp *r
 	} else if !data.Description.IsNull() {
 		data.Description = types.StringNull()
 	}
+
+	// Restore write-only / create-time attributes (API never returns these)
+	data.Password = password
+	data.SSHPublicKey = sshPublicKey
+	data.PublicIPID = publicIPID
 
 	tflog.Debug(ctx, "Read virtual machine", map[string]any{
 		"id":     vmID,
@@ -560,37 +622,18 @@ func (r *VmResource) Update(ctx context.Context, req resource.UpdateRequest, res
 			"new_ram": plan.RAM.ValueInt64(),
 		})
 
-		// Check current VM status — if running, stop it first
-		vm, err := r.client.GetVm(ctx, vmID, opts)
+		needsRestart, err := r.stopIfRunning(ctx, vmID, opts)
 		if err != nil {
-			resp.Diagnostics.AddError("Unable to Read VM before resource update", err.Error())
+			resp.Diagnostics.AddError("Unable to Stop VM for resource update", err.Error())
 			return
 		}
 
-		needsRestart := false
-		if vm.Status == "RUNNING" {
-			tflog.Info(ctx, "VM is running, stopping before resource update", map[string]any{"id": vmID})
-
-			if err := r.client.StopVm(ctx, vmID, opts); err != nil {
-				resp.Diagnostics.AddError("Unable to Stop VM for resource update", err.Error())
-				return
-			}
-			needsRestart = true
-
-			if err := r.waitForVmStatus(ctx, vmID, "STOPPED", 5*time.Minute, opts); err != nil {
-				resp.Diagnostics.AddError("VM did not reach STOPPED state", err.Error())
-				return
-			}
-		}
-
-		// Call update resources API
 		updateReq := client.UpdateVmResourcesRequest{
 			CPUCores: plan.CPUCores.ValueInt64(),
 			RAM:      plan.RAM.ValueInt64(),
 		}
 
 		if err := r.client.UpdateVmResources(ctx, vmID, updateReq, opts); err != nil {
-			// Try to restart VM even if update fails
 			if needsRestart {
 				tflog.Warn(ctx, "Resource update failed, attempting to restart VM", map[string]any{"id": vmID})
 				_ = r.client.StartVm(ctx, vmID, opts)
@@ -599,21 +642,12 @@ func (r *VmResource) Update(ctx context.Context, req resource.UpdateRequest, res
 			return
 		}
 
-		// Restart VM if we stopped it
 		if needsRestart {
-			tflog.Info(ctx, "Restarting VM after resource update", map[string]any{"id": vmID})
-			if err := r.client.StartVm(ctx, vmID, opts); err != nil {
+			if err := r.startAndWait(ctx, vmID, opts); err != nil {
 				resp.Diagnostics.AddWarning(
-					"Resources updated but VM could not be restarted",
-					fmt.Sprintf("CPU/RAM were updated successfully, but the VM failed to start: %s. Please start it manually.", err.Error()),
+					"Resources updated but VM not restarted",
+					fmt.Sprintf("CPU/RAM were updated, but the VM failed to restart: %s", err.Error()),
 				)
-			} else {
-				if err := r.waitForVmStatus(ctx, vmID, "RUNNING", 5*time.Minute, opts); err != nil {
-					resp.Diagnostics.AddWarning(
-						"Resources updated but VM did not reach RUNNING state",
-						fmt.Sprintf("CPU/RAM were updated and start was initiated, but VM did not reach RUNNING state: %s", err.Error()),
-					)
-				}
 			}
 		}
 
@@ -629,7 +663,6 @@ func (r *VmResource) Update(ctx context.Context, req resource.UpdateRequest, res
 	diskTypeChanged := !state.DiskType.Equal(plan.DiskType)
 
 	if diskSizeChanged || diskTypeChanged {
-		// Validate disk size can only increase
 		if diskSizeChanged && plan.DiskSize.ValueInt64() < state.DiskSize.ValueInt64() {
 			resp.Diagnostics.AddError(
 				"Invalid Disk Size",
@@ -647,30 +680,12 @@ func (r *VmResource) Update(ctx context.Context, req resource.UpdateRequest, res
 			"new_disk_type": plan.DiskType.ValueString(),
 		})
 
-		// Check current VM status — if running, stop it first
-		vm, err := r.client.GetVm(ctx, vmID, opts)
+		needsRestart, err := r.stopIfRunning(ctx, vmID, opts)
 		if err != nil {
-			resp.Diagnostics.AddError("Unable to Read VM before disk update", err.Error())
+			resp.Diagnostics.AddError("Unable to Stop VM for disk update", err.Error())
 			return
 		}
 
-		needsRestart := false
-		if vm.Status == "RUNNING" {
-			tflog.Info(ctx, "VM is running, stopping before disk update", map[string]any{"id": vmID})
-
-			if err := r.client.StopVm(ctx, vmID, opts); err != nil {
-				resp.Diagnostics.AddError("Unable to Stop VM for disk update", err.Error())
-				return
-			}
-			needsRestart = true
-
-			if err := r.waitForVmStatus(ctx, vmID, "STOPPED", 5*time.Minute, opts); err != nil {
-				resp.Diagnostics.AddError("VM did not reach STOPPED state", err.Error())
-				return
-			}
-		}
-
-		// Build update request
 		updateReq := client.UpdateVmDiskRequest{}
 		if diskSizeChanged {
 			size := plan.DiskSize.ValueInt64()
@@ -690,21 +705,12 @@ func (r *VmResource) Update(ctx context.Context, req resource.UpdateRequest, res
 			return
 		}
 
-		// Restart VM if we stopped it
 		if needsRestart {
-			tflog.Info(ctx, "Restarting VM after disk update", map[string]any{"id": vmID})
-			if err := r.client.StartVm(ctx, vmID, opts); err != nil {
+			if err := r.startAndWait(ctx, vmID, opts); err != nil {
 				resp.Diagnostics.AddWarning(
-					"Disk updated but VM could not be restarted",
-					fmt.Sprintf("Disk was updated successfully, but the VM failed to start: %s. Please start it manually.", err.Error()),
+					"Disk updated but VM not restarted",
+					fmt.Sprintf("Disk was updated, but the VM failed to restart: %s", err.Error()),
 				)
-			} else {
-				if err := r.waitForVmStatus(ctx, vmID, "RUNNING", 5*time.Minute, opts); err != nil {
-					resp.Diagnostics.AddWarning(
-						"Disk updated but VM did not reach RUNNING state",
-						fmt.Sprintf("Disk was updated and start was initiated, but VM did not reach RUNNING state: %s", err.Error()),
-					)
-				}
 			}
 		}
 
@@ -734,6 +740,23 @@ func (r *VmResource) Update(ctx context.Context, req resource.UpdateRequest, res
 	plan.PrivateIP = types.StringValue(vm.PrivateIP)
 	plan.LocalNetworkID = types.Int64Value(vm.LocalNetworkID)
 
+	// Image fields from API
+	if vm.ImageID != 0 {
+		plan.ImageID = types.Int64Value(vm.ImageID)
+	} else {
+		plan.ImageID = state.ImageID
+	}
+	if vm.ImageName != "" {
+		plan.ImageName = types.StringValue(vm.ImageName)
+	} else {
+		plan.ImageName = types.StringNull()
+	}
+	if vm.ImageSlug != "" {
+		plan.ImageSlug = types.StringValue(vm.ImageSlug)
+	} else {
+		plan.ImageSlug = types.StringNull()
+	}
+
 	if vm.PublicIP != "" {
 		plan.PublicIP = types.StringValue(vm.PublicIP)
 	} else {
@@ -746,7 +769,24 @@ func (r *VmResource) Update(ctx context.Context, req resource.UpdateRequest, res
 		plan.Description = types.StringNull()
 	}
 
+	// Preserve write-only / create-time attributes
+	plan.PublicIPID = state.PublicIPID
+
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+}
+
+func (r *VmResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
+	id, err := strconv.ParseInt(req.ID, 10, 64)
+	if err != nil {
+		resp.Diagnostics.AddError(
+			"Invalid Import ID",
+			fmt.Sprintf("Expected integer VM ID, got: %s", req.ID),
+		)
+		return
+	}
+
+	tflog.Info(ctx, "Importing virtual machine", map[string]any{"id": id})
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), id)...)
 }
 
 func (r *VmResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
@@ -757,7 +797,6 @@ func (r *VmResource) Delete(ctx context.Context, req resource.DeleteRequest, res
 		return
 	}
 
-	// Only set opts if explicitly provided in resource (overrides provider defaults)
 	opts := &client.RequestOpts{}
 	if !data.Region.IsNull() && !data.Region.IsUnknown() {
 		opts.Region = data.Region.ValueString()
@@ -768,17 +807,47 @@ func (r *VmResource) Delete(ctx context.Context, req resource.DeleteRequest, res
 
 	vmID := data.ID.ValueInt64()
 
-	tflog.Debug(ctx, "Deleting virtual machine", map[string]any{
-		"id": vmID,
-	})
+	tflog.Debug(ctx, "Deleting virtual machine", map[string]any{"id": vmID})
 
 	err := r.client.DeleteVm(ctx, vmID, opts)
 	if err != nil {
+		if client.IsNotFound(err) {
+			return // already gone
+		}
 		resp.Diagnostics.AddError("Unable to Delete Virtual Machine", err.Error())
 		return
 	}
 
-	tflog.Debug(ctx, "Deleted virtual machine", map[string]any{
-		"id": vmID,
-	})
+	tflog.Debug(ctx, "Deleted virtual machine", map[string]any{"id": vmID})
+}
+
+// stopIfRunning stops the VM if it is RUNNING and waits for STOPPED state.
+// Returns true if the VM was stopped (and should be restarted after the operation).
+func (r *VmResource) stopIfRunning(ctx context.Context, vmID int64, opts *client.RequestOpts) (bool, error) {
+	vm, err := r.client.GetVm(ctx, vmID, opts)
+	if err != nil {
+		return false, fmt.Errorf("read VM: %w", err)
+	}
+	if vm.Status != "RUNNING" {
+		return false, nil
+	}
+
+	tflog.Info(ctx, "VM is running, stopping before update", map[string]any{"id": vmID})
+
+	if err := r.client.StopVm(ctx, vmID, opts); err != nil {
+		return false, fmt.Errorf("stop VM: %w", err)
+	}
+	if err := r.client.WaitForVmStatus(ctx, vmID, "STOPPED", 5*time.Minute, opts); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// startAndWait starts the VM and waits for RUNNING state.
+func (r *VmResource) startAndWait(ctx context.Context, vmID int64, opts *client.RequestOpts) error {
+	tflog.Info(ctx, "Restarting VM after update", map[string]any{"id": vmID})
+	if err := r.client.StartVm(ctx, vmID, opts); err != nil {
+		return fmt.Errorf("start VM: %w", err)
+	}
+	return r.client.WaitForVmStatus(ctx, vmID, "RUNNING", 5*time.Minute, opts)
 }

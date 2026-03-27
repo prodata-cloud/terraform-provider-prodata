@@ -3,7 +3,6 @@ package resources
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	"terraform-provider-prodata/internal/client"
@@ -15,11 +14,6 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-log/tflog"
-)
-
-const (
-	volumeAttachRetryInterval = 5 * time.Second
-	volumeAttachTimeout       = 2 * time.Minute
 )
 
 var (
@@ -123,21 +117,19 @@ func (r *VolumeAttachmentResource) Create(ctx context.Context, req resource.Crea
 	}
 
 	opts := r.buildOpts(&data)
-
+	vmID := data.VmID.ValueInt64()
 	attachReq := client.AttachVolumeRequest{
 		VolumeID: data.VolumeID.ValueInt64(),
 	}
-
-	vmID := data.VmID.ValueInt64()
 
 	tflog.Debug(ctx, "Attaching volume to VM", map[string]any{
 		"vm_id":     vmID,
 		"volume_id": attachReq.VolumeID,
 	})
 
-	// Retry on error 627 (VM locked by another operation) — happens when
-	// Terraform attaches multiple volumes to the same VM in parallel.
-	volume, err := r.attachVolumeWithRetry(ctx, vmID, attachReq, opts)
+	volume, err := client.RetryOnBusy(ctx, client.RetryTimeoutShort, func() (*client.Volume, error) {
+		return r.client.AttachVolume(ctx, vmID, attachReq, opts)
+	})
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to Attach Volume", err.Error())
 		return
@@ -145,7 +137,6 @@ func (r *VolumeAttachmentResource) Create(ctx context.Context, req resource.Crea
 
 	data.AttachedVolumeID = types.Int64Value(volume.ID)
 
-	// Store the resolved region/project
 	region := data.Region.ValueString()
 	if region == "" {
 		region = r.client.Region
@@ -163,41 +154,6 @@ func (r *VolumeAttachmentResource) Create(ctx context.Context, req resource.Crea
 	})
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
-}
-
-// attachVolumeWithRetry retries volume attachment when the VM is locked by
-// another operation (error 627). This handles the case where Terraform sends
-// multiple volume attachment requests for the same VM in parallel.
-func (r *VolumeAttachmentResource) attachVolumeWithRetry(ctx context.Context, vmID int64, req client.AttachVolumeRequest, opts *client.RequestOpts) (*client.Volume, error) {
-	deadline := time.Now().Add(volumeAttachTimeout)
-
-	for {
-		volume, err := r.client.AttachVolume(ctx, vmID, req, opts)
-		if err == nil {
-			return volume, nil
-		}
-
-		// Only retry on error 627 (VM locked / unhandled error during concurrent ops)
-		if !strings.Contains(err.Error(), "627") {
-			return nil, err
-		}
-
-		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("timed out waiting to attach volume (VM %d is busy): %w", vmID, err)
-		}
-
-		tflog.Info(ctx, "VM is busy (error 627), retrying volume attachment", map[string]any{
-			"vm_id":     vmID,
-			"volume_id": req.VolumeID,
-			"retry_in":  volumeAttachRetryInterval.String(),
-		})
-
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(volumeAttachRetryInterval):
-		}
-	}
 }
 
 func (r *VolumeAttachmentResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
@@ -219,7 +175,6 @@ func (r *VolumeAttachmentResource) Read(ctx context.Context, req resource.ReadRe
 
 	volume, err := r.client.GetVolume(ctx, attachedVolumeID, opts)
 	if err != nil {
-		// If volume is gone, remove from state
 		tflog.Warn(ctx, "Volume not found, removing volume attachment from state", map[string]any{
 			"attached_volume_id": attachedVolumeID,
 			"error":              err.Error(),
@@ -248,7 +203,6 @@ func (r *VolumeAttachmentResource) Read(ctx context.Context, req resource.ReadRe
 }
 
 func (r *VolumeAttachmentResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
-	// All attributes are ForceNew, so Update should never be called.
 	resp.Diagnostics.AddError(
 		"Update Not Supported",
 		"All attributes of prodata_volume_attachment require replacement. This is a bug in the provider.",
@@ -289,8 +243,7 @@ func (r *VolumeAttachmentResource) Delete(ctx context.Context, req resource.Dele
 		}
 		needsRestart = true
 
-		// Poll until VM is STOPPED (timeout 5 minutes)
-		if err := r.waitForVmStatus(ctx, vmID, "STOPPED", 5*time.Minute, opts); err != nil {
+		if err := r.client.WaitForVmStatus(ctx, vmID, "STOPPED", 5*time.Minute, opts); err != nil {
 			resp.Diagnostics.AddError("VM did not reach STOPPED state", err.Error())
 			return
 		}
@@ -298,7 +251,6 @@ func (r *VolumeAttachmentResource) Delete(ctx context.Context, req resource.Dele
 
 	err = r.client.DetachVolume(ctx, vmID, attachedVolumeID, opts)
 	if err != nil {
-		// Try to restart VM even if detach fails
 		if needsRestart {
 			tflog.Warn(ctx, "Detach failed, attempting to restart VM", map[string]any{"vm_id": vmID})
 			_ = r.client.StartVm(ctx, vmID, opts)
@@ -312,7 +264,6 @@ func (r *VolumeAttachmentResource) Delete(ctx context.Context, req resource.Dele
 		"attached_volume_id": attachedVolumeID,
 	})
 
-	// Restart VM if we stopped it
 	if needsRestart {
 		tflog.Info(ctx, "Restarting VM after volume detach", map[string]any{"vm_id": vmID})
 		if err := r.client.StartVm(ctx, vmID, opts); err != nil {
@@ -320,36 +271,6 @@ func (r *VolumeAttachmentResource) Delete(ctx context.Context, req resource.Dele
 				"Volume detached but VM could not be restarted",
 				fmt.Sprintf("The volume was detached successfully, but the VM failed to start: %s. Please start it manually.", err.Error()),
 			)
-		}
-	}
-}
-
-func (r *VolumeAttachmentResource) waitForVmStatus(ctx context.Context, vmID int64, targetStatus string, timeout time.Duration, opts *client.RequestOpts) error {
-	deadline := time.Now().Add(timeout)
-	for {
-		if time.Now().After(deadline) {
-			return fmt.Errorf("timed out waiting for VM %d to reach status %s", vmID, targetStatus)
-		}
-
-		vm, err := r.client.GetVm(ctx, vmID, opts)
-		if err != nil {
-			return fmt.Errorf("failed to get VM status: %w", err)
-		}
-
-		tflog.Debug(ctx, "Polling VM status", map[string]any{
-			"vm_id":         vmID,
-			"current_status": vm.Status,
-			"target_status":  targetStatus,
-		})
-
-		if vm.Status == targetStatus {
-			return nil
-		}
-
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(5 * time.Second):
 		}
 	}
 }

@@ -3,9 +3,12 @@ package resources
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"strings"
 
 	"terraform-provider-prodata/internal/client"
 
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
@@ -16,8 +19,9 @@ import (
 )
 
 var (
-	_ resource.Resource              = &PublicIPAttachmentResource{}
-	_ resource.ResourceWithConfigure = &PublicIPAttachmentResource{}
+	_ resource.Resource                = &PublicIPAttachmentResource{}
+	_ resource.ResourceWithConfigure   = &PublicIPAttachmentResource{}
+	_ resource.ResourceWithImportState = &PublicIPAttachmentResource{}
 )
 
 type PublicIPAttachmentResource struct {
@@ -114,21 +118,20 @@ func (r *PublicIPAttachmentResource) Create(ctx context.Context, req resource.Cr
 		return
 	}
 
-	// Build request opts for region/project overrides
 	opts := r.buildOpts(&data)
-
+	vmID := data.VmID.ValueInt64()
 	attachReq := client.AttachPublicIPRequest{
 		PublicIPID: data.PublicIPID.ValueInt64(),
 	}
-
-	vmID := data.VmID.ValueInt64()
 
 	tflog.Debug(ctx, "Attaching public IP to VM", map[string]any{
 		"vm_id":        vmID,
 		"public_ip_id": attachReq.PublicIPID,
 	})
 
-	vm, err := r.client.AttachPublicIP(ctx, vmID, attachReq, opts)
+	vm, err := client.RetryOnBusy(ctx, client.RetryTimeoutShort, func() (*client.Vm, error) {
+		return r.client.AttachPublicIP(ctx, vmID, attachReq, opts)
+	})
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to Attach Public IP", err.Error())
 		return
@@ -136,7 +139,6 @@ func (r *PublicIPAttachmentResource) Create(ctx context.Context, req resource.Cr
 
 	data.PublicIP = types.StringValue(vm.PublicIP)
 
-	// Store the resolved region/project
 	region := data.Region.ValueString()
 	if region == "" {
 		region = r.client.Region
@@ -166,26 +168,32 @@ func (r *PublicIPAttachmentResource) Read(ctx context.Context, req resource.Read
 
 	opts := r.buildOpts(&data)
 	vmID := data.VmID.ValueInt64()
+	expectedPublicIPID := data.PublicIPID.ValueInt64()
 
 	tflog.Debug(ctx, "Reading public IP attachment", map[string]any{
-		"vm_id": vmID,
+		"vm_id":        vmID,
+		"public_ip_id": expectedPublicIPID,
 	})
 
 	vm, err := r.client.GetVm(ctx, vmID, opts)
 	if err != nil {
-		// If VM is gone, remove from state
-		tflog.Warn(ctx, "VM not found, removing public IP attachment from state", map[string]any{
-			"vm_id": vmID,
-			"error": err.Error(),
-		})
-		resp.State.RemoveResource(ctx)
+		if client.IsNotFound(err) {
+			tflog.Warn(ctx, "VM not found, removing public IP attachment from state", map[string]any{
+				"vm_id": vmID,
+			})
+			resp.State.RemoveResource(ctx)
+			return
+		}
+		resp.Diagnostics.AddError("Unable to Read VM for Public IP Attachment", err.Error())
 		return
 	}
 
-	// If VM has no public IP, remove from state
-	if vm.PublicIP == "" {
-		tflog.Warn(ctx, "VM has no public IP attached, removing from state", map[string]any{
-			"vm_id": vmID,
+	// Verify the SPECIFIC public IP is still attached (not just any IP)
+	if vm.PublicIPID == 0 || vm.PublicIPID != expectedPublicIPID {
+		tflog.Warn(ctx, "Public IP attachment drifted — expected public IP not attached", map[string]any{
+			"vm_id":                 vmID,
+			"expected_public_ip_id": expectedPublicIPID,
+			"actual_public_ip_id":   vm.PublicIPID,
 		})
 		resp.State.RemoveResource(ctx)
 		return
@@ -202,7 +210,6 @@ func (r *PublicIPAttachmentResource) Read(ctx context.Context, req resource.Read
 }
 
 func (r *PublicIPAttachmentResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
-	// All attributes are ForceNew, so Update should never be called.
 	resp.Diagnostics.AddError(
 		"Update Not Supported",
 		"All attributes of prodata_public_ip_attachment require replacement. This is a bug in the provider.",
@@ -226,6 +233,9 @@ func (r *PublicIPAttachmentResource) Delete(ctx context.Context, req resource.De
 
 	err := r.client.DetachPublicIP(ctx, vmID, opts)
 	if err != nil {
+		if client.IsNotFound(err) {
+			return
+		}
 		resp.Diagnostics.AddError("Unable to Detach Public IP", err.Error())
 		return
 	}
@@ -233,6 +243,43 @@ func (r *PublicIPAttachmentResource) Delete(ctx context.Context, req resource.De
 	tflog.Debug(ctx, "Detached public IP from VM", map[string]any{
 		"vm_id": vmID,
 	})
+}
+
+func (r *PublicIPAttachmentResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
+	parts := strings.SplitN(req.ID, ":", 2)
+	if len(parts) != 2 {
+		resp.Diagnostics.AddError(
+			"Invalid Import ID",
+			fmt.Sprintf("Expected format 'vm_id:public_ip_id', got: %s", req.ID),
+		)
+		return
+	}
+
+	vmID, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		resp.Diagnostics.AddError(
+			"Invalid Import ID",
+			fmt.Sprintf("Could not parse vm_id as integer: %s", parts[0]),
+		)
+		return
+	}
+
+	publicIPID, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil {
+		resp.Diagnostics.AddError(
+			"Invalid Import ID",
+			fmt.Sprintf("Could not parse public_ip_id as integer: %s", parts[1]),
+		)
+		return
+	}
+
+	tflog.Info(ctx, "Importing public IP attachment", map[string]any{
+		"vm_id":        vmID,
+		"public_ip_id": publicIPID,
+	})
+
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("vm_id"), vmID)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("public_ip_id"), publicIPID)...)
 }
 
 func (r *PublicIPAttachmentResource) buildOpts(data *PublicIPAttachmentResourceModel) *client.RequestOpts {
