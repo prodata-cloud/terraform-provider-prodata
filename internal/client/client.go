@@ -219,6 +219,25 @@ func (c *Client) GetVolume(ctx context.Context, id int64, opts *RequestOpts) (*V
 	return &volume, nil
 }
 
+// VmDisk represents an attached volume (VmDisk) on a VM.
+type VmDisk struct {
+	ID         int64  `json:"id"`
+	UserDiskID *int64 `json:"userDiskId"`
+	Name       string `json:"name"`
+	Type       string `json:"type"`
+	Size       int64  `json:"size"`
+	BootDisk   bool   `json:"bootDisk"`
+}
+
+func (c *Client) GetVmVolumes(ctx context.Context, vmID int64, opts *RequestOpts) ([]VmDisk, error) {
+	var disks []VmDisk
+	path := fmt.Sprintf("/api/v2/vms/%d/volumes", vmID)
+	if err := c.Do(ctx, http.MethodGet, path, nil, &disks, opts); err != nil {
+		return nil, err
+	}
+	return disks, nil
+}
+
 type CreateVolumeRequest struct {
 	Region     string `json:"region"`
 	ProjectTag string `json:"projectTag"`

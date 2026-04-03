@@ -3,9 +3,11 @@ package resources
 import (
 	"context"
 	"fmt"
+	"strconv"
 
 	"terraform-provider-prodata/internal/client"
 
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
@@ -16,8 +18,9 @@ import (
 )
 
 var (
-	_ resource.Resource              = &PublicIPResource{}
-	_ resource.ResourceWithConfigure = &PublicIPResource{}
+	_ resource.Resource                = &PublicIPResource{}
+	_ resource.ResourceWithConfigure   = &PublicIPResource{}
+	_ resource.ResourceWithImportState = &PublicIPResource{}
 )
 
 type PublicIPResource struct {
@@ -304,4 +307,22 @@ func (r *PublicIPResource) Delete(ctx context.Context, req resource.DeleteReques
 	}
 
 	tflog.Debug(ctx, "Deleted public IP", map[string]any{"id": ipID})
+}
+
+func (r *PublicIPResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
+	id, err := strconv.ParseInt(req.ID, 10, 64)
+	if err != nil {
+		resp.Diagnostics.AddError(
+			"Invalid Import ID",
+			fmt.Sprintf("Expected integer public IP ID, got: %s\n\n"+
+				"Usage: terraform import prodata_public_ip.example <public_ip_id>\n"+
+				"Example: terraform import prodata_public_ip.example 123", req.ID),
+		)
+		return
+	}
+
+	tflog.Info(ctx, "Importing public IP", map[string]any{"id": id})
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), id)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("region"), r.client.Region)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("project_tag"), r.client.ProjectTag)...)
 }
