@@ -250,7 +250,9 @@ func (r *PublicIPAttachmentResource) ImportState(ctx context.Context, req resour
 	if len(parts) != 2 {
 		resp.Diagnostics.AddError(
 			"Invalid Import ID",
-			fmt.Sprintf("Expected format 'vm_id:public_ip_id', got: %s", req.ID),
+			fmt.Sprintf("Expected format 'vm_id:public_ip_id', got: %s\n\n"+
+				"Usage: terraform import prodata_public_ip_attachment.example <vm_id>:<public_ip_id>\n"+
+				"Example: terraform import prodata_public_ip_attachment.example 123:456", req.ID),
 		)
 		return
 	}
@@ -259,7 +261,9 @@ func (r *PublicIPAttachmentResource) ImportState(ctx context.Context, req resour
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Invalid Import ID",
-			fmt.Sprintf("Could not parse vm_id as integer: %s", parts[0]),
+			fmt.Sprintf("Could not parse vm_id as integer: %s\n\n"+
+				"Usage: terraform import prodata_public_ip_attachment.example <vm_id>:<public_ip_id>\n"+
+				"Example: terraform import prodata_public_ip_attachment.example 123:456", parts[0]),
 		)
 		return
 	}
@@ -268,7 +272,9 @@ func (r *PublicIPAttachmentResource) ImportState(ctx context.Context, req resour
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Invalid Import ID",
-			fmt.Sprintf("Could not parse public_ip_id as integer: %s", parts[1]),
+			fmt.Sprintf("Could not parse public_ip_id as integer: %s\n\n"+
+				"Usage: terraform import prodata_public_ip_attachment.example <vm_id>:<public_ip_id>\n"+
+				"Example: terraform import prodata_public_ip_attachment.example 123:456", parts[1]),
 		)
 		return
 	}
@@ -280,6 +286,8 @@ func (r *PublicIPAttachmentResource) ImportState(ctx context.Context, req resour
 
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("vm_id"), vmID)...)
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("public_ip_id"), publicIPID)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("region"), r.client.Region)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("project_tag"), r.client.ProjectTag)...)
 }
 
 func (r *PublicIPAttachmentResource) buildOpts(data *PublicIPAttachmentResourceModel) *client.RequestOpts {

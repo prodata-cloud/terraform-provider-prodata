@@ -3,9 +3,11 @@ package resources
 import (
 	"context"
 	"fmt"
+	"strconv"
 
 	"terraform-provider-prodata/internal/client"
 
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
@@ -16,8 +18,9 @@ import (
 )
 
 var (
-	_ resource.Resource              = &VolumeResource{}
-	_ resource.ResourceWithConfigure = &VolumeResource{}
+	_ resource.Resource                = &VolumeResource{}
+	_ resource.ResourceWithConfigure   = &VolumeResource{}
+	_ resource.ResourceWithImportState = &VolumeResource{}
 )
 
 type VolumeResource struct {
@@ -295,4 +298,22 @@ func (r *VolumeResource) Delete(ctx context.Context, req resource.DeleteRequest,
 	}
 
 	tflog.Debug(ctx, "Deleted volume", map[string]any{"id": volumeID})
+}
+
+func (r *VolumeResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
+	id, err := strconv.ParseInt(req.ID, 10, 64)
+	if err != nil {
+		resp.Diagnostics.AddError(
+			"Invalid Import ID",
+			fmt.Sprintf("Expected integer volume ID, got: %s\n\n"+
+				"Usage: terraform import prodata_volume.example <volume_id>\n"+
+				"Example: terraform import prodata_volume.example 123", req.ID),
+		)
+		return
+	}
+
+	tflog.Info(ctx, "Importing volume", map[string]any{"id": id})
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), id)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("region"), r.client.Region)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("project_tag"), r.client.ProjectTag)...)
 }

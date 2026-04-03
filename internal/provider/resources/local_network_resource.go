@@ -3,9 +3,11 @@ package resources
 import (
 	"context"
 	"fmt"
+	"strconv"
 
 	"terraform-provider-prodata/internal/client"
 
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
@@ -16,8 +18,9 @@ import (
 )
 
 var (
-	_ resource.Resource              = &LocalNetworkResource{}
-	_ resource.ResourceWithConfigure = &LocalNetworkResource{}
+	_ resource.Resource                = &LocalNetworkResource{}
+	_ resource.ResourceWithConfigure   = &LocalNetworkResource{}
+	_ resource.ResourceWithImportState = &LocalNetworkResource{}
 )
 
 type LocalNetworkResource struct {
@@ -332,4 +335,22 @@ func (r *LocalNetworkResource) Delete(ctx context.Context, req resource.DeleteRe
 	}
 
 	tflog.Debug(ctx, "Deleted local network", map[string]any{"id": networkID})
+}
+
+func (r *LocalNetworkResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
+	id, err := strconv.ParseInt(req.ID, 10, 64)
+	if err != nil {
+		resp.Diagnostics.AddError(
+			"Invalid Import ID",
+			fmt.Sprintf("Expected integer local network ID, got: %s\n\n"+
+				"Usage: terraform import prodata_local_network.example <network_id>\n"+
+				"Example: terraform import prodata_local_network.example 123", req.ID),
+		)
+		return
+	}
+
+	tflog.Info(ctx, "Importing local network", map[string]any{"id": id})
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), id)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("region"), r.client.Region)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("project_tag"), r.client.ProjectTag)...)
 }

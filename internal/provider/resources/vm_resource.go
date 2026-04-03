@@ -780,13 +780,17 @@ func (r *VmResource) ImportState(ctx context.Context, req resource.ImportStateRe
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Invalid Import ID",
-			fmt.Sprintf("Expected integer VM ID, got: %s", req.ID),
+			fmt.Sprintf("Expected integer VM ID, got: %s\n\n"+
+				"Usage: terraform import prodata_vm.example <vm_id>\n"+
+				"Example: terraform import prodata_vm.example 123", req.ID),
 		)
 		return
 	}
 
 	tflog.Info(ctx, "Importing virtual machine", map[string]any{"id": id})
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), id)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("region"), r.client.Region)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("project_tag"), r.client.ProjectTag)...)
 }
 
 func (r *VmResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {

@@ -3,10 +3,13 @@ package resources
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"terraform-provider-prodata/internal/client"
 
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
@@ -17,8 +20,9 @@ import (
 )
 
 var (
-	_ resource.Resource              = &VolumeAttachmentResource{}
-	_ resource.ResourceWithConfigure = &VolumeAttachmentResource{}
+	_ resource.Resource                = &VolumeAttachmentResource{}
+	_ resource.ResourceWithConfigure   = &VolumeAttachmentResource{}
+	_ resource.ResourceWithImportState = &VolumeAttachmentResource{}
 )
 
 type VolumeAttachmentResource struct {
@@ -284,4 +288,85 @@ func (r *VolumeAttachmentResource) buildOpts(data *VolumeAttachmentResourceModel
 		opts.ProjectTag = data.ProjectTag.ValueString()
 	}
 	return opts
+}
+
+func (r *VolumeAttachmentResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
+	parts := strings.SplitN(req.ID, ":", 2)
+	if len(parts) != 2 {
+		resp.Diagnostics.AddError(
+			"Invalid Import ID",
+			fmt.Sprintf("Expected format 'vm_id:volume_id', got: %s\n\n"+
+				"Usage: terraform import prodata_volume_attachment.example <vm_id>:<volume_id>\n"+
+				"Example: terraform import prodata_volume_attachment.example 123:456", req.ID),
+		)
+		return
+	}
+
+	vmID, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		resp.Diagnostics.AddError(
+			"Invalid Import ID",
+			fmt.Sprintf("Could not parse vm_id as integer: %s\n\n"+
+				"Usage: terraform import prodata_volume_attachment.example <vm_id>:<volume_id>\n"+
+				"Example: terraform import prodata_volume_attachment.example 123:456", parts[0]),
+		)
+		return
+	}
+
+	volumeID, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil {
+		resp.Diagnostics.AddError(
+			"Invalid Import ID",
+			fmt.Sprintf("Could not parse volume_id as integer: %s\n\n"+
+				"Usage: terraform import prodata_volume_attachment.example <vm_id>:<volume_id>\n"+
+				"Example: terraform import prodata_volume_attachment.example 123:456", parts[1]),
+		)
+		return
+	}
+
+	// Resolve attached_volume_id (VmDisk ID) via API
+	opts := &client.RequestOpts{
+		Region:     r.client.Region,
+		ProjectTag: r.client.ProjectTag,
+	}
+
+	vmDisks, err := r.client.GetVmVolumes(ctx, vmID, opts)
+	if err != nil {
+		resp.Diagnostics.AddError(
+			"Unable to List VM Volumes",
+			fmt.Sprintf("Could not list volumes for VM %d: %s", vmID, err.Error()),
+		)
+		return
+	}
+
+	var attachedVolumeID int64
+	found := false
+	for _, disk := range vmDisks {
+		if disk.UserDiskID != nil && *disk.UserDiskID == volumeID {
+			attachedVolumeID = disk.ID
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		resp.Diagnostics.AddError(
+			"Volume Not Attached",
+			fmt.Sprintf("Volume %d is not attached to VM %d. "+
+				"Verify the volume is attached and the IDs are correct.", volumeID, vmID),
+		)
+		return
+	}
+
+	tflog.Info(ctx, "Importing volume attachment", map[string]any{
+		"vm_id":              vmID,
+		"volume_id":          volumeID,
+		"attached_volume_id": attachedVolumeID,
+	})
+
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("vm_id"), vmID)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("volume_id"), volumeID)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("attached_volume_id"), attachedVolumeID)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("region"), r.client.Region)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("project_tag"), r.client.ProjectTag)...)
 }
