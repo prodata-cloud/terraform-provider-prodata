@@ -67,4 +67,14 @@ resource "prodata_public_ip_attachment" "example" {
 
 ## Import
 
-Public IP attachments cannot be imported.
+Public IP attachments can be imported using `vm_id:public_ip_id`:
+
+```shell
+terraform import prodata_public_ip_attachment.example <vm_id>:<public_ip_id>
+```
+
+Example:
+
+```shell
+terraform import prodata_public_ip_attachment.example 123:456
+```

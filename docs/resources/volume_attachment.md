@@ -71,4 +71,16 @@ resource "prodata_volume_attachment" "data" {
 
 ## Import
 
-Volume attachments cannot be imported.
+Volume attachments can be imported using `vm_id:volume_id`:
+
+```shell
+terraform import prodata_volume_attachment.example <vm_id>:<volume_id>
+```
+
+Example:
+
+```shell
+terraform import prodata_volume_attachment.example 123:456
+```
+
+~> **Note:** During import, the provider makes an API call to resolve the `attached_volume_id` from the given `volume_id`. The volume must already be attached to the VM.

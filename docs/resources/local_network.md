@@ -39,4 +39,14 @@ resource "prodata_local_network" "example" {
 
 ## Import
 
-Local networks cannot be imported as the API does not provide sufficient information to reconstruct the Terraform state.
+Local networks can be imported using their ID:
+
+```shell
+terraform import prodata_local_network.example <network_id>
+```
+
+Example:
+
+```shell
+terraform import prodata_local_network.example 123
+```
