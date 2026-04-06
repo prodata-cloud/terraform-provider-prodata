@@ -38,4 +38,14 @@ resource "prodata_public_ip" "example" {
 
 ## Import
 
-Public IPs cannot be imported as the API does not provide sufficient information to reconstruct the Terraform state.
+Public IPs can be imported using their ID:
+
+```shell
+terraform import prodata_public_ip.example <public_ip_id>
+```
+
+Example:
+
+```shell
+terraform import prodata_public_ip.example 123
+```

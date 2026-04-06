@@ -75,4 +75,16 @@ resource "prodata_vm" "web_server" {
 
 ## Import
 
-VMs cannot be imported as the API does not provide sufficient information to reconstruct the Terraform state.
+VMs can be imported using their ID:
+
+```shell
+terraform import prodata_vm.example <vm_id>
+```
+
+Example:
+
+```shell
+terraform import prodata_vm.example 123
+```
+
+~> **Note:** The `password` and `ssh_public_key` attributes are write-only and cannot be read back from the API. After import, these attributes will be empty in state. If your configuration specifies them, Terraform will show a diff but no replacement will be forced.

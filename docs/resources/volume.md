@@ -39,4 +39,14 @@ resource "prodata_volume" "example" {
 
 ## Import
 
-Volumes cannot be imported as the API does not provide sufficient information to reconstruct the Terraform state.
+Volumes can be imported using their ID:
+
+```shell
+terraform import prodata_volume.example <volume_id>
+```
+
+Example:
+
+```shell
+terraform import prodata_volume.example 123
+```
