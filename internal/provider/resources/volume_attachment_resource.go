@@ -131,7 +131,7 @@ func (r *VolumeAttachmentResource) Create(ctx context.Context, req resource.Crea
 		"volume_id": attachReq.VolumeID,
 	})
 
-	volume, err := client.RetryOnBusy(ctx, client.RetryTimeoutShort, func() (*client.Volume, error) {
+	volume, err := client.RetryOnBusy(ctx, client.RetryTimeoutLong, func() (*client.Volume, error) {
 		return r.client.AttachVolume(ctx, vmID, attachReq, opts)
 	})
 	if err != nil {
@@ -230,17 +230,15 @@ func (r *VolumeAttachmentResource) Delete(ctx context.Context, req resource.Dele
 		"attached_volume_id": attachedVolumeID,
 	})
 
-	// Use a polling state machine to ensure the VM is stopped and then detach.
-	// This handles concurrent volume detach operations on the same VM:
+	// Poll VM status until it's stopped, then detach. No restart after detach:
 	// when Terraform destroys multiple volume_attachment resources in parallel,
-	// one detach may restart the VM before others finish, causing them to never
-	// see STOPPED. The loop re-checks state and retries on each iteration.
+	// the first detach stops the VM and leaves it stopped so subsequent detaches
+	// find it already stopped and complete immediately without stop/start cycles.
 	const (
 		pollInterval   = 5 * time.Second
 		overallTimeout = 10 * time.Minute
 	)
 	deadline := time.Now().Add(overallTimeout)
-	wasRunning := false
 
 	for {
 		if time.Now().After(deadline) {
@@ -284,7 +282,6 @@ func (r *VolumeAttachmentResource) Delete(ctx context.Context, req resource.Dele
 			goto detached
 
 		case "RUNNING":
-			wasRunning = true
 			tflog.Info(ctx, "VM is running, stopping before volume detach", map[string]any{"vm_id": vmID})
 			if err := r.client.StopVm(ctx, vmID, opts); err != nil {
 				// 627 = VM already being stopped/operated on by concurrent detach
@@ -299,12 +296,10 @@ func (r *VolumeAttachmentResource) Delete(ctx context.Context, req resource.Dele
 			sleepWithContext(ctx, pollInterval)
 
 		case "STOPPING":
-			wasRunning = true
 			tflog.Debug(ctx, "VM is stopping, waiting", map[string]any{"vm_id": vmID})
 			sleepWithContext(ctx, pollInterval)
 
 		case "STARTING":
-			wasRunning = true
 			tflog.Debug(ctx, "VM is starting, waiting for it to finish", map[string]any{"vm_id": vmID})
 			sleepWithContext(ctx, pollInterval)
 
@@ -326,20 +321,6 @@ detached:
 		"vm_id":              vmID,
 		"attached_volume_id": attachedVolumeID,
 	})
-
-	if wasRunning {
-		tflog.Info(ctx, "Restarting VM after volume detach", map[string]any{"vm_id": vmID})
-		if err := r.client.StartVm(ctx, vmID, opts); err != nil {
-			// Another concurrent detach may have already restarted the VM, or the VM
-			// is about to be destroyed — don't fail, just warn.
-			resp.Diagnostics.AddWarning(
-				"Volume detached but VM could not be restarted",
-				fmt.Sprintf("The volume was detached successfully, but the VM failed to start: %s. "+
-					"This is normal when multiple volumes are being detached simultaneously. "+
-					"Please start it manually if needed.", err.Error()),
-			)
-		}
-	}
 }
 
 // sleepWithContext sleeps for the given duration, but returns early if ctx is cancelled.
