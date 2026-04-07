@@ -874,7 +874,7 @@ func (c *Client) WaitForVmStatus(ctx context.Context, vmID int64, targetStatus s
 	consecutiveErrs := 0
 
 	for {
-		vm, err := c.GetVm(ctx, vmID, opts)
+		vm, err := c.GetVmStatus(ctx, vmID, opts)
 		if err != nil {
 			consecutiveErrs++
 			if consecutiveErrs >= maxConsecutiveErrs {

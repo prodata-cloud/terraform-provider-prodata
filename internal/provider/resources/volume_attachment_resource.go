@@ -230,7 +230,7 @@ func (r *VolumeAttachmentResource) Delete(ctx context.Context, req resource.Dele
 		"attached_volume_id": attachedVolumeID,
 	})
 
-	// Check VM status — if running, stop it first (SCSI hot-unplug not supported)
+	// Check VM status — if not stopped, stop it first (SCSI hot-unplug not supported)
 	vm, err := r.client.GetVm(ctx, vmID, opts)
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to Read VM before detach", err.Error())
@@ -238,19 +238,38 @@ func (r *VolumeAttachmentResource) Delete(ctx context.Context, req resource.Dele
 	}
 
 	needsRestart := false
-	if vm.Status == "RUNNING" {
+	switch vm.Status {
+	case "STOPPED":
+		// Already stopped, proceed to detach
+	case "STOPPING":
+		// Another operation already stopping this VM, just wait
+		tflog.Info(ctx, "VM is already stopping, waiting for STOPPED", map[string]any{"vm_id": vmID})
+		needsRestart = true
+		if err := r.client.WaitForVmStatus(ctx, vmID, "STOPPED", 5*time.Minute, opts); err != nil {
+			resp.Diagnostics.AddError("VM did not reach STOPPED state", err.Error())
+			return
+		}
+	case "STARTING":
+		// VM is starting — wait for RUNNING, then stop
+		tflog.Info(ctx, "VM is starting, waiting for RUNNING before stop", map[string]any{"vm_id": vmID})
+		if err := r.client.WaitForVmStatus(ctx, vmID, "RUNNING", 5*time.Minute, opts); err != nil {
+			resp.Diagnostics.AddError("VM did not reach RUNNING state", err.Error())
+			return
+		}
+		fallthrough
+	case "RUNNING":
 		tflog.Info(ctx, "VM is running, stopping before volume detach", map[string]any{"vm_id": vmID})
-
 		if err := r.client.StopVm(ctx, vmID, opts); err != nil {
 			resp.Diagnostics.AddError("Unable to Stop VM for volume detach", err.Error())
 			return
 		}
 		needsRestart = true
-
 		if err := r.client.WaitForVmStatus(ctx, vmID, "STOPPED", 5*time.Minute, opts); err != nil {
 			resp.Diagnostics.AddError("VM did not reach STOPPED state", err.Error())
 			return
 		}
+	default:
+		tflog.Warn(ctx, "VM in unexpected status, attempting detach anyway", map[string]any{"vm_id": vmID, "status": vm.Status})
 	}
 
 	err = r.client.DetachVolume(ctx, vmID, attachedVolumeID, opts)
