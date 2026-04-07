@@ -230,71 +230,123 @@ func (r *VolumeAttachmentResource) Delete(ctx context.Context, req resource.Dele
 		"attached_volume_id": attachedVolumeID,
 	})
 
-	// Check VM status — if not stopped, stop it first (SCSI hot-unplug not supported)
-	vm, err := r.client.GetVm(ctx, vmID, opts)
-	if err != nil {
-		resp.Diagnostics.AddError("Unable to Read VM before detach", err.Error())
-		return
+	// Use a polling state machine to ensure the VM is stopped and then detach.
+	// This handles concurrent volume detach operations on the same VM:
+	// when Terraform destroys multiple volume_attachment resources in parallel,
+	// one detach may restart the VM before others finish, causing them to never
+	// see STOPPED. The loop re-checks state and retries on each iteration.
+	const (
+		pollInterval   = 5 * time.Second
+		overallTimeout = 10 * time.Minute
+	)
+	deadline := time.Now().Add(overallTimeout)
+	wasRunning := false
+
+	for {
+		if time.Now().After(deadline) {
+			resp.Diagnostics.AddError(
+				"Volume detach timed out",
+				fmt.Sprintf("timed out waiting to detach volume from VM %d — VM could not be stopped or detach was blocked by concurrent operations", vmID),
+			)
+			return
+		}
+
+		vm, err := r.client.GetVmStatus(ctx, vmID, opts)
+		if err != nil {
+			if client.IsNotFound(err) {
+				tflog.Info(ctx, "VM not found, volume attachment already gone", map[string]any{"vm_id": vmID})
+				return
+			}
+			resp.Diagnostics.AddError("Unable to Read VM status", err.Error())
+			return
+		}
+
+		switch vm.Status {
+		case "STOPPED":
+			// VM is stopped — attempt detach
+			if err := r.client.DetachVolume(ctx, vmID, attachedVolumeID, opts); err != nil {
+				if client.IsNotFound(err) {
+					tflog.Info(ctx, "Volume already detached", map[string]any{"vm_id": vmID, "attached_volume_id": attachedVolumeID})
+					goto detached
+				}
+				// 627 = VM locked by another operation (concurrent detach), retry
+				// 711 = VM became running between our check and the API call, retry
+				if client.IsAPIError(err, 627) || client.IsAPIError(err, 711) {
+					tflog.Info(ctx, "Detach blocked by concurrent operation, retrying", map[string]any{
+						"vm_id": vmID, "error": err.Error(),
+					})
+					sleepWithContext(ctx, pollInterval)
+					continue
+				}
+				resp.Diagnostics.AddError("Unable to Detach Volume", err.Error())
+				return
+			}
+			goto detached
+
+		case "RUNNING":
+			wasRunning = true
+			tflog.Info(ctx, "VM is running, stopping before volume detach", map[string]any{"vm_id": vmID})
+			if err := r.client.StopVm(ctx, vmID, opts); err != nil {
+				// 627 = VM already being stopped/operated on by concurrent detach
+				if client.IsAPIError(err, 627) {
+					tflog.Info(ctx, "VM is busy (stop rejected), will re-check status", map[string]any{"vm_id": vmID})
+					sleepWithContext(ctx, pollInterval)
+					continue
+				}
+				resp.Diagnostics.AddError("Unable to Stop VM for volume detach", err.Error())
+				return
+			}
+			sleepWithContext(ctx, pollInterval)
+
+		case "STOPPING":
+			wasRunning = true
+			tflog.Debug(ctx, "VM is stopping, waiting", map[string]any{"vm_id": vmID})
+			sleepWithContext(ctx, pollInterval)
+
+		case "STARTING":
+			wasRunning = true
+			tflog.Debug(ctx, "VM is starting, waiting for it to finish", map[string]any{"vm_id": vmID})
+			sleepWithContext(ctx, pollInterval)
+
+		default:
+			tflog.Warn(ctx, "VM in unexpected status, attempting detach", map[string]any{"vm_id": vmID, "status": vm.Status})
+			if err := r.client.DetachVolume(ctx, vmID, attachedVolumeID, opts); err != nil {
+				if client.IsNotFound(err) {
+					goto detached
+				}
+				resp.Diagnostics.AddError("Unable to Detach Volume", err.Error())
+				return
+			}
+			goto detached
+		}
 	}
 
-	needsRestart := false
-	switch vm.Status {
-	case "STOPPED":
-		// Already stopped, proceed to detach
-	case "STOPPING":
-		// Another operation already stopping this VM, just wait
-		tflog.Info(ctx, "VM is already stopping, waiting for STOPPED", map[string]any{"vm_id": vmID})
-		needsRestart = true
-		if err := r.client.WaitForVmStatus(ctx, vmID, "STOPPED", 5*time.Minute, opts); err != nil {
-			resp.Diagnostics.AddError("VM did not reach STOPPED state", err.Error())
-			return
-		}
-	case "STARTING":
-		// VM is starting — wait for RUNNING, then stop
-		tflog.Info(ctx, "VM is starting, waiting for RUNNING before stop", map[string]any{"vm_id": vmID})
-		if err := r.client.WaitForVmStatus(ctx, vmID, "RUNNING", 5*time.Minute, opts); err != nil {
-			resp.Diagnostics.AddError("VM did not reach RUNNING state", err.Error())
-			return
-		}
-		fallthrough
-	case "RUNNING":
-		tflog.Info(ctx, "VM is running, stopping before volume detach", map[string]any{"vm_id": vmID})
-		if err := r.client.StopVm(ctx, vmID, opts); err != nil {
-			resp.Diagnostics.AddError("Unable to Stop VM for volume detach", err.Error())
-			return
-		}
-		needsRestart = true
-		if err := r.client.WaitForVmStatus(ctx, vmID, "STOPPED", 5*time.Minute, opts); err != nil {
-			resp.Diagnostics.AddError("VM did not reach STOPPED state", err.Error())
-			return
-		}
-	default:
-		tflog.Warn(ctx, "VM in unexpected status, attempting detach anyway", map[string]any{"vm_id": vmID, "status": vm.Status})
-	}
-
-	err = r.client.DetachVolume(ctx, vmID, attachedVolumeID, opts)
-	if err != nil {
-		if needsRestart {
-			tflog.Warn(ctx, "Detach failed, attempting to restart VM", map[string]any{"vm_id": vmID})
-			_ = r.client.StartVm(ctx, vmID, opts)
-		}
-		resp.Diagnostics.AddError("Unable to Detach Volume", err.Error())
-		return
-	}
-
+detached:
 	tflog.Debug(ctx, "Detached volume from VM", map[string]any{
 		"vm_id":              vmID,
 		"attached_volume_id": attachedVolumeID,
 	})
 
-	if needsRestart {
+	if wasRunning {
 		tflog.Info(ctx, "Restarting VM after volume detach", map[string]any{"vm_id": vmID})
 		if err := r.client.StartVm(ctx, vmID, opts); err != nil {
+			// Another concurrent detach may have already restarted the VM, or the VM
+			// is about to be destroyed — don't fail, just warn.
 			resp.Diagnostics.AddWarning(
 				"Volume detached but VM could not be restarted",
-				fmt.Sprintf("The volume was detached successfully, but the VM failed to start: %s. Please start it manually.", err.Error()),
+				fmt.Sprintf("The volume was detached successfully, but the VM failed to start: %s. "+
+					"This is normal when multiple volumes are being detached simultaneously. "+
+					"Please start it manually if needed.", err.Error()),
 			)
 		}
+	}
+}
+
+// sleepWithContext sleeps for the given duration, but returns early if ctx is cancelled.
+func sleepWithContext(ctx context.Context, d time.Duration) {
+	select {
+	case <-ctx.Done():
+	case <-time.After(d):
 	}
 }
 
