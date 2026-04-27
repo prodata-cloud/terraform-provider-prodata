@@ -115,19 +115,19 @@ func (r *VmResource) Schema(ctx context.Context, req resource.SchemaRequest, res
 				},
 			},
 			"cpu_cores": schema.Int64Attribute{
-				MarkdownDescription: "The number of CPU cores for the virtual machine. Minimum 1.",
+				MarkdownDescription: "The number of CPU cores for the virtual machine. Minimum 1. Changing this forces a VM reboot.",
 				Required:            true,
 			},
 			"ram": schema.Int64Attribute{
-				MarkdownDescription: "The amount of RAM in GB for the virtual machine. Minimum 1.",
+				MarkdownDescription: "The amount of RAM in GB for the virtual machine. Minimum 1. Changing this forces a VM reboot.",
 				Required:            true,
 			},
 			"disk_size": schema.Int64Attribute{
-				MarkdownDescription: "The size of the disk in GB. Minimum 10. Can only be increased.",
+				MarkdownDescription: "The size of the disk in GB. Minimum 10. Can only be increased. Changing this forces a VM reboot.",
 				Required:            true,
 			},
 			"disk_type": schema.StringAttribute{
-				MarkdownDescription: "The type of disk (HDD, SSD, or NVME). Can only be upgraded (e.g. HDD -> SSD).",
+				MarkdownDescription: "The type of disk (HDD, SSD, or NVME). Can only be upgraded (e.g. HDD -> SSD). Changing this forces a VM reboot.",
 				Required:            true,
 			},
 			"local_network_id": schema.Int64Attribute{
