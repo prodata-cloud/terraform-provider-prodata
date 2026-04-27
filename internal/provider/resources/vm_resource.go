@@ -147,10 +147,12 @@ func (r *VmResource) Schema(ctx context.Context, req resource.SchemaRequest, res
 				},
 			},
 			"public_ip_id": schema.Int64Attribute{
-				MarkdownDescription: "The ID of the public IP to attach to the VM (optional).",
+				MarkdownDescription: "The ID of the public IP to attach to the VM (optional). Changing this forces a new resource.",
 				Optional:            true,
+				Computed:            true,
 				PlanModifiers: []planmodifier.Int64{
 					int64planmodifier.RequiresReplace(),
+					int64planmodifier.UseStateForUnknown(),
 				},
 			},
 			"public_ip": schema.StringAttribute{
@@ -494,10 +496,9 @@ func (r *VmResource) Read(ctx context.Context, req resource.ReadRequest, resp *r
 		return
 	}
 
-	// Preserve write-only / create-time attributes before API call
+	// Preserve write-only attributes before API call (never returned by API)
 	password := data.Password
 	sshPublicKey := data.SSHPublicKey
-	publicIPID := data.PublicIPID
 
 	opts := &client.RequestOpts{}
 	if !data.Region.IsNull() && !data.Region.IsUnknown() {
@@ -562,10 +563,18 @@ func (r *VmResource) Read(ctx context.Context, req resource.ReadRequest, resp *r
 		data.Description = types.StringNull()
 	}
 
-	// Restore write-only / create-time attributes (API never returns these)
+	// Restore write-only attributes (never returned by API)
 	data.Password = password
 	data.SSHPublicKey = sshPublicKey
-	data.PublicIPID = publicIPID
+
+	// public_ip_id: always reflect what the API reports so import works correctly.
+	// Computed+UseStateForUnknown ensures that if the user omits it from config,
+	// Terraform keeps the state value without showing a diff.
+	if vm.PublicIPID != 0 {
+		data.PublicIPID = types.Int64Value(vm.PublicIPID)
+	} else {
+		data.PublicIPID = types.Int64Null()
+	}
 
 	tflog.Debug(ctx, "Read virtual machine", map[string]any{
 		"id":     vmID,
@@ -763,8 +772,11 @@ func (r *VmResource) Update(ctx context.Context, req resource.UpdateRequest, res
 		plan.Description = types.StringNull()
 	}
 
-	// Preserve write-only / create-time attributes
-	plan.PublicIPID = state.PublicIPID
+	if vm.PublicIPID != 0 {
+		plan.PublicIPID = types.Int64Value(vm.PublicIPID)
+	} else {
+		plan.PublicIPID = types.Int64Null()
+	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
