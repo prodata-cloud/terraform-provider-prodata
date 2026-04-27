@@ -199,8 +199,6 @@ func (r *VmResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequ
 		return
 	}
 
-	// This is a replacement (both state and plan exist, but RequiresReplace triggered).
-	// Warn that create_before_destroy will fail due to VM name uniqueness constraint.
 	var stateData, planData VmResourceModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &stateData)...)
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &planData)...)
@@ -208,8 +206,13 @@ func (r *VmResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequ
 		return
 	}
 
-	// If the name stays the same during replacement with create_before_destroy,
-	// the existing VM will be automatically renamed to "{name}-replacing" to avoid conflict.
+	// planData.ID is Unknown only when Terraform has planned a resource replacement
+	// (RequiresReplace triggered). For in-place updates the ID stays Known.
+	if !planData.ID.IsUnknown() {
+		return
+	}
+
+	// Warn that create_before_destroy will fail due to VM name uniqueness constraint.
 	if stateData.Name.Equal(planData.Name) {
 		resp.Diagnostics.AddWarning(
 			"Resource replacement with same name",
