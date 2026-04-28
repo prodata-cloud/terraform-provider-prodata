@@ -65,7 +65,6 @@ resource "prodata_vm" "web_server" {
 - `region` (String) Region where the VM will be created. If not specified, uses the provider's default region. Changing this forces a new resource.
 - `project_tag` (String) Project tag where the VM will be created. If not specified, uses the provider's default project_tag. Changing this forces a new resource.
 - `private_ip` (String) The private IP address for the virtual machine. If not specified, an available IP will be auto-assigned from the local network. Changing this forces a new resource.
-- `public_ip_id` (Number) The ID of the public IP to attach to the VM. Changing this forces a new resource.
 - `ssh_public_key` (String) SSH public key for authentication. Changing this forces a new resource.
 - `description` (String) Description of the virtual machine. Changing this forces a new resource.
 

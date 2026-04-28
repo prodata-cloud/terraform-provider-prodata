@@ -208,9 +208,19 @@ func (r *VmResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequ
 		return
 	}
 
-	// planData.ID is Unknown only when Terraform has planned a resource replacement
-	// (RequiresReplace triggered). For in-place updates the ID stays Known.
-	if !planData.ID.IsUnknown() {
+	// A replacement is happening when any RequiresReplace attribute has changed.
+	// We can't rely on planData.ID.IsUnknown() because UseStateForUnknown on id
+	// runs before ModifyPlan and keeps the old value in the plan object.
+	// password and ssh_public_key are write-only: after import the state is null,
+	// so they always look "changed". Only check readable RequiresReplace attributes.
+	requiresReplace := !stateData.ImageID.Equal(planData.ImageID) ||
+		!stateData.LocalNetworkID.Equal(planData.LocalNetworkID) ||
+		!stateData.PrivateIP.Equal(planData.PrivateIP) ||
+		!stateData.Region.Equal(planData.Region) ||
+		!stateData.ProjectTag.Equal(planData.ProjectTag) ||
+		!stateData.Description.Equal(planData.Description) ||
+		(!stateData.PublicIPID.IsNull() && !stateData.PublicIPID.Equal(planData.PublicIPID))
+	if !requiresReplace {
 		return
 	}
 
