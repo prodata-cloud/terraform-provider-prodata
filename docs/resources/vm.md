@@ -8,7 +8,9 @@ description: |-
 
 Manages a ProData virtual machine.
 
-~> **Note:** Most attributes require resource replacement when changed (destroy and recreate). The `name` attribute can be updated in-place without recreating the VM.
+~> **Note:** Most attributes require resource replacement when changed (destroy and recreate). The `name`, `cpu_cores`, `ram`, `disk_size`, and `disk_type` attributes can be updated in-place — changing them forces a VM reboot but not a full replacement.
+
+~> **Note:** After attaching a public IP to a VM (via `prodata_public_ip_attachment`), the VM must be rebooted for the IP to become active.
 
 ## Example Usage
 
@@ -51,10 +53,10 @@ resource "prodata_vm" "web_server" {
 
 - `name` (String) The name of the virtual machine. Must be 3-63 characters, contain at least one letter, only letters, numbers, and hyphens. Can be updated in-place.
 - `image_id` (Number) The ID of the image to use for the virtual machine. Changing this forces a new resource.
-- `cpu_cores` (Number) The number of CPU cores for the virtual machine. Minimum 1. Changing this forces a new resource.
-- `ram` (Number) The amount of RAM in GB for the virtual machine. Minimum 1. Changing this forces a new resource.
-- `disk_size` (Number) The size of the disk in GB. Minimum 10. Changing this forces a new resource.
-- `disk_type` (String) The type of disk (HDD, SSD, or NVME). Changing this forces a new resource.
+- `cpu_cores` (Number) The number of CPU cores for the virtual machine. Minimum 1. Changing this forces a VM reboot.
+- `ram` (Number) The amount of RAM in GB for the virtual machine. Minimum 1. Changing this forces a VM reboot.
+- `disk_size` (Number) The size of the disk in GB. Minimum 10. Can only be increased. Changing this forces a VM reboot.
+- `disk_type` (String) The type of disk (HDD, SSD, or NVME). Can only be upgraded (e.g. HDD → SSD). Changing this forces a VM reboot.
 - `local_network_id` (Number) The ID of the local network to attach the VM to. Changing this forces a new resource.
 - `password` (String, Sensitive) The password for the virtual machine. Changing this forces a new resource.
 
@@ -63,7 +65,6 @@ resource "prodata_vm" "web_server" {
 - `region` (String) Region where the VM will be created. If not specified, uses the provider's default region. Changing this forces a new resource.
 - `project_tag` (String) Project tag where the VM will be created. If not specified, uses the provider's default project_tag. Changing this forces a new resource.
 - `private_ip` (String) The private IP address for the virtual machine. If not specified, an available IP will be auto-assigned from the local network. Changing this forces a new resource.
-- `public_ip_id` (Number) The ID of the public IP to attach to the VM. Changing this forces a new resource.
 - `ssh_public_key` (String) SSH public key for authentication. Changing this forces a new resource.
 - `description` (String) Description of the virtual machine. Changing this forces a new resource.
 

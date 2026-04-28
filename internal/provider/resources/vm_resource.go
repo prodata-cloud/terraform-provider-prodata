@@ -115,19 +115,19 @@ func (r *VmResource) Schema(ctx context.Context, req resource.SchemaRequest, res
 				},
 			},
 			"cpu_cores": schema.Int64Attribute{
-				MarkdownDescription: "The number of CPU cores for the virtual machine. Minimum 1.",
+				MarkdownDescription: "The number of CPU cores for the virtual machine. Minimum 1. Changing this forces a VM reboot.",
 				Required:            true,
 			},
 			"ram": schema.Int64Attribute{
-				MarkdownDescription: "The amount of RAM in GB for the virtual machine. Minimum 1.",
+				MarkdownDescription: "The amount of RAM in GB for the virtual machine. Minimum 1. Changing this forces a VM reboot.",
 				Required:            true,
 			},
 			"disk_size": schema.Int64Attribute{
-				MarkdownDescription: "The size of the disk in GB. Minimum 10. Can only be increased.",
+				MarkdownDescription: "The size of the disk in GB. Minimum 10. Can only be increased. Changing this forces a VM reboot.",
 				Required:            true,
 			},
 			"disk_type": schema.StringAttribute{
-				MarkdownDescription: "The type of disk (HDD, SSD, or NVME). Can only be upgraded (e.g. HDD -> SSD).",
+				MarkdownDescription: "The type of disk (HDD, SSD, or NVME). Can only be upgraded (e.g. HDD -> SSD). Changing this forces a VM reboot.",
 				Required:            true,
 			},
 			"local_network_id": schema.Int64Attribute{
@@ -147,10 +147,12 @@ func (r *VmResource) Schema(ctx context.Context, req resource.SchemaRequest, res
 				},
 			},
 			"public_ip_id": schema.Int64Attribute{
-				MarkdownDescription: "The ID of the public IP to attach to the VM (optional).",
+				MarkdownDescription: "The ID of the public IP to attach to the VM (optional). Changing this forces a new resource.",
 				Optional:            true,
+				Computed:            true,
 				PlanModifiers: []planmodifier.Int64{
 					int64planmodifier.RequiresReplace(),
+					int64planmodifier.UseStateForUnknown(),
 				},
 			},
 			"public_ip": schema.StringAttribute{
@@ -199,8 +201,6 @@ func (r *VmResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequ
 		return
 	}
 
-	// This is a replacement (both state and plan exist, but RequiresReplace triggered).
-	// Warn that create_before_destroy will fail due to VM name uniqueness constraint.
 	var stateData, planData VmResourceModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &stateData)...)
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &planData)...)
@@ -208,8 +208,23 @@ func (r *VmResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequ
 		return
 	}
 
-	// If the name stays the same during replacement with create_before_destroy,
-	// the existing VM will be automatically renamed to "{name}-replacing" to avoid conflict.
+	// A replacement is happening when any RequiresReplace attribute has changed.
+	// We can't rely on planData.ID.IsUnknown() because UseStateForUnknown on id
+	// runs before ModifyPlan and keeps the old value in the plan object.
+	// password and ssh_public_key are write-only: after import the state is null,
+	// so they always look "changed". Only check readable RequiresReplace attributes.
+	requiresReplace := !stateData.ImageID.Equal(planData.ImageID) ||
+		!stateData.LocalNetworkID.Equal(planData.LocalNetworkID) ||
+		!stateData.PrivateIP.Equal(planData.PrivateIP) ||
+		!stateData.Region.Equal(planData.Region) ||
+		!stateData.ProjectTag.Equal(planData.ProjectTag) ||
+		!stateData.Description.Equal(planData.Description) ||
+		(!stateData.PublicIPID.IsNull() && !stateData.PublicIPID.Equal(planData.PublicIPID))
+	if !requiresReplace {
+		return
+	}
+
+	// Warn that create_before_destroy will fail due to VM name uniqueness constraint.
 	if stateData.Name.Equal(planData.Name) {
 		resp.Diagnostics.AddWarning(
 			"Resource replacement with same name",
@@ -491,10 +506,9 @@ func (r *VmResource) Read(ctx context.Context, req resource.ReadRequest, resp *r
 		return
 	}
 
-	// Preserve write-only / create-time attributes before API call
+	// Preserve write-only attributes before API call (never returned by API)
 	password := data.Password
 	sshPublicKey := data.SSHPublicKey
-	publicIPID := data.PublicIPID
 
 	opts := &client.RequestOpts{}
 	if !data.Region.IsNull() && !data.Region.IsUnknown() {
@@ -559,10 +573,18 @@ func (r *VmResource) Read(ctx context.Context, req resource.ReadRequest, resp *r
 		data.Description = types.StringNull()
 	}
 
-	// Restore write-only / create-time attributes (API never returns these)
+	// Restore write-only attributes (never returned by API)
 	data.Password = password
 	data.SSHPublicKey = sshPublicKey
-	data.PublicIPID = publicIPID
+
+	// public_ip_id: always reflect what the API reports so import works correctly.
+	// Computed+UseStateForUnknown ensures that if the user omits it from config,
+	// Terraform keeps the state value without showing a diff.
+	if vm.PublicIPID != 0 {
+		data.PublicIPID = types.Int64Value(vm.PublicIPID)
+	} else {
+		data.PublicIPID = types.Int64Null()
+	}
 
 	tflog.Debug(ctx, "Read virtual machine", map[string]any{
 		"id":     vmID,
@@ -609,116 +631,107 @@ func (r *VmResource) Update(ctx context.Context, req resource.UpdateRequest, res
 		}
 	}
 
-	// Update CPU/RAM if changed
 	cpuChanged := !state.CPUCores.Equal(plan.CPUCores)
 	ramChanged := !state.RAM.Equal(plan.RAM)
-
-	if cpuChanged || ramChanged {
-		tflog.Info(ctx, "Updating VM resources", map[string]any{
-			"id":      vmID,
-			"old_cpu": state.CPUCores.ValueInt64(),
-			"new_cpu": plan.CPUCores.ValueInt64(),
-			"old_ram": state.RAM.ValueInt64(),
-			"new_ram": plan.RAM.ValueInt64(),
-		})
-
-		needsRestart, err := r.stopIfRunning(ctx, vmID, opts)
-		if err != nil {
-			resp.Diagnostics.AddError("Unable to Stop VM for resource update", err.Error())
-			return
-		}
-
-		updateReq := client.UpdateVmResourcesRequest{
-			CPUCores: plan.CPUCores.ValueInt64(),
-			RAM:      plan.RAM.ValueInt64(),
-		}
-
-		if err := r.client.UpdateVmResources(ctx, vmID, updateReq, opts); err != nil {
-			if needsRestart {
-				tflog.Warn(ctx, "Resource update failed, attempting to restart VM", map[string]any{"id": vmID})
-				_ = r.client.StartVm(ctx, vmID, opts)
-			}
-			resp.Diagnostics.AddError("Unable to Update VM Resources", err.Error())
-			return
-		}
-
-		if needsRestart {
-			if err := r.startAndWait(ctx, vmID, opts); err != nil {
-				resp.Diagnostics.AddWarning(
-					"Resources updated but VM not restarted",
-					fmt.Sprintf("CPU/RAM were updated, but the VM failed to restart: %s", err.Error()),
-				)
-			}
-		}
-
-		tflog.Info(ctx, "VM resources updated", map[string]any{
-			"id":        vmID,
-			"cpu_cores": plan.CPUCores.ValueInt64(),
-			"ram":       plan.RAM.ValueInt64(),
-		})
-	}
-
-	// Update disk size/type if changed
 	diskSizeChanged := !state.DiskSize.Equal(plan.DiskSize)
 	diskTypeChanged := !state.DiskType.Equal(plan.DiskType)
 
-	if diskSizeChanged || diskTypeChanged {
-		if diskSizeChanged && plan.DiskSize.ValueInt64() < state.DiskSize.ValueInt64() {
-			resp.Diagnostics.AddError(
-				"Invalid Disk Size",
-				fmt.Sprintf("Disk size can only be increased. Current: %d GB, requested: %d GB.",
-					state.DiskSize.ValueInt64(), plan.DiskSize.ValueInt64()),
-			)
-			return
-		}
+	// Validate disk size before stopping the VM
+	if diskSizeChanged && plan.DiskSize.ValueInt64() < state.DiskSize.ValueInt64() {
+		resp.Diagnostics.AddError(
+			"Invalid Disk Size",
+			fmt.Sprintf("Disk size can only be increased. Current: %d GB, requested: %d GB.",
+				state.DiskSize.ValueInt64(), plan.DiskSize.ValueInt64()),
+		)
+		return
+	}
 
-		tflog.Info(ctx, "Updating VM disk", map[string]any{
-			"id":            vmID,
-			"old_disk_size": state.DiskSize.ValueInt64(),
-			"new_disk_size": plan.DiskSize.ValueInt64(),
-			"old_disk_type": state.DiskType.ValueString(),
-			"new_disk_type": plan.DiskType.ValueString(),
-		})
+	needsUpdate := cpuChanged || ramChanged || diskSizeChanged || diskTypeChanged
 
+	if needsUpdate {
+		// Stop once before all updates
 		needsRestart, err := r.stopIfRunning(ctx, vmID, opts)
 		if err != nil {
-			resp.Diagnostics.AddError("Unable to Stop VM for disk update", err.Error())
+			resp.Diagnostics.AddError("Unable to Stop VM for update", err.Error())
 			return
 		}
 
-		updateReq := client.UpdateVmDiskRequest{}
-		if diskSizeChanged {
-			size := plan.DiskSize.ValueInt64()
-			updateReq.DiskSize = &size
-		}
-		if diskTypeChanged {
-			dt := plan.DiskType.ValueString()
-			updateReq.DiskType = &dt
-		}
+		// Apply CPU/RAM update
+		if cpuChanged || ramChanged {
+			tflog.Info(ctx, "Updating VM resources", map[string]any{
+				"id":      vmID,
+				"old_cpu": state.CPUCores.ValueInt64(),
+				"new_cpu": plan.CPUCores.ValueInt64(),
+				"old_ram": state.RAM.ValueInt64(),
+				"new_ram": plan.RAM.ValueInt64(),
+			})
 
-		if err := r.client.UpdateVmDisk(ctx, vmID, updateReq, opts); err != nil {
-			if needsRestart {
-				tflog.Warn(ctx, "Disk update failed, attempting to restart VM", map[string]any{"id": vmID})
-				_ = r.client.StartVm(ctx, vmID, opts)
+			updateReq := client.UpdateVmResourcesRequest{
+				CPUCores: plan.CPUCores.ValueInt64(),
+				RAM:      plan.RAM.ValueInt64(),
 			}
-			resp.Diagnostics.AddError("Unable to Update VM Disk", err.Error())
-			return
+
+			if err := r.client.UpdateVmResources(ctx, vmID, updateReq, opts); err != nil {
+				if needsRestart {
+					tflog.Warn(ctx, "Resource update failed, attempting to restart VM", map[string]any{"id": vmID})
+					_ = r.client.StartVm(ctx, vmID, opts)
+				}
+				resp.Diagnostics.AddError("Unable to Update VM Resources", err.Error())
+				return
+			}
+
+			tflog.Info(ctx, "VM resources updated", map[string]any{
+				"id":        vmID,
+				"cpu_cores": plan.CPUCores.ValueInt64(),
+				"ram":       plan.RAM.ValueInt64(),
+			})
 		}
 
+		// Apply disk update
+		if diskSizeChanged || diskTypeChanged {
+			tflog.Info(ctx, "Updating VM disk", map[string]any{
+				"id":            vmID,
+				"old_disk_size": state.DiskSize.ValueInt64(),
+				"new_disk_size": plan.DiskSize.ValueInt64(),
+				"old_disk_type": state.DiskType.ValueString(),
+				"new_disk_type": plan.DiskType.ValueString(),
+			})
+
+			updateReq := client.UpdateVmDiskRequest{}
+			if diskSizeChanged {
+				size := plan.DiskSize.ValueInt64()
+				updateReq.DiskSize = &size
+			}
+			if diskTypeChanged {
+				dt := plan.DiskType.ValueString()
+				updateReq.DiskType = &dt
+			}
+
+			if err := r.client.UpdateVmDisk(ctx, vmID, updateReq, opts); err != nil {
+				if needsRestart {
+					tflog.Warn(ctx, "Disk update failed, attempting to restart VM", map[string]any{"id": vmID})
+					_ = r.client.StartVm(ctx, vmID, opts)
+				}
+				resp.Diagnostics.AddError("Unable to Update VM Disk", err.Error())
+				return
+			}
+
+			tflog.Info(ctx, "VM disk updated", map[string]any{
+				"id":        vmID,
+				"disk_size": plan.DiskSize.ValueInt64(),
+				"disk_type": plan.DiskType.ValueString(),
+			})
+		}
+
+		// Start once after all updates
 		if needsRestart {
 			if err := r.startAndWait(ctx, vmID, opts); err != nil {
 				resp.Diagnostics.AddWarning(
-					"Disk updated but VM not restarted",
-					fmt.Sprintf("Disk was updated, but the VM failed to restart: %s", err.Error()),
+					"VM updated but not restarted",
+					fmt.Sprintf("Changes were applied, but the VM failed to restart: %s", err.Error()),
 				)
 			}
 		}
-
-		tflog.Info(ctx, "VM disk updated", map[string]any{
-			"id":        vmID,
-			"disk_size": plan.DiskSize.ValueInt64(),
-			"disk_type": plan.DiskType.ValueString(),
-		})
 	}
 
 	// Read back the current VM state
@@ -769,8 +782,11 @@ func (r *VmResource) Update(ctx context.Context, req resource.UpdateRequest, res
 		plan.Description = types.StringNull()
 	}
 
-	// Preserve write-only / create-time attributes
-	plan.PublicIPID = state.PublicIPID
+	if vm.PublicIPID != 0 {
+		plan.PublicIPID = types.Int64Value(vm.PublicIPID)
+	} else {
+		plan.PublicIPID = types.Int64Null()
+	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
