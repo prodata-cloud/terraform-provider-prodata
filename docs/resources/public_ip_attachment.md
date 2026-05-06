@@ -10,6 +10,8 @@ Attaches a ProData public IP to a virtual machine. Destroying this resource deta
 
 ~> **Note:** All attributes require resource replacement when changed. Any change will detach and reattach the public IP.
 
+~> **Note:** The VM must be restarted for the public IP to take effect. If the VM is running, stop it and start it again after attaching or detaching the public IP.
+
 ## Example Usage
 
 ```terraform
