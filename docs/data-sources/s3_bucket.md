@@ -20,6 +20,18 @@ data "prodata_s3_bucket" "example" {
 output "bucket_versioning" {
   value = data.prodata_s3_bucket.example.versioning
 }
+
+output "bucket_object_lock_enabled" {
+  value = data.prodata_s3_bucket.example.object_lock_enabled
+}
+
+output "bucket_size_bytes" {
+  value = data.prodata_s3_bucket.example.size
+}
+
+output "bucket_object_count" {
+  value = data.prodata_s3_bucket.example.object_count
+}
 ```
 
 ## Schema
@@ -36,7 +48,7 @@ output "bucket_versioning" {
 ### Attribute Reference
 
 - `id` (String) Data source identifier — equal to `name`.
-- `creation_date` (String) Server-reported bucket creation timestamp (ISO-8601).
+- `creation_date` (String) Server-reported bucket creation timestamp (RFC3339).
 - `versioning` (String) Versioning state: `enabled`, `suspended`, or `disabled`.
 - `object_lock_enabled` (Boolean) `true` if S3 object lock is enabled on the bucket.
 - `size` (Number) Total size in bytes of all objects currently stored in the bucket.

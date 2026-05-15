@@ -8,7 +8,9 @@ description: |-
 
 Manages a ProData S3 (Ceph RGW) bucket. Buckets are scoped to a single project; cross-project name conflicts surface as a clear error from the API.
 
-~> **Note:** `acl`, `versioning`, and `force_destroy` are updated in-place. Changing `name`, `region`, `project_tag`, or `object_lock_enabled` forces resource replacement (destroy and recreate).
+Managing buckets requires the `S3:WRITE` permission on the API key used by the provider. Read-only data sources require `S3:READ`.
+
+~> **Note:** `acl` and `versioning` are updated in-place via API calls. `force_destroy` is a state-only flag (no API call) — its value only matters at `terraform destroy` time. Changing `name`, `region`, `project_tag`, or `object_lock_enabled` forces resource replacement.
 
 ~> **Note:** `acl` is **trust-state only** — it is sent to the server on Create/Update but never re-read. The S3 ACL API exposes grants, not canned ACLs, so the original canned value cannot be reliably round-tripped. Changes made outside Terraform will not produce a plan diff. `versioning` and `object_lock_enabled` are drift-detected normally.
 
@@ -49,6 +51,26 @@ resource "prodata_s3_bucket" "ephemeral" {
 }
 ```
 
+## Accessing the bucket
+
+Once created, a bucket is reachable via any S3-compatible client (awscli, mc, rclone, boto3, ...) using the regional S3 endpoint:
+
+| Region     | S3 endpoint                          |
+| ---------- | ------------------------------------ |
+| Uzbekistan | `https://storage.pro-data.tech`      |
+| Kazakhstan | `https://storage.kz-1.pro-data.tech` |
+
+S3 access uses a **separate** `access_key` / `secret_key` pair — not the API key used by Terraform. Generate them under **Account** → **S3 Credentials** in the ProData Console.
+
+Example with the AWS CLI:
+
+```bash
+aws --endpoint-url=https://storage.pro-data.tech \
+    s3 cp ./file.txt s3://my-bucket/
+```
+
+Object-level operations (upload, download, list, delete), object lifecycle rules, bucket policies, and CORS configuration are **not** managed by this Terraform provider — use any S3-compatible client.
+
 ## Schema
 
 ### Required
@@ -67,17 +89,19 @@ resource "prodata_s3_bucket" "ephemeral" {
 ### Attribute Reference
 
 - `id` (String) Resource identifier — equal to `name`.
-- `creation_date` (String) Server-reported bucket creation timestamp (ISO-8601).
+- `creation_date` (String) Server-reported bucket creation timestamp (RFC3339).
 
 ## Import
 
 Buckets are imported using a composite ID of the form `{region}/{name}@{project_tag}`:
 
 ```shell
-terraform import prodata_s3_bucket.example UZ-5/my-bucket@my-project
+terraform import prodata_s3_bucket.example UZ-5/my-bucket@my-project-42
 ```
 
-~> **Note:** After import, `acl` and `force_destroy` are not populated from the server (both are state-only attributes). The next `terraform plan` will show them as drift against your configuration; the next `terraform apply` will reconcile them to the values declared in HCL with no server-side side effect for `force_destroy`, and a fresh PUT for `acl`.
+~> **Note:** After import:
+> - `acl` is not refreshed from the server (trust-state — see note above). The first `terraform apply` after import issues a `PUT /acl` to reconcile your HCL value.
+> - `force_destroy` is never server-side (state-only flag). The first apply after import records your HCL value into state with no API call.
 
 ## Known Limitations
 

@@ -73,7 +73,7 @@ Obtain API credentials from the ProData Cloud console:
 - `api_key_id` (String) API Key ID for authentication. Can also be set via `PRODATA_API_KEY_ID` environment variable. **Required for provider to function.**
 - `api_secret_key` (String, Sensitive) API Secret Key for authentication. Can also be set via `PRODATA_API_SECRET_KEY` environment variable. **Required for provider to function.**
 - `region` (String) Default region ID (e.g., `UZ-5`, `UZ-3`, `KZ-1`). Can also be set via `PRODATA_REGION` environment variable.
-- `project_tag` (String) Default project tag. Can also be set via `PRODATA_PROJECT_TAG` environment variable.
+- `project_tag` (String) Default project tag. Can also be set via `PRODATA_PROJECT_TAG` environment variable. The tag is shown on the project's settings page in the ProData Console; if you need to construct it manually, the format is `lowercase(name).replace(' ', '-') + '-' + id` — for example, a project named "My Project" with numeric id `42` has tag `my-project-42`.
 
 ## Regional API URLs
 
