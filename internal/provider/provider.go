@@ -153,6 +153,7 @@ func (p *ProDataProvider) Resources(ctx context.Context) []func() resource.Resou
 		resources.NewPublicIPAttachmentResource,
 		resources.NewVolumeAttachmentResource,
 		resources.NewVmResource,
+		resources.NewS3BucketResource,
 	}
 }
 
