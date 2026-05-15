@@ -18,6 +18,14 @@ data "prodata_s3_buckets" "all" {}
 output "bucket_names" {
   value = data.prodata_s3_buckets.all.names
 }
+
+output "total_buckets" {
+  value = length(data.prodata_s3_buckets.all.buckets)
+}
+
+output "total_size_bytes" {
+  value = sum([for b in data.prodata_s3_buckets.all.buckets : b.size])
+}
 ```
 
 ## Schema
@@ -32,7 +40,7 @@ output "bucket_names" {
 - `names` (List of String) Convenience list of just the bucket names, in the order returned by the server.
 - `buckets` (List of Object) List of buckets owned by the project. Each bucket has the following attributes:
   - `name` (String) The bucket name.
-  - `creation_date` (String) Server-reported bucket creation timestamp (ISO-8601).
+  - `creation_date` (String) Server-reported bucket creation timestamp (RFC3339).
   - `size` (Number) Total size in bytes of all objects in the bucket.
   - `object_count` (Number) Number of objects currently stored in the bucket.
 
