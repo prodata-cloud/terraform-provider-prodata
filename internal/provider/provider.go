@@ -153,6 +153,7 @@ func (p *ProDataProvider) Resources(ctx context.Context) []func() resource.Resou
 		resources.NewPublicIPAttachmentResource,
 		resources.NewVolumeAttachmentResource,
 		resources.NewVmResource,
+		resources.NewS3BucketResource,
 	}
 }
 
@@ -168,5 +169,7 @@ func (p *ProDataProvider) DataSources(ctx context.Context) []func() datasource.D
 		datasources.NewPublicIPsDataSource,
 		datasources.NewVmDataSource,
 		datasources.NewVmsDataSource,
+		datasources.NewS3BucketDataSource,
+		datasources.NewS3BucketsDataSource,
 	}
 }
