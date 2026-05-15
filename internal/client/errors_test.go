@@ -91,6 +91,8 @@ func TestIsNotFound(t *testing.T) {
 		{"http 404", &APIError{StatusCode: 404, Message: "not found"}, true},
 		{"code 601", &APIError{StatusCode: 403, Codes: []int{601}, Message: "vm not found"}, true},
 		{"code 703", &APIError{StatusCode: 400, Codes: []int{703}, Message: "volume not found"}, true},
+		{"code 628 bucket gone", &APIError{StatusCode: 400, Codes: []int{628}, Message: "bucket not found"}, true},
+		{"code 712 cross-project NOT not-found", &APIError{StatusCode: 403, Codes: []int{712}, Message: "not yours"}, false},
 		{"code 627", &APIError{StatusCode: 500, Codes: []int{627}, Message: "busy"}, false},
 		{"http 500 no codes", &APIError{StatusCode: 500, Message: "server error"}, false},
 		{"wrapped 601", fmt.Errorf("wrap: %w", &APIError{Codes: []int{601}}), true},

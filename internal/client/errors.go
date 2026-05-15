@@ -42,7 +42,9 @@ func IsAPIError(err error, code int) bool {
 }
 
 // IsNotFound reports whether err indicates that the resource does not exist
-// (HTTP 404, or API codes 601/703).
+// (HTTP 404, or API codes 601/703/628). Code 712 (cross-project — bucket exists
+// but is owned by another project) is intentionally NOT treated as not-found:
+// silently dropping state for someone else's bucket would be a footgun.
 func IsNotFound(err error) bool {
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) {
@@ -51,5 +53,5 @@ func IsNotFound(err error) bool {
 	if apiErr.StatusCode == 404 {
 		return true
 	}
-	return apiErr.HasCode(601) || apiErr.HasCode(703)
+	return apiErr.HasCode(601) || apiErr.HasCode(703) || apiErr.HasCode(628)
 }
