@@ -39,7 +39,7 @@ type S3BucketResourceModel struct {
 	ProjectTag        types.String `tfsdk:"project_tag"`
 	Name              types.String `tfsdk:"name"`
 	Acl               types.String `tfsdk:"acl"`
-	Versioning        types.String `tfsdk:"versioning"`
+	Versioning        types.Bool   `tfsdk:"versioning"`
 	ObjectLockEnabled types.Bool   `tfsdk:"object_lock_enabled"`
 	ForceDestroy      types.Bool   `tfsdk:"force_destroy"`
 	CreationDate      types.String `tfsdk:"creation_date"`
@@ -106,15 +106,14 @@ func (r *S3BucketResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 					stringvalidator.OneOf("private", "public-read", "public-read-write"),
 				},
 			},
-			"versioning": schema.StringAttribute{
-				MarkdownDescription: "Versioning state: `enabled`, `suspended`, or `disabled`. " +
-					"`disabled` is the never-touched state — once enabled or suspended, cannot transition back.",
+			"versioning": schema.BoolAttribute{
+				MarkdownDescription: "Whether object versioning is enabled. `true` enables versioning; " +
+					"`false` (default) leaves a new bucket unversioned, or **suspends** versioning if it " +
+					"was previously enabled. S3 cannot fully remove versioning once enabled, so `false` " +
+					"maps to the SUSPENDED state in that case.",
 				Optional: true,
 				Computed: true,
-				Default:  stringdefault.StaticString("disabled"),
-				Validators: []validator.String{
-					stringvalidator.OneOf("enabled", "suspended", "disabled"),
-				},
+				Default:  booldefault.StaticBool(false),
 			},
 			"object_lock_enabled": schema.BoolAttribute{
 				MarkdownDescription: "Whether S3 object lock is enabled. Requires `versioning = \"enabled\"`. " +
@@ -171,21 +170,8 @@ func (r *S3BucketResource) ModifyPlan(ctx context.Context, req resource.ModifyPl
 	}
 
 	if !plan.ObjectLockEnabled.IsUnknown() && !plan.Versioning.IsUnknown() {
-		if msg := validateObjectLockRequiresVersioning(plan.ObjectLockEnabled.ValueBool(), plan.Versioning.ValueString()); msg != "" {
+		if msg := validateObjectLockRequiresVersioning(plan.ObjectLockEnabled.ValueBool(), plan.Versioning.ValueBool()); msg != "" {
 			resp.Diagnostics.AddAttributeError(path.Root("object_lock_enabled"), "Invalid configuration", msg)
-		}
-	}
-
-	if !req.State.Raw.IsNull() {
-		var state S3BucketResourceModel
-		resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
-		if resp.Diagnostics.HasError() {
-			return
-		}
-		if !state.Versioning.IsNull() && !state.Versioning.IsUnknown() && !plan.Versioning.IsUnknown() {
-			if msg := validateVersioningTransition(state.Versioning.ValueString(), plan.Versioning.ValueString()); msg != "" {
-				resp.Diagnostics.AddAttributeError(path.Root("versioning"), "Invalid versioning transition", msg)
-			}
 		}
 	}
 }
@@ -212,7 +198,7 @@ func (r *S3BucketResource) Create(ctx context.Context, req resource.CreateReques
 		BucketKey: name,
 		Acl:       aclToEnum(plan.Acl.ValueString()),
 	}
-	if vc := versioningToConfig(plan.Versioning.ValueString()); vc != nil {
+	if vc := versioningToConfig(plan.Versioning.ValueBool()); vc != nil {
 		createReq.VersioningConfiguration = vc
 	}
 	if plan.ObjectLockEnabled.ValueBool() {
@@ -225,7 +211,7 @@ func (r *S3BucketResource) Create(ctx context.Context, req resource.CreateReques
 		"region":              region,
 		"project_tag":         projectTag,
 		"acl":                 createReq.Acl,
-		"versioning":          plan.Versioning.ValueString(),
+		"versioning":          plan.Versioning.ValueBool(),
 		"object_lock_enabled": plan.ObjectLockEnabled.ValueBool(),
 	})
 
@@ -348,14 +334,17 @@ func (r *S3BucketResource) Update(ctx context.Context, req resource.UpdateReques
 		}
 	}
 	if !state.Versioning.Equal(plan.Versioning) {
-		vc := versioningToConfig(plan.Versioning.ValueString())
-		if vc != nil {
-			if err := r.c.PutBucketVersioning(ctx, name, client.PutBucketVersioningRequest{VersioningConfiguration: vc}, opts); err != nil {
-				resp.Diagnostics.AddError("Unable to Update Bucket Versioning", err.Error())
-				return
-			}
+		// true → ENABLED; false → SUSPENDED. S3 cannot remove versioning once it has
+		// been configured, so false on a previously-enabled bucket means "suspend".
+		status := "SUSPENDED"
+		if plan.Versioning.ValueBool() {
+			status = "ENABLED"
 		}
-		// "disabled" target rejected by ModifyPlan; unreachable.
+		if err := r.c.PutBucketVersioning(ctx, name,
+			client.PutBucketVersioningRequest{VersioningConfiguration: &client.VersioningConfiguration{Status: status}}, opts); err != nil {
+			resp.Diagnostics.AddError("Unable to Update Bucket Versioning", err.Error())
+			return
+		}
 	}
 
 	b, err := r.c.GetBucket(ctx, name, opts)
@@ -432,7 +421,7 @@ func (r *S3BucketResource) refreshFromServer(ctx context.Context, data *S3Bucket
 	if err != nil {
 		return fmt.Errorf("get versioning: %w", err)
 	}
-	data.Versioning = types.StringValue(versioningFromConfig(vc))
+	data.Versioning = types.BoolValue(versioningFromConfig(vc))
 
 	olc, err := r.c.GetObjectLockConfiguration(ctx, b.Name, opts)
 	if err != nil {
@@ -457,31 +446,22 @@ func aclToEnum(canonical string) string {
 	}
 }
 
-// versioningToConfig maps the canonical TF wire form to the panel DTO.
-// "disabled" → nil (panel/S3 has no DISABLED status; omit the wrapper).
-func versioningToConfig(canonical string) *client.VersioningConfiguration {
-	switch canonical {
-	case "enabled":
+// versioningToConfig maps the boolean TF form to the panel DTO for a CREATE.
+// false → nil: a brand-new bucket is simply left unversioned (panel/S3 has no
+// DISABLED status; omit the wrapper). Suspending an already-enabled bucket is an
+// UPDATE concern and is handled directly in Update.
+func versioningToConfig(enabled bool) *client.VersioningConfiguration {
+	if enabled {
 		return &client.VersioningConfiguration{Status: "ENABLED"}
-	case "suspended":
-		return &client.VersioningConfiguration{Status: "SUSPENDED"}
-	default:
-		return nil
 	}
+	return nil
 }
 
-func versioningFromConfig(vc *client.VersioningConfiguration) string {
-	if vc == nil {
-		return "disabled"
-	}
-	switch vc.Status {
-	case "ENABLED":
-		return "enabled"
-	case "SUSPENDED":
-		return "suspended"
-	default:
-		return "disabled"
-	}
+// versioningFromConfig maps the panel DTO back to the boolean TF form. Only
+// ENABLED is true; SUSPENDED and never-configured both read as false (the two
+// are indistinguishable to a boolean and neither is "versioning on").
+func versioningFromConfig(vc *client.VersioningConfiguration) bool {
+	return vc != nil && vc.Status == "ENABLED"
 }
 
 func objectLockFromConfig(olc *client.ObjectLockConfiguration) bool {
@@ -511,19 +491,9 @@ func validateBucketNameStr(name string) string {
 	return ""
 }
 
-func validateObjectLockRequiresVersioning(objectLockEnabled bool, versioning string) string {
-	if objectLockEnabled && versioning != "enabled" {
-		return `object_lock_enabled = true requires versioning = "enabled"`
-	}
-	return ""
-}
-
-// validateVersioningTransition enforces FR-8: once versioning has been ENABLED or
-// SUSPENDED server-side, the only legal next state is the other of those two — never
-// back to disabled (S3 has no DISABLED state).
-func validateVersioningTransition(prior, next string) string {
-	if (prior == "enabled" || prior == "suspended") && next == "disabled" {
-		return fmt.Sprintf("versioning cannot transition from %q back to %q (S3 does not support disabling versioning)", prior, next)
+func validateObjectLockRequiresVersioning(objectLockEnabled, versioning bool) string {
+	if objectLockEnabled && !versioning {
+		return "object_lock_enabled = true requires versioning = true"
 	}
 	return ""
 }

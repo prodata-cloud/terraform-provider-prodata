@@ -49,7 +49,7 @@ output "bucket_object_count" {
 
 - `id` (String) Data source identifier — equal to `name`.
 - `creation_date` (String) Server-reported bucket creation timestamp (RFC3339).
-- `versioning` (String) Versioning state: `enabled`, `suspended`, or `disabled`.
+- `versioning` (Boolean) `true` if object versioning is enabled. A suspended or never-configured bucket reads as `false`.
 - `object_lock_enabled` (Boolean) `true` if S3 object lock is enabled on the bucket.
 - `size` (Number) Total size in bytes of all objects currently stored in the bucket.
 - `object_count` (Number) Number of objects currently stored in the bucket.

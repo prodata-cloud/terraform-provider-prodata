@@ -28,7 +28,7 @@ resource "prodata_s3_bucket" "example" {
 resource "prodata_s3_bucket" "versioned" {
   name       = "my-versioned-bucket"
   acl        = "private"
-  versioning = "enabled"
+  versioning = true
 }
 ```
 
@@ -37,7 +37,7 @@ resource "prodata_s3_bucket" "versioned" {
 ```terraform
 resource "prodata_s3_bucket" "locked" {
   name                = "my-locked-bucket"
-  versioning          = "enabled"
+  versioning          = true
   object_lock_enabled = true
 }
 ```
@@ -82,8 +82,8 @@ Object-level operations (upload, download, list, delete), object lifecycle rules
 - `region` (String) Region ID where the bucket will be created. If omitted, uses the provider's default region. Changing this forces a new resource.
 - `project_tag` (String) Project tag the bucket belongs to. If omitted, uses the provider's default project_tag. Changing this forces a new resource.
 - `acl` (String) Canned ACL: `private`, `public-read`, or `public-read-write`. Default: `private`. Updated in place. **Not drift-detected** (see note above).
-- `versioning` (String) Versioning state: `enabled`, `suspended`, or `disabled`. Default: `disabled`. Once a bucket has transitioned out of `disabled`, it cannot return to `disabled` — the only legal transition pair afterwards is `enabled` ↔ `suspended`.
-- `object_lock_enabled` (Boolean) Whether S3 object lock is enabled on the bucket. Default: `false`. Requires `versioning = "enabled"`. Cannot be changed after creation — changing this forces a new resource.
+- `versioning` (Boolean) Whether object versioning is enabled. Default: `false`. `true` enables versioning; `false` leaves a new bucket unversioned, or **suspends** versioning if it was previously enabled (S3 cannot fully remove versioning once enabled). Updated in place.
+- `object_lock_enabled` (Boolean) Whether S3 object lock is enabled on the bucket. Default: `false`. Requires `versioning = true`. Cannot be changed after creation — changing this forces a new resource.
 - `force_destroy` (Boolean) Default: `false`. If `true`, `terraform destroy` wipes all objects, versions, and multipart uploads inside the bucket before deleting it. If `false`, destroy refuses on a non-empty bucket (HTTP 409) and the bucket is preserved. State-only — not refreshed from the server.
 
 ### Attribute Reference
@@ -107,6 +107,6 @@ terraform import prodata_s3_bucket.example UZ-5/my-bucket@my-project-42
 
 - **ACL drift is invisible.** If someone modifies the canned ACL via the AWS CLI / web console, Terraform will not detect or correct the change. Re-run `terraform apply` after any out-of-band ACL change to re-assert the configured value.
 - **`force_destroy` is state-only.** Toggling `force_destroy` produces a state-only diff (no API call); the value only matters at `terraform destroy` time.
-- **Versioning is monotonic.** A bucket created with `versioning = "disabled"` (the default) can be moved to `enabled` or `suspended` later, but `enabled`/`suspended` cannot be moved back to `disabled`. This mirrors the underlying S3 / Ceph RGW behavior.
+- **Versioning cannot be fully removed.** Once a bucket has had versioning enabled, S3 / Ceph RGW does not allow returning to the never-versioned state. Setting `versioning = false` on a previously-enabled bucket *suspends* versioning rather than removing it; a suspended bucket therefore also reads back as `versioning = false`.
 - **Object lock is immutable.** `object_lock_enabled` can only be set at create time; toggling it forces resource replacement.
 - **Bucket names are globally unique within the cluster.** The API returns a distinct error if the name is already taken by a bucket in another project.
