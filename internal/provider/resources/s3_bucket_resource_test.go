@@ -60,82 +60,38 @@ func TestS3Bucket_AclOneOfRejectsBadValue(t *testing.T) {
 	}
 }
 
-// Test 4 — invalid versioning enum.
-func TestS3Bucket_VersioningOneOfRejectsBadValue(t *testing.T) {
-	v := stringvalidator.OneOf("enabled", "suspended", "disabled")
-	for _, bad := range []string{"ENABLED", "true", "on", "off", "paused", ""} {
-		req := validator.StringRequest{
-			Path:        path.Root("versioning"),
-			ConfigValue: types.StringValue(bad),
-		}
-		resp := &validator.StringResponse{}
-		v.ValidateString(context.Background(), req, resp)
-		if !resp.Diagnostics.HasError() {
-			t.Errorf("expected versioning=%q to fail OneOf validation, but it passed", bad)
-		}
-	}
-}
-
-// Test 5 — object_lock_enabled=true requires versioning=enabled.
+// Test 4 — object_lock_enabled=true requires versioning=true.
 func TestS3Bucket_ObjectLockRequiresEnabledVersioning(t *testing.T) {
 	cases := []struct {
 		objectLock bool
-		versioning string
+		versioning bool
 		wantErr    bool
 	}{
-		{true, "disabled", true},
-		{true, "suspended", true},
-		{true, "enabled", false},
-		{false, "disabled", false},
-		{false, "enabled", false},
+		{true, false, true},
+		{true, true, false},
+		{false, false, false},
+		{false, true, false},
 	}
 	for _, c := range cases {
 		msg := validateObjectLockRequiresVersioning(c.objectLock, c.versioning)
 		if c.wantErr && msg == "" {
-			t.Errorf("expected error for object_lock=%v, versioning=%q; got none", c.objectLock, c.versioning)
+			t.Errorf("expected error for object_lock=%v, versioning=%v; got none", c.objectLock, c.versioning)
 		}
 		if !c.wantErr && msg != "" {
-			t.Errorf("unexpected error for object_lock=%v, versioning=%q: %s", c.objectLock, c.versioning, msg)
+			t.Errorf("unexpected error for object_lock=%v, versioning=%v: %s", c.objectLock, c.versioning, msg)
 		}
 	}
 }
 
-// Test 6 — versioning transition enabled→disabled is rejected.
-func TestS3Bucket_VersioningEnabledToDisabledRejected(t *testing.T) {
-	if msg := validateVersioningTransition("enabled", "disabled"); msg == "" {
-		t.Fatal("expected enabled→disabled to be rejected, got no error")
-	}
-}
-
-// Test 7 — versioning transition suspended→disabled is rejected.
-func TestS3Bucket_VersioningSuspendedToDisabledRejected(t *testing.T) {
-	if msg := validateVersioningTransition("suspended", "disabled"); msg == "" {
-		t.Fatal("expected suspended→disabled to be rejected, got no error")
-	}
-}
-
-// Test 8 — happy path: valid name, valid object_lock+versioning combo, legal
-// transitions all pass without error.
+// Test 5 — happy path: valid names and a valid object_lock+versioning combo pass.
 func TestS3Bucket_HappyPathValidations(t *testing.T) {
-	for _, name := range []string{"my-bucket", "logs.2026", "tf-iac-30455-x", "abc"} {
+	for _, name := range []string{"my-bucket", "logs.2026", "abc", "a-b-c"} {
 		if msg := validateBucketNameStr(name); msg != "" {
 			t.Errorf("happy-path name %q rejected: %s", name, msg)
 		}
 	}
-	if msg := validateObjectLockRequiresVersioning(true, "enabled"); msg != "" {
+	if msg := validateObjectLockRequiresVersioning(true, true); msg != "" {
 		t.Errorf("happy-path object_lock+versioning rejected: %s", msg)
-	}
-	legalTransitions := [][2]string{
-		{"disabled", "enabled"},
-		{"disabled", "disabled"},
-		{"enabled", "suspended"},
-		{"suspended", "enabled"},
-		{"enabled", "enabled"},
-	}
-	for _, p := range legalTransitions {
-		if msg := validateVersioningTransition(p[0], p[1]); msg != "" {
-			t.Errorf("happy-path transition %q→%q rejected: %s", p[0], p[1], msg)
-		}
 	}
 }
 

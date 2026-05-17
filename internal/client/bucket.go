@@ -202,7 +202,7 @@ func (c *Client) GetObjectLockConfiguration(ctx context.Context, name string, op
 
 // DeleteBucket sends DELETE /buckets/{name}?forceDestroy=true|false.
 // forceDestroy=true wipes objects/versions/multipart first; =false returns 409
-// with code 626 ("bucket not empty") on a non-empty bucket. 628 means already gone.
+// with code 738 ("bucket not empty") on a non-empty bucket. 628 means already gone.
 func (c *Client) DeleteBucket(ctx context.Context, name string, forceDestroy bool, opts *RequestOpts) error {
 	path := fmt.Sprintf("%s?forceDestroy=%t", bucketPath(name), forceDestroy)
 	return c.Do(ctx, http.MethodDelete, path, nil, nil, opts)

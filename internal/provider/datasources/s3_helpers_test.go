@@ -16,17 +16,17 @@ func TestVersioningFromConfig(t *testing.T) {
 	cases := []struct {
 		label string
 		in    *client.VersioningConfiguration
-		want  string
+		want  bool
 	}{
-		{"nil (never configured)", nil, "disabled"},
-		{"ENABLED", &client.VersioningConfiguration{Status: "ENABLED"}, "enabled"},
-		{"SUSPENDED", &client.VersioningConfiguration{Status: "SUSPENDED"}, "suspended"},
-		{"unknown status falls back to disabled", &client.VersioningConfiguration{Status: "ZARGON"}, "disabled"},
+		{"nil (never configured)", nil, false},
+		{"ENABLED", &client.VersioningConfiguration{Status: "ENABLED"}, true},
+		{"SUSPENDED reads as false", &client.VersioningConfiguration{Status: "SUSPENDED"}, false},
+		{"unknown status reads as false", &client.VersioningConfiguration{Status: "ZARGON"}, false},
 	}
 	for _, c := range cases {
 		t.Run(c.label, func(t *testing.T) {
 			if got := versioningFromConfig(c.in); got != c.want {
-				t.Errorf("versioningFromConfig(%+v) = %q, want %q", c.in, got, c.want)
+				t.Errorf("versioningFromConfig(%+v) = %v, want %v", c.in, got, c.want)
 			}
 		})
 	}

@@ -27,7 +27,7 @@ type S3BucketDataSourceModel struct {
 	ProjectTag        types.String `tfsdk:"project_tag"`
 	Name              types.String `tfsdk:"name"`
 	CreationDate      types.String `tfsdk:"creation_date"`
-	Versioning        types.String `tfsdk:"versioning"`
+	Versioning        types.Bool   `tfsdk:"versioning"`
 	ObjectLockEnabled types.Bool   `tfsdk:"object_lock_enabled"`
 	Size              types.Int64  `tfsdk:"size"`
 	ObjectCount       types.Int64  `tfsdk:"object_count"`
@@ -69,9 +69,10 @@ func (d *S3BucketDataSource) Schema(_ context.Context, _ datasource.SchemaReques
 				MarkdownDescription: "Server-reported bucket creation timestamp (ISO-8601).",
 				Computed:            true,
 			},
-			"versioning": schema.StringAttribute{
-				MarkdownDescription: "Versioning state: `enabled`, `suspended`, or `disabled`.",
-				Computed:            true,
+			"versioning": schema.BoolAttribute{
+				MarkdownDescription: "Whether object versioning is enabled. `true` only when the " +
+					"bucket's versioning state is ENABLED; a suspended or never-configured bucket reads as `false`.",
+				Computed: true,
 			},
 			"object_lock_enabled": schema.BoolAttribute{
 				MarkdownDescription: "Whether S3 object lock is enabled on the bucket.",
@@ -158,7 +159,7 @@ func (d *S3BucketDataSource) Read(ctx context.Context, req datasource.ReadReques
 		resp.Diagnostics.AddError("Unable to Read Bucket Versioning", err.Error())
 		return
 	}
-	data.Versioning = types.StringValue(versioningFromConfig(vc))
+	data.Versioning = types.BoolValue(versioningFromConfig(vc))
 
 	olc, err := d.c.GetObjectLockConfiguration(ctx, name, opts)
 	if err != nil {
