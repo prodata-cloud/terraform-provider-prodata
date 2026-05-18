@@ -355,34 +355,34 @@ func TestGetObjectLockConfiguration_NullMeansNotConfigured(t *testing.T) {
 	}
 }
 
-// ---- 15. DeleteBucket sends ?forceDestroy=true ----
+// ---- 15. DeleteBucket always sends ?forceDestroy=false ----
 
-func TestDeleteBucket_ForceDestroyTrue(t *testing.T) {
+func TestDeleteBucket_SendsForceDestroyFalse(t *testing.T) {
 	srv, cap := newCapturingServer(t, http.StatusNoContent, "")
 	defer srv.Close()
 
 	c := newTestClient(t, srv)
-	err := c.DeleteBucket(context.Background(), "my-bucket", true, nil)
+	err := c.DeleteBucket(context.Background(), "my-bucket", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if cap.method != http.MethodDelete {
 		t.Errorf("method = %q, want DELETE", cap.method)
 	}
-	if !strings.Contains(cap.rawQuery, "forceDestroy=true") {
-		t.Errorf("rawQuery = %q, want forceDestroy=true", cap.rawQuery)
+	if !strings.Contains(cap.rawQuery, "forceDestroy=false") {
+		t.Errorf("rawQuery = %q, want forceDestroy=false", cap.rawQuery)
 	}
 }
 
-// ---- 16. DeleteBucket forceDestroy=false; 628 from server → IsNotFound true ----
+// ---- 16. DeleteBucket; 628 from server → IsNotFound true ----
 
-func TestDeleteBucket_ForceDestroyFalse_AlreadyGone(t *testing.T) {
+func TestDeleteBucket_AlreadyGone(t *testing.T) {
 	body := `{"success":false,"data":null,"errors":[{"code":628,"message":"bucket not found"}]}`
 	srv, cap := newCapturingServer(t, http.StatusBadRequest, body)
 	defer srv.Close()
 
 	c := newTestClient(t, srv)
-	err := c.DeleteBucket(context.Background(), "my-bucket", false, nil)
+	err := c.DeleteBucket(context.Background(), "my-bucket", nil)
 	if !IsNotFound(err) {
 		t.Fatalf("expected IsNotFound=true for 628 on delete, got: %v", err)
 	}
@@ -447,7 +447,7 @@ func TestLive_BucketCRUD(t *testing.T) {
 		t.Fatalf("CreateBucket: %v", err)
 	}
 	t.Cleanup(func() {
-		if err := c.DeleteBucket(context.Background(), bucketName, true, nil); err != nil && !IsNotFound(err) {
+		if err := c.DeleteBucket(context.Background(), bucketName, nil); err != nil && !IsNotFound(err) {
 			t.Logf("cleanup DeleteBucket: %v", err)
 		}
 	})
@@ -472,15 +472,15 @@ func TestLive_BucketCRUD(t *testing.T) {
 		t.Errorf("GetBucketVersioning = %+v, want ENABLED", v)
 	}
 
-	if err := c.DeleteBucket(ctx, bucketName, false, nil); err != nil {
-		t.Fatalf("DeleteBucket(force=false) on empty bucket: %v", err)
+	if err := c.DeleteBucket(ctx, bucketName, nil); err != nil {
+		t.Fatalf("DeleteBucket on empty bucket: %v", err)
 	}
 
 	if _, err := c.GetBucket(ctx, bucketName, nil); !IsNotFound(err) {
 		t.Errorf("GetBucket after delete: expected IsNotFound, got %v", err)
 	}
 
-	if err := c.DeleteBucket(ctx, bucketName, false, nil); !IsNotFound(err) {
+	if err := c.DeleteBucket(ctx, bucketName, nil); !IsNotFound(err) {
 		var apiErr *APIError
 		if !errors.As(err, &apiErr) || !apiErr.HasCode(628) {
 			t.Errorf("idempotent DeleteBucket: expected IsNotFound, got %v", err)
