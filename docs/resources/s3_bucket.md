@@ -10,7 +10,9 @@ Manages a ProData S3 (Ceph RGW) bucket. Buckets are scoped to a single project; 
 
 Managing buckets requires the `S3:WRITE` permission on the API key used by the provider. Read-only data sources require `S3:READ`.
 
-~> **Note:** `acl` and `versioning` are updated in-place via API calls. `force_destroy` is a state-only flag (no API call) — its value only matters at `terraform destroy` time. Changing `name`, `region`, `project_tag`, or `object_lock_enabled` forces resource replacement.
+~> **Note:** `acl` and `versioning` are updated in-place via API calls. Changing `name`, `region`, `project_tag`, or `object_lock_enabled` forces resource replacement.
+
+~> **Note:** `terraform destroy` only deletes an **empty** bucket. If the bucket still contains objects, versions, or in-progress multipart uploads, the API refuses the delete (HTTP 409) and the bucket is preserved — empty the bucket with an S3 client first, then re-run destroy.
 
 ~> **Note:** `acl` is **trust-state only** — it is sent to the server on Create/Update but never re-read. The S3 ACL API exposes grants, not canned ACLs, so the original canned value cannot be reliably round-tripped. Changes made outside Terraform will not produce a plan diff. `versioning` and `object_lock_enabled` are drift-detected normally.
 
@@ -39,15 +41,6 @@ resource "prodata_s3_bucket" "locked" {
   name                = "my-locked-bucket"
   versioning          = true
   object_lock_enabled = true
-}
-```
-
-### Ephemeral bucket (destroyed on `terraform destroy` even if non-empty)
-
-```terraform
-resource "prodata_s3_bucket" "ephemeral" {
-  name          = "my-ephemeral-bucket"
-  force_destroy = true
 }
 ```
 
@@ -84,7 +77,6 @@ Object-level operations (upload, download, list, delete), object lifecycle rules
 - `acl` (String) Canned ACL: `private`, `public-read`, or `public-read-write`. Default: `private`. Updated in place. **Not drift-detected** (see note above).
 - `versioning` (Boolean) Whether object versioning is enabled. Default: `false`. `true` enables versioning; `false` leaves a new bucket unversioned, or **suspends** versioning if it was previously enabled (S3 cannot fully remove versioning once enabled). Updated in place.
 - `object_lock_enabled` (Boolean) Whether S3 object lock is enabled on the bucket. Default: `false`. Requires `versioning = true`. Cannot be changed after creation — changing this forces a new resource.
-- `force_destroy` (Boolean) Default: `false`. If `true`, `terraform destroy` wipes all objects, versions, and multipart uploads inside the bucket before deleting it. If `false`, destroy refuses on a non-empty bucket (HTTP 409) and the bucket is preserved. State-only — not refreshed from the server.
 
 ### Attribute Reference
 
@@ -99,14 +91,12 @@ Buckets are imported using a composite ID of the form `{region}/{name}@{project_
 terraform import prodata_s3_bucket.example UZ-5/my-bucket@my-project-42
 ```
 
-~> **Note:** After import:
-> - `acl` is not refreshed from the server (trust-state — see note above). The first `terraform apply` after import issues a `PUT /acl` to reconcile your HCL value.
-> - `force_destroy` is never server-side (state-only flag). The first apply after import records your HCL value into state with no API call.
+~> **Note:** After import, `acl` is not refreshed from the server (trust-state — see note above). The first `terraform apply` after import issues a `PUT /acl` to reconcile your HCL value.
 
 ## Known Limitations
 
 - **ACL drift is invisible.** If someone modifies the canned ACL via the AWS CLI / web console, Terraform will not detect or correct the change. Re-run `terraform apply` after any out-of-band ACL change to re-assert the configured value.
-- **`force_destroy` is state-only.** Toggling `force_destroy` produces a state-only diff (no API call); the value only matters at `terraform destroy` time.
+- **`terraform destroy` will not delete a non-empty bucket.** The provider never force-deletes bucket contents. If the bucket holds objects, versions, or multipart uploads, destroy fails with HTTP 409 and the bucket survives — empty it with an S3 client, then re-run destroy.
 - **Versioning cannot be fully removed.** Once a bucket has had versioning enabled, S3 / Ceph RGW does not allow returning to the never-versioned state. Setting `versioning = false` on a previously-enabled bucket *suspends* versioning rather than removing it; a suspended bucket therefore also reads back as `versioning = false`.
 - **Object lock is immutable.** `object_lock_enabled` can only be set at create time; toggling it forces resource replacement.
 - **Bucket names are globally unique within the cluster.** The API returns a distinct error if the name is already taken by a bucket in another project.

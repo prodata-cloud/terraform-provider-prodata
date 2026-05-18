@@ -13,8 +13,3 @@ resource "prodata_s3_bucket" "locked" {
   versioning          = true
   object_lock_enabled = true
 }
-
-resource "prodata_s3_bucket" "ephemeral" {
-  name          = "my-ephemeral-bucket"
-  force_destroy = true
-}

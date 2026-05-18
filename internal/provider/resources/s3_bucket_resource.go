@@ -41,7 +41,6 @@ type S3BucketResourceModel struct {
 	Acl               types.String `tfsdk:"acl"`
 	Versioning        types.Bool   `tfsdk:"versioning"`
 	ObjectLockEnabled types.Bool   `tfsdk:"object_lock_enabled"`
-	ForceDestroy      types.Bool   `tfsdk:"force_destroy"`
 	CreationDate      types.String `tfsdk:"creation_date"`
 }
 
@@ -124,14 +123,6 @@ func (r *S3BucketResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 				PlanModifiers: []planmodifier.Bool{
 					boolplanmodifier.RequiresReplace(),
 				},
-			},
-			"force_destroy": schema.BoolAttribute{
-				MarkdownDescription: "If `true`, `terraform destroy` wipes all objects, versions, and " +
-					"multipart uploads inside the bucket before deleting. If `false` (default), destroy " +
-					"refuses on a non-empty bucket and the bucket survives.",
-				Optional: true,
-				Computed: true,
-				Default:  booldefault.StaticBool(false),
 			},
 			"creation_date": schema.StringAttribute{
 				MarkdownDescription: "Server-reported bucket creation timestamp (ISO-8601).",
@@ -378,11 +369,10 @@ func (r *S3BucketResource) Delete(ctx context.Context, req resource.DeleteReques
 		opts.ProjectTag = data.ProjectTag.ValueString()
 	}
 	name := data.Name.ValueString()
-	forceDestroy := data.ForceDestroy.ValueBool()
 
-	tflog.Debug(ctx, "Deleting bucket", map[string]any{"name": name, "force_destroy": forceDestroy})
+	tflog.Debug(ctx, "Deleting bucket", map[string]any{"name": name})
 
-	err := r.c.DeleteBucket(ctx, name, forceDestroy, opts)
+	err := r.c.DeleteBucket(ctx, name, opts)
 	if err != nil {
 		if client.IsNotFound(err) {
 			return
