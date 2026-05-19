@@ -6,10 +6,25 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/hashicorp/terraform-plugin-log/tflog"
+)
+
+const (
+	// rateLimitMaxRetries bounds how many times Do retries an HTTP 429 response.
+	// Sized so a bulk apply survives a sustained upstream rate-limit window:
+	// with a ~10s Retry-After this is roughly 100s of retry budget per request.
+	rateLimitMaxRetries = 10
+	// rateLimitBaseDelay is the first backoff interval; it doubles each attempt.
+	rateLimitBaseDelay = 2 * time.Second
+	// rateLimitMaxDelay caps a single backoff wait.
+	rateLimitMaxDelay = 60 * time.Second
 )
 
 type Client struct {
@@ -65,21 +80,16 @@ type RequestOpts struct {
 }
 
 func (c *Client) Do(ctx context.Context, method, path string, body, result any, opts *RequestOpts) error {
-	var reqBody io.Reader
-
+	var bodyBytes []byte
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
 			return fmt.Errorf("marshal request: %w", err)
 		}
-		reqBody = bytes.NewReader(b)
+		bodyBytes = b
 	}
 
 	fullURL := c.baseURL + path
-	req, err := http.NewRequestWithContext(ctx, method, fullURL, reqBody)
-	if err != nil {
-		return fmt.Errorf("create request: %w", err)
-	}
 
 	// Determine region and project: use per-request opts if provided, else client defaults.
 	region := c.Region
@@ -93,34 +103,73 @@ func (c *Client) Do(ctx context.Context, method, path string, body, result any, 
 		}
 	}
 
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", c.userAgent)
-	req.Header.Set("X-API-KEY", c.apiKeyID)
-	req.Header.Set("X-API-SECRET", c.apiSecretKey)
-	req.Header.Set("X-Region", region)
-	req.Header.Set("X-Project-Tag", projectTag)
+	// Edge rate limiting (HTTP 429 — e.g. Cloudflare error 1015) rejects the
+	// request before it reaches the API, so retrying is safe even for POST/DELETE:
+	// no work was performed. Bulk applies (many parallel resources) trip per-IP
+	// rate limits; retry transparently with backoff instead of failing the apply.
+	for attempt := 0; ; attempt++ {
+		var reqBody io.Reader
+		if bodyBytes != nil {
+			reqBody = bytes.NewReader(bodyBytes)
+		}
+		req, err := http.NewRequestWithContext(ctx, method, fullURL, reqBody)
+		if err != nil {
+			return fmt.Errorf("create request: %w", err)
+		}
 
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("request failed: %w", err)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("User-Agent", c.userAgent)
+		req.Header.Set("X-API-KEY", c.apiKeyID)
+		req.Header.Set("X-API-SECRET", c.apiSecretKey)
+		req.Header.Set("X-Region", region)
+		req.Header.Set("X-Project-Tag", projectTag)
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("request failed: %w", err)
+		}
+
+		respBody, readErr := io.ReadAll(resp.Body)
+		respHeader := resp.Header
+		statusCode := resp.StatusCode
+		resp.Body.Close()
+		if readErr != nil {
+			return fmt.Errorf("read response: %w", readErr)
+		}
+
+		if statusCode == http.StatusTooManyRequests && attempt < rateLimitMaxRetries {
+			wait := retryAfterDelay(respHeader, attempt)
+			tflog.Warn(ctx, "rate limited (HTTP 429) — backing off before retry", map[string]any{
+				"method":      method,
+				"path":        path,
+				"attempt":     attempt + 1,
+				"max_retries": rateLimitMaxRetries,
+				"retry_in":    wait.String(),
+			})
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(wait):
+			}
+			continue
+		}
+
+		return parseResponse(statusCode, respBody, result)
 	}
-	defer resp.Body.Close()
+}
 
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("read response: %w", err)
-	}
-
+// parseResponse turns an HTTP response into either nil, a populated result, or an *APIError.
+func parseResponse(statusCode int, respBody []byte, result any) error {
 	// Always try to parse as structured API response.
 	var apiResp apiResponse[json.RawMessage]
 	parsed := json.Unmarshal(respBody, &apiResp) == nil
 
-	isHTTPError := resp.StatusCode < 200 || resp.StatusCode >= 300
+	isHTTPError := statusCode < 200 || statusCode >= 300
 	isAPIFailure := parsed && !apiResp.Success
 
 	if isHTTPError || isAPIFailure {
 		apiErr := &APIError{
-			StatusCode: resp.StatusCode,
+			StatusCode: statusCode,
 			RawBody:    string(respBody),
 		}
 		if parsed && len(apiResp.Errors) > 0 {
@@ -138,7 +187,7 @@ func (c *Client) Do(ctx context.Context, method, path string, body, result any, 
 
 	if result != nil {
 		if !parsed {
-			return fmt.Errorf("unexpected response format (status %d): %s", resp.StatusCode, string(respBody))
+			return fmt.Errorf("unexpected response format (status %d): %s", statusCode, string(respBody))
 		}
 		if err := json.Unmarshal(apiResp.Data, result); err != nil {
 			return fmt.Errorf("parse data: %w", err)
@@ -146,6 +195,48 @@ func (c *Client) Do(ctx context.Context, method, path string, body, result any, 
 	}
 
 	return nil
+}
+
+// retryAfterDelay computes how long to wait before retrying an HTTP 429 response.
+// It honors the Retry-After header (delay-seconds or HTTP-date form) when present,
+// otherwise falls back to exponential backoff (2s, 4s, 8s, ...). The result is
+// jittered (±25%) to avoid a thundering herd when many parallel resources are
+// rate-limited at once, and each wait is capped at rateLimitMaxDelay.
+func retryAfterDelay(h http.Header, attempt int) time.Duration {
+	delay := time.Duration(0)
+	fromHeader := false
+	if ra := strings.TrimSpace(h.Get("Retry-After")); ra != "" {
+		if secs, err := strconv.Atoi(ra); err == nil && secs >= 0 {
+			delay, fromHeader = time.Duration(secs)*time.Second, true
+		} else if t, err := http.ParseTime(ra); err == nil {
+			if d := time.Until(t); d > 0 {
+				delay = d
+			}
+			fromHeader = true
+		}
+	}
+	if !fromHeader {
+		// Exponential backoff: rateLimitBaseDelay doubles each attempt.
+		delay = rateLimitBaseDelay << attempt
+		if delay <= 0 { // guard against shift overflow
+			delay = rateLimitMaxDelay
+		}
+	}
+	if delay > rateLimitMaxDelay {
+		delay = rateLimitMaxDelay
+	}
+	if delay <= 0 {
+		return 0
+	}
+	// ±25% jitter, then clamp so rateLimitMaxDelay stays a hard ceiling.
+	jitter := time.Duration(rand.Int63n(int64(delay)/2+1)) - delay/4
+	delay += jitter
+	if delay < 0 {
+		delay = 0
+	} else if delay > rateLimitMaxDelay {
+		delay = rateLimitMaxDelay
+	}
+	return delay
 }
 
 type Image struct {

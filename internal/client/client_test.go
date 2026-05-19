@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -288,6 +289,136 @@ func TestWaitForVmStatus_TransientErrors(t *testing.T) {
 	}
 	if n := atomic.LoadInt64(&callCount); n != 3 {
 		t.Errorf("expected 3 calls (2 transient + 1 success), got %d", n)
+	}
+}
+
+func TestDo_RetriesOn429ThenSucceeds(t *testing.T) {
+	var callCount int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt64(&callCount, 1)
+		if n <= 2 {
+			// Simulate Cloudflare edge rate limiting (error 1015).
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte("error code: 1015"))
+			return
+		}
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(`{"success":true,"data":null}`))
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server)
+	err := c.Do(context.Background(), http.MethodPost, "/storage/api/v1/buckets", nil, nil, nil)
+
+	if err != nil {
+		t.Fatalf("expected success after 429 retries, got: %v", err)
+	}
+	if n := atomic.LoadInt64(&callCount); n != 3 {
+		t.Errorf("expected 3 calls (2x 429 + 1 success), got %d", n)
+	}
+}
+
+func TestDo_429ExhaustsRetries(t *testing.T) {
+	var callCount int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&callCount, 1)
+		w.Header().Set("Retry-After", "0")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte("error code: 1015"))
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server)
+	err := c.Do(context.Background(), http.MethodPost, "/storage/api/v1/buckets", nil, nil, nil)
+
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected *APIError after exhausting retries, got %T: %v", err, err)
+	}
+	if apiErr.StatusCode != http.StatusTooManyRequests {
+		t.Errorf("StatusCode = %d, want 429", apiErr.StatusCode)
+	}
+	// Initial attempt + rateLimitMaxRetries retries.
+	if n := atomic.LoadInt64(&callCount); n != int64(rateLimitMaxRetries+1) {
+		t.Errorf("expected %d calls, got %d", rateLimitMaxRetries+1, n)
+	}
+}
+
+func TestDo_429ResendsRequestBody(t *testing.T) {
+	var callCount int64
+	var bodies []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(b))
+		if atomic.AddInt64(&callCount, 1) == 1 {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte("error code: 1015"))
+			return
+		}
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(`{"success":true,"data":null}`))
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server)
+	payload := map[string]string{"name": "my-bucket"}
+	if err := c.Do(context.Background(), http.MethodPost, "/storage/api/v1/buckets", payload, nil, nil); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(bodies) != 2 {
+		t.Fatalf("expected 2 requests, got %d", len(bodies))
+	}
+	if bodies[0] != bodies[1] || bodies[1] != `{"name":"my-bucket"}` {
+		t.Errorf("request body not re-sent identically on retry: %q vs %q", bodies[0], bodies[1])
+	}
+}
+
+func TestDo_429ContextCancelled(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "30")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte("error code: 1015"))
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancelled before the backoff wait
+
+	err := c.Do(ctx, http.MethodPost, "/storage/api/v1/buckets", nil, nil, nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected context.Canceled, got %v", err)
+	}
+}
+
+func TestRetryAfterDelay(t *testing.T) {
+	tests := []struct {
+		name     string
+		header   string
+		attempt  int
+		minDelay time.Duration
+		maxDelay time.Duration
+	}{
+		{"retry-after seconds", "10", 0, 7500 * time.Millisecond, 12500 * time.Millisecond},
+		{"retry-after zero", "0", 0, 0, 0},
+		{"retry-after over cap", "9999", 0, 45 * time.Second, 60 * time.Second},
+		{"no header attempt 0", "", 0, 1500 * time.Millisecond, 2500 * time.Millisecond},
+		{"no header attempt 2", "", 2, 6 * time.Second, 10 * time.Second},
+		{"garbage header falls back", "soon", 0, 1500 * time.Millisecond, 2500 * time.Millisecond},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := http.Header{}
+			if tt.header != "" {
+				h.Set("Retry-After", tt.header)
+			}
+			got := retryAfterDelay(h, tt.attempt)
+			if got < tt.minDelay || got > tt.maxDelay {
+				t.Errorf("retryAfterDelay = %v, want [%v, %v]", got, tt.minDelay, tt.maxDelay)
+			}
+		})
 	}
 }
 
