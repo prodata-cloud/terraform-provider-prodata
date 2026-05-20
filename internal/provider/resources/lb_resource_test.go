@@ -2,7 +2,6 @@ package resources
 
 import (
 	"context"
-	"strings"
 	"testing"
 
 	"terraform-provider-prodata/internal/client"
@@ -15,11 +14,10 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
 
-// Unit tests for the prodata_lb resource's plan-time validation logic.
-//
-// These exercise the extracted pure helpers and the framework validator shims
-// that drive the actual Schema/ConfigValidators. Full create/read/update/destroy
-// behavior is covered by the acceptance suite (the TF_ACC=1 path).
+// Unit tests for the prodata_lb resource's plan-time validation logic. These
+// exercise the framework validators wired into Schema/ConfigValidators
+// directly; full create/read/update/destroy behavior is covered by the live-API
+// gated test in the client package and (eventually) a TF_ACC=1 acceptance suite.
 
 // 1 — invalid `type` enum.
 func TestLb_TypeOneOfRejectsBadValue(t *testing.T) {
@@ -48,18 +46,11 @@ func TestLb_TypeOneOfRejectsBadValue(t *testing.T) {
 			t.Errorf("expected type=%q to pass, got: %s", good, resp.Diagnostics)
 		}
 	}
-
-	// Pure helper covers the same surface for callers that bypass the framework.
-	for _, bad := range []string{"EXTERNAL", "Internal", ""} {
-		if msg := validateLbType(bad); msg == "" {
-			t.Errorf("pure validateLbType: expected %q to fail, but it passed", bad)
-		}
-	}
 }
 
 // 2 — invalid `protocol` enum (case-sensitive).
 func TestLb_ProtocolOneOfRejectsBadValue(t *testing.T) {
-	v := stringvalidator.OneOf("TCP", "UDP")
+	v := stringvalidator.OneOf(client.LbProtocolTCP, client.LbProtocolUDP)
 	// Includes lowercase variants because the server silently downgrades unknown
 	// values to TCP — the plan-time validator is the only line of defence.
 	for _, bad := range []string{"tcp", "udp", "Tcp", "HTTP", "https", "", "ICMP"} {
@@ -71,12 +62,6 @@ func TestLb_ProtocolOneOfRejectsBadValue(t *testing.T) {
 		v.ValidateString(context.Background(), req, resp)
 		if !resp.Diagnostics.HasError() {
 			t.Errorf("expected protocol=%q to fail OneOf validation, but it passed", bad)
-		}
-	}
-
-	for _, bad := range []string{"tcp", "Http", ""} {
-		if msg := validateLbProtocol(bad); msg == "" {
-			t.Errorf("pure validateLbProtocol: expected %q to fail, but it passed", bad)
 		}
 	}
 }
@@ -96,10 +81,6 @@ func TestLb_PortSetSizeRejectsEmpty(t *testing.T) {
 	v.ValidateSet(context.Background(), req, resp)
 	if !resp.Diagnostics.HasError() {
 		t.Errorf("expected empty port set to fail SizeBetween, but it passed")
-	}
-
-	if msg := validatePortCount(0); msg == "" {
-		t.Errorf("pure validatePortCount(0): expected failure")
 	}
 }
 
@@ -122,13 +103,6 @@ func TestLb_PortSetSizeRejectsOverflow(t *testing.T) {
 	v.ValidateSet(context.Background(), req, resp)
 	if !resp.Diagnostics.HasError() {
 		t.Errorf("expected 11-entry port set to fail SizeBetween, but it passed")
-	}
-
-	if msg := validatePortCount(11); msg == "" {
-		t.Errorf("pure validatePortCount(11): expected failure")
-	}
-	if msg := validatePortCount(10); msg != "" {
-		t.Errorf("pure validatePortCount(10): expected pass, got %q", msg)
 	}
 }
 
@@ -161,23 +135,33 @@ func TestLb_VmIdsSizeAtLeastOne(t *testing.T) {
 	}
 }
 
-// 6 — backend_group with BOTH vm_ids and node_pool_id set fails ExactlyOneOf.
-func TestLb_BackendGroupBothModesRejected(t *testing.T) {
-	if msg := validateBackendGroupExactlyOne(true, true); msg == "" {
-		t.Errorf("expected both-modes-set to fail, but it passed")
-	} else if !strings.Contains(msg, "exactly one") {
-		t.Errorf("expected message to mention 'exactly one', got: %s", msg)
+// 6 — `name` length + charset validation.
+func TestLb_NameValidator(t *testing.T) {
+	lengthV := stringvalidator.LengthBetween(lbMinNameLen, lbMaxNameLen)
+	regexV := stringvalidator.RegexMatches(lbNameRegex, "")
+
+	for _, bad := range []string{"", "ab", "-lead", "trail-", "has space", "has_underscore", "has.dot"} {
+		req := validator.StringRequest{Path: path.Root("name"), ConfigValue: types.StringValue(bad)}
+		lResp, rResp := &validator.StringResponse{}, &validator.StringResponse{}
+		lengthV.ValidateString(context.Background(), req, lResp)
+		regexV.ValidateString(context.Background(), req, rResp)
+		if !lResp.Diagnostics.HasError() && !rResp.Diagnostics.HasError() {
+			t.Errorf("expected name=%q to fail length or regex, both passed", bad)
+		}
+	}
+
+	for _, good := range []string{"abc", "web-lb", "metrics-collector", "lb-1"} {
+		req := validator.StringRequest{Path: path.Root("name"), ConfigValue: types.StringValue(good)}
+		lResp, rResp := &validator.StringResponse{}, &validator.StringResponse{}
+		lengthV.ValidateString(context.Background(), req, lResp)
+		regexV.ValidateString(context.Background(), req, rResp)
+		if lResp.Diagnostics.HasError() || rResp.Diagnostics.HasError() {
+			t.Errorf("expected name=%q to pass, got length=%s regex=%s", good, lResp.Diagnostics, rResp.Diagnostics)
+		}
 	}
 }
 
-// 7 — backend_group with NEITHER vm_ids nor node_pool_id set fails ExactlyOneOf.
-func TestLb_BackendGroupNeitherModeRejected(t *testing.T) {
-	if msg := validateBackendGroupExactlyOne(false, false); msg == "" {
-		t.Errorf("expected neither-mode-set to fail, but it passed")
-	}
-}
-
-// 9 — CCM-create rejects user-supplied description (server hard-codes "CCM: <name>").
+// 7 — CCM-create rejects user-supplied description (server hard-codes "CCM: <name>").
 func TestLb_CCMDescriptionNotConfigurable(t *testing.T) {
 	cases := []struct {
 		name           string

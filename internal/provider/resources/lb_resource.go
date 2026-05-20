@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 	"time"
 
@@ -123,9 +124,14 @@ func (r *LbResource) Schema(ctx context.Context, _ resource.SchemaRequest, resp 
 				},
 			},
 			"name": schema.StringAttribute{
-				MarkdownDescription: "Load balancer name. Unique within the parent organization and region. " +
-					"Updated in place.",
+				MarkdownDescription: "Load balancer name. 3-63 characters, letters / digits / hyphens, must not " +
+					"start or end with a hyphen. Unique within the parent organization and region. Updated in place.",
 				Required: true,
+				Validators: []validator.String{
+					stringvalidator.LengthBetween(lbMinNameLen, lbMaxNameLen),
+					stringvalidator.RegexMatches(lbNameRegex,
+						"must contain only letters, digits and hyphens, and must not start or end with a hyphen"),
+				},
 			},
 			"description": schema.StringAttribute{
 				MarkdownDescription: "Free-form description. Updated in place.",
@@ -156,7 +162,7 @@ func (r *LbResource) Schema(ctx context.Context, _ resource.SchemaRequest, resp 
 					stringplanmodifier.RequiresReplace(),
 				},
 				Validators: []validator.String{
-					stringvalidator.OneOf("TCP", "UDP"),
+					stringvalidator.OneOf(client.LbProtocolTCP, client.LbProtocolUDP),
 				},
 			},
 			"network_id": schema.Int64Attribute{
@@ -166,6 +172,9 @@ func (r *LbResource) Schema(ctx context.Context, _ resource.SchemaRequest, resp 
 				Required: true,
 				PlanModifiers: []planmodifier.Int64{
 					int64planmodifier.RequiresReplace(),
+				},
+				Validators: []validator.Int64{
+					int64validator.AtLeast(1),
 				},
 			},
 			"source": schema.StringAttribute{
@@ -449,7 +458,7 @@ func (r *LbResource) Create(ctx context.Context, req resource.CreateRequest, res
 		resultLB = lb
 	}
 
-	r.applyServerState(&plan, resultLB, region, projectTag, true)
+	r.applyServerState(&plan, resultLB, region, projectTag)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 
 	if waitErr != nil {
@@ -497,7 +506,7 @@ func (r *LbResource) Read(ctx context.Context, req resource.ReadRequest, resp *r
 	if projectTag == "" {
 		projectTag = r.c.ProjectTag
 	}
-	r.applyServerState(&data, lb, region, projectTag, false)
+	r.applyServerState(&data, lb, region, projectTag)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
 
@@ -552,20 +561,24 @@ func (r *LbResource) Update(ctx context.Context, req resource.UpdateRequest, res
 			"backends": len(wire.Backends),
 			"ports":    len(wire.Ports),
 		})
-		if _, err := r.c.ConfigureLoadBalancerFrontend(ctx, id, wire, opts); err != nil {
+		if _, err := client.RetryOnBusy(ctx, client.RetryTimeoutLong, func() (*client.LoadBalancer, error) {
+			return r.c.ConfigureLoadBalancerFrontend(ctx, id, wire, opts)
+		}); err != nil {
 			resp.Diagnostics.AddError("Unable to update load balancer", err.Error())
 			return
 		}
 	case client.LbSourceCCM:
 		// CCM backends are derived from the node pool; the configure endpoint ignores
-		// an empty backends list (and node_pool_id swaps are gated by RequiresReplace).
+		// the absent backends field (and node_pool_id swaps are gated by RequiresReplace).
 		wire.Backends = nil
 		tflog.Debug(ctx, "Configuring CCM load balancer", map[string]any{
 			"id":    id,
 			"name":  wire.Name,
 			"ports": len(wire.Ports),
 		})
-		if _, err := r.c.ConfigureLoadBalancerCCM(ctx, id, wire, opts); err != nil {
+		if _, err := client.RetryOnBusy(ctx, client.RetryTimeoutLong, func() (*client.LoadBalancer, error) {
+			return r.c.ConfigureLoadBalancerCCM(ctx, id, wire, opts)
+		}); err != nil {
 			resp.Diagnostics.AddError("Unable to update load balancer", err.Error())
 			return
 		}
@@ -593,7 +606,7 @@ func (r *LbResource) Update(ctx context.Context, req resource.UpdateRequest, res
 		if projectTag == "" {
 			projectTag = r.c.ProjectTag
 		}
-		r.applyServerState(&plan, resultLB, region, projectTag, true)
+		r.applyServerState(&plan, resultLB, region, projectTag)
 		// Preserve prior date_created — panel-main's configure endpoint resets it
 		// to now() (LoadBalancerCoreService.java:840), which would otherwise fail
 		// Terraform's "computed output must be consistent" check during apply.
@@ -708,11 +721,10 @@ func (r *LbResource) optsFromState(region, projectTag types.String) *client.Requ
 }
 
 // applyServerState writes computed fields and re-syncs backend membership from a
-// server-returned LoadBalancer onto the model. preserveNodePool=true means the
-// caller has authoritative node_pool_id (from a config-driven Create/Update); when
-// false (Read), node_pool_id is left untouched because the panel doesn't surface
-// it in the GET response.
-func (r *LbResource) applyServerState(m *LbResourceModel, lb *client.LoadBalancer, region, projectTag string, preserveNodePool bool) {
+// server-returned LoadBalancer onto the model. node_pool_id is preserved from the
+// caller's model (plan on Create/Update, prior state on Read) because the panel
+// does not surface it in the GET response.
+func (r *LbResource) applyServerState(m *LbResourceModel, lb *client.LoadBalancer, region, projectTag string) {
 	m.ID = types.Int64Value(lb.ID)
 	m.Region = types.StringValue(region)
 	m.ProjectTag = types.StringValue(projectTag)
@@ -754,13 +766,9 @@ func (r *LbResource) applyServerState(m *LbResourceModel, lb *client.LoadBalance
 			NodePoolID: types.Int64Null(),
 		}
 	case client.LbSourceCCM:
-		var nodePool types.Int64
-		if preserveNodePool && m.BackendGroup != nil {
+		nodePool := types.Int64Null()
+		if m.BackendGroup != nil {
 			nodePool = m.BackendGroup.NodePoolID
-		} else if m.BackendGroup != nil {
-			nodePool = m.BackendGroup.NodePoolID
-		} else {
-			nodePool = types.Int64Null()
 		}
 		m.BackendGroup = &LbBackendGroupModel{
 			VMIDs:      types.SetNull(types.StringType),
@@ -927,9 +935,16 @@ func vmIDsFromServer(in []client.LbBackend) types.Set {
 // ---- pure helpers (unit-testable) ----
 
 const (
-	lbMinPorts = 1
-	lbMaxPorts = 10
+	lbMinPorts   = 1
+	lbMaxPorts   = 10
+	lbMinNameLen = 3
+	lbMaxNameLen = 63
 )
+
+// lbNameRegex enforces letters/digits/hyphens with no leading or trailing
+// hyphen. The panel itself does not validate the name, but the hidden HAProxy
+// VMs derive their hostnames from it, so we want a Linux-hostname-shaped value.
+var lbNameRegex = regexp.MustCompile(`^[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?$`)
 
 // backendMode reports which mode the given backend_group block expresses. A pure
 // helper so ModifyPlan and Create/Update share the same definition.
@@ -952,47 +967,6 @@ func detectModeSwitch(stateVMs, statePool, planVMs, planPool bool) bool {
 		return true
 	}
 	return false
-}
-
-// validateLbType is the pure version of stringvalidator.OneOf("external","internal").
-func validateLbType(s string) string {
-	switch s {
-	case client.LbTypeExternal, client.LbTypeInternal:
-		return ""
-	default:
-		return fmt.Sprintf("type must be %q or %q, got %q", client.LbTypeExternal, client.LbTypeInternal, s)
-	}
-}
-
-// validateLbProtocol is the pure version of stringvalidator.OneOf("TCP","UDP").
-func validateLbProtocol(s string) string {
-	switch s {
-	case "TCP", "UDP":
-		return ""
-	default:
-		return fmt.Sprintf("protocol must be %q or %q, got %q", "TCP", "UDP", s)
-	}
-}
-
-// validatePortCount mirrors setvalidator.SizeBetween(lbMinPorts, lbMaxPorts).
-func validatePortCount(n int) string {
-	if n < lbMinPorts || n > lbMaxPorts {
-		return fmt.Sprintf("port set must contain between %d and %d entries, got %d", lbMinPorts, lbMaxPorts, n)
-	}
-	return ""
-}
-
-// validateBackendGroupExactlyOne mirrors the resource-level ExactlyOneOf validator
-// on backend_group.vm_ids / backend_group.node_pool_id.
-func validateBackendGroupExactlyOne(hasVMs, hasPool bool) string {
-	switch {
-	case hasVMs && hasPool:
-		return "backend_group must set exactly one of vm_ids or node_pool_id, not both"
-	case !hasVMs && !hasPool:
-		return "backend_group must set exactly one of vm_ids or node_pool_id"
-	default:
-		return ""
-	}
 }
 
 // validateCCMDescriptionNotConfigurable mirrors the ModifyPlan rule that
