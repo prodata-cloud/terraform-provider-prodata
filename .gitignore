@@ -6,6 +6,9 @@ terraform.tfplan
 terraform.tfstate
 bin/
 dist/
+# Local dev binary produced by `go build -o terraform-provider-prodata`.
+/terraform-provider-prodata
+/terraform-provider-prodata_v*
 modules-dev/
 /pkg/
 website/.vagrant
