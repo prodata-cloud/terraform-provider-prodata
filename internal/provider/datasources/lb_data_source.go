@@ -229,12 +229,5 @@ func (d *LbDataSource) Read(ctx context.Context, req datasource.ReadRequest, res
 	}
 	data.VMIDs = types.SetValueMust(types.StringType, values)
 
-	if data.Region.IsNull() || data.Region.IsUnknown() {
-		data.Region = types.StringNull()
-	}
-	if data.ProjectTag.IsNull() || data.ProjectTag.IsUnknown() {
-		data.ProjectTag = types.StringNull()
-	}
-
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
