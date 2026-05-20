@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 )
 
 // Load balancer type values (the prodata_lb `type` attribute). On the wire panel-main
@@ -14,6 +15,14 @@ import (
 const (
 	LbTypeExternal = "external"
 	LbTypeInternal = "internal"
+)
+
+// Load balancer protocol values. The panel stores protocol as an unnormalized
+// string column, so legacy load balancers may read back as lowercase; the
+// adapter normalizes to upper-case on the way out (see lbDTO.toLoadBalancer).
+const (
+	LbProtocolTCP = "TCP"
+	LbProtocolUDP = "UDP"
 )
 
 // Load balancer source values. Authoritative for routing configure/delete calls:
@@ -91,7 +100,7 @@ type LoadBalancerRequest struct {
 	IsPublic    bool           `json:"isPublic"`
 	Protocol    string         `json:"protocol"`
 	UserNetID   int64          `json:"userNetId"`
-	Backends    []LbBackendRef `json:"backends"`
+	Backends    []LbBackendRef `json:"backends,omitempty"`
 	Ports       []LbPortReq    `json:"ports"`
 }
 
@@ -145,6 +154,10 @@ type lbPortDTO struct {
 }
 
 func (d *lbDTO) toLoadBalancer() *LoadBalancer {
+	// Normalize protocol to upper-case: the panel stores it unnormalized, so
+	// legacy LBs may read back as "tcp"/"udp" and would otherwise diverge from
+	// the schema's stringvalidator.OneOf("TCP","UDP") and trigger a spurious
+	// RequiresReplace destroy+recreate on the next plan.
 	lb := &LoadBalancer{
 		ID:          d.ID,
 		Name:        d.Name,
@@ -152,7 +165,7 @@ func (d *lbDTO) toLoadBalancer() *LoadBalancer {
 		Type:        lbTypeFromIsPublic(d.IsPublic),
 		Source:      d.Source,
 		Status:      d.Status.Name,
-		Protocol:    d.Protocol,
+		Protocol:    strings.ToUpper(d.Protocol),
 		NetworkID:   d.UserNet,
 		PublicIP:    d.ProvisioningPublicIP,
 		PrivateIP:   d.LocalUserVip,

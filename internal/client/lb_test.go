@@ -158,6 +158,28 @@ func TestGetLoadBalancer_Success(t *testing.T) {
 	if lb.Ports[0].Port != 80 || lb.Ports[0].TargetPort != 8080 {
 		t.Errorf("port = %+v, want 80->8080", lb.Ports[0])
 	}
+	// Regression: the captured fixture has protocol:"tcp" (lowercase, as panel
+	// stores it on legacy LBs); the adapter must upper-case it so state stays
+	// stable against the schema's OneOf("TCP","UDP") validator.
+	if lb.Protocol != LbProtocolTCP {
+		t.Errorf("lb.Protocol = %q, want %q (upper-cased from fixture)", lb.Protocol, LbProtocolTCP)
+	}
+}
+
+func TestGetLoadBalancer_ProtocolUDPLowercase(t *testing.T) {
+	body := `{"error":0,"errMessage":null,"data":{"id":1,"name":"udp-lb","isPublic":false,` +
+		`"status":{"name":"SUCCESS"},"source":"FRONTEND","protocol":"udp"}}`
+	server := newTestServer(200, body)
+	defer server.Close()
+
+	c := newTestClient(t, server)
+	lb, err := c.GetLoadBalancer(context.Background(), 1, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if lb.Protocol != LbProtocolUDP {
+		t.Errorf("lb.Protocol = %q, want %q (upper-cased from lowercase fixture)", lb.Protocol, LbProtocolUDP)
+	}
 }
 
 func TestGetLoadBalancer_NotFound736(t *testing.T) {
