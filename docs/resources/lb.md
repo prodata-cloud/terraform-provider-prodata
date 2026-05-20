@@ -1,5 +1,6 @@
 ---
 page_title: "prodata_lb Resource - ProData Provider"
+subcategory: "Load Balancer"
 description: |-
   Manages a ProData L4 load balancer (TCP/UDP) backed by hidden HAProxy VMs.
 ---
@@ -155,7 +156,7 @@ After import, `region` and `project_tag` are seeded from the provider defaults. 
 - **IP auto-allocation is API-key only.** Creates that omit explicit IPs allocate a VIP and the two HAProxy backend IPs from the network's free pool — this is enabled for API-key callers (i.e. Terraform) but not for JWT/UI callers. If the network has fewer than three free IPs the create fails with server error 737.
 - **`getFreeNetIps` is a snapshot.** Two near-simultaneous LB creates against the same near-full network can both be told the same free IPs, racing for the same VIP. The platform's resolution path is being hardened; for now, serialize LB creates against tight networks (`depends_on` between resources, or `terraform apply -parallelism=1`) when free IP capacity is close to the minimum.
 - **Switching `node_pool_id` requires destroy+recreate.** The panel's configure endpoint has no `nodePoolId` parameter, so the provider gates pool swaps via `RequiresReplace`. Same-pool configures (rename, port edits) are applied in place as expected.
-- **`node_pool_id` is not surfaced on GET.** The panel does not return `nodePoolId` in the load-balancer read shape, so the resource preserves it from prior state. After `terraform import`, you must restate it in HCL — see the Import note.
+- **`node_pool_id` is not surfaced on GET.** The panel does not return `nodePoolId` in the load-balancer read shape, so the resource preserves it from prior state. After `terraform import`, you must restate it in HCL — see the Import note. Track node-pool membership separately through your Kubernetes tooling.
 - **`description` is panel-controlled on CCM creates.** The provider rejects a user-supplied `description` at plan time for CCM (node pool) balancers; the panel populates it as `"CCM: <name>"` and that value reads back into state. Frontend (VM-backed) LBs accept user-supplied descriptions normally.
 - **`date_created` is preserved across updates.** The panel's configure endpoint resets `dateCreated` to the current time, which would fail Terraform's "computed output must be consistent" check. The provider re-injects the prior `date_created` into state on update so plans stay stable.
 - **Legacy LBs may report empty `source`.** Load balancers created before source tracking landed will read `source = ""`. The provider treats empty source as `FRONTEND` for compatibility on `delete` and surfaces a clear error if you try to `update` such an LB — destroy and recreate to migrate it onto the new schema.

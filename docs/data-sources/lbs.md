@@ -1,5 +1,6 @@
 ---
 page_title: "prodata_lbs Data Source - ProData Provider"
+subcategory: "Load Balancer"
 description: |-
   List ProData load balancers visible to the current project.
 ---
