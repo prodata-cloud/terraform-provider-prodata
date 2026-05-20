@@ -561,6 +561,10 @@ func (r *LbResource) Update(ctx context.Context, req resource.UpdateRequest, res
 			projectTag = r.c.ProjectTag
 		}
 		r.applyServerState(&plan, resultLB, region, projectTag, true)
+		// Preserve prior date_created — panel-main's configure endpoint resets it
+		// to now() (LoadBalancerCoreService.java:840), which would otherwise fail
+		// Terraform's "computed output must be consistent" check during apply.
+		plan.DateCreated = state.DateCreated
 		resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 	}
 	if waitErr != nil {
