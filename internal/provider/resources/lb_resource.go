@@ -291,19 +291,52 @@ func (r *LbResource) ConfigValidators(_ context.Context) []resource.ConfigValida
 	}
 }
 
-// ModifyPlan detects mode-switches (vm_ids <-> node_pool_id) and marks backend_group
-// as requires-replace. Same-mode content changes pass through to Update.
+// ModifyPlan handles two concerns:
+//   - CCM Create: the panel hard-codes description to "CCM: <name>" at create time
+//     (CCMLoadBalancerService.createLoadBalancerForCCM) — user-supplied values
+//     would silently lose. Reject the config at plan time so the user can drop
+//     the attribute and let the panel populate it. (Description is Computed, so
+//     omitting it in HCL is valid; the post-create value reads back into state.)
+//   - Update: mode-switches (vm_ids <-> node_pool_id) mark backend_group as
+//     requires-replace. Same-mode content changes pass through to Update.
 func (r *LbResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
-	if req.State.Raw.IsNull() || req.Plan.Raw.IsNull() {
+	if req.Plan.Raw.IsNull() {
 		return
 	}
-	var state, plan LbResourceModel
-	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+	var plan LbResourceModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
 
+	var config LbResourceModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	_, hasPool := backendMode(plan.BackendGroup)
+	isCreate := req.State.Raw.IsNull()
+	descriptionSet := !config.Description.IsNull() && !config.Description.IsUnknown()
+	if summary := validateCCMDescriptionNotConfigurable(isCreate, hasPool, descriptionSet); summary != "" {
+		resp.Diagnostics.AddAttributeError(
+			path.Root("description"),
+			summary,
+			"The panel hard-codes the description of CCM (node pool) load balancers to "+
+				"\"CCM: <name>\" at create time. Remove the `description` attribute from "+
+				"your configuration and let the provider read the panel's value back into state.",
+		)
+		return
+	}
+
+	if req.State.Raw.IsNull() {
+		return
+	}
+	var state LbResourceModel
+	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
 	stateHasVMs, stateHasPool := backendMode(state.BackendGroup)
 	planHasVMs, planHasPool := backendMode(plan.BackendGroup)
 	if detectModeSwitch(stateHasVMs, stateHasPool, planHasVMs, planHasPool) {
@@ -960,6 +993,19 @@ func validateBackendGroupExactlyOne(hasVMs, hasPool bool) string {
 	default:
 		return ""
 	}
+}
+
+// validateCCMDescriptionNotConfigurable mirrors the ModifyPlan rule that
+// rejects a user-supplied description on CCM (node_pool_id) load balancer
+// creates. The panel hard-codes description to "CCM: <name>" at create time
+// (CCMLoadBalancerService.createLoadBalancerForCCM) and silently discards any
+// caller-supplied value, so we fail the plan to surface the constraint.
+// Returns "" if OK, or the error message to surface.
+func validateCCMDescriptionNotConfigurable(isCreate, hasPool, descriptionSet bool) string {
+	if isCreate && hasPool && descriptionSet {
+		return "description not configurable for CCM load balancers"
+	}
+	return ""
 }
 
 // diagsString turns a framework diagnostics value into a single error message.

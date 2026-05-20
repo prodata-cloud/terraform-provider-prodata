@@ -177,6 +177,35 @@ func TestLb_BackendGroupNeitherModeRejected(t *testing.T) {
 	}
 }
 
+// 9 — CCM-create rejects user-supplied description (server hard-codes "CCM: <name>").
+func TestLb_CCMDescriptionNotConfigurable(t *testing.T) {
+	cases := []struct {
+		name           string
+		isCreate       bool
+		hasPool        bool
+		descriptionSet bool
+		wantReject     bool
+	}{
+		{"create + CCM + user description -> rejected", true, true, true, true},
+		{"create + CCM + no description -> OK", true, true, false, false},
+		{"create + Frontend + user description -> OK", true, false, true, false},
+		{"update + CCM + user description -> OK (configure honors it)", false, true, true, false},
+		{"update + CCM + no description -> OK", false, true, false, false},
+		{"create + Frontend + no description -> OK", true, false, false, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := validateCCMDescriptionNotConfigurable(c.isCreate, c.hasPool, c.descriptionSet)
+			if c.wantReject && got == "" {
+				t.Errorf("expected rejection, got OK")
+			}
+			if !c.wantReject && got != "" {
+				t.Errorf("expected OK, got rejection: %s", got)
+			}
+		})
+	}
+}
+
 // 8 — mode-switch detection (state vm_ids -> plan node_pool_id, and vice versa).
 func TestLb_DetectModeSwitch(t *testing.T) {
 	cases := []struct {
