@@ -79,12 +79,16 @@ type RequestOpts struct {
 	ProjectTag string
 }
 
-func (c *Client) Do(ctx context.Context, method, path string, body, result any, opts *RequestOpts) error {
+// doRequest performs an HTTP request with the standard auth + region/project headers
+// and transparent HTTP 429 retry, returning the raw status code and response body.
+// It is the shared transport for both the V2 envelope path (Do) and the V1 envelope
+// path (legacy load-balancer endpoints, parsed via parseV1Response).
+func (c *Client) doRequest(ctx context.Context, method, path string, body any, opts *RequestOpts) (int, []byte, error) {
 	var bodyBytes []byte
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
-			return fmt.Errorf("marshal request: %w", err)
+			return 0, nil, fmt.Errorf("marshal request: %w", err)
 		}
 		bodyBytes = b
 	}
@@ -114,7 +118,7 @@ func (c *Client) Do(ctx context.Context, method, path string, body, result any, 
 		}
 		req, err := http.NewRequestWithContext(ctx, method, fullURL, reqBody)
 		if err != nil {
-			return fmt.Errorf("create request: %w", err)
+			return 0, nil, fmt.Errorf("create request: %w", err)
 		}
 
 		req.Header.Set("Content-Type", "application/json")
@@ -126,7 +130,7 @@ func (c *Client) Do(ctx context.Context, method, path string, body, result any, 
 
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
-			return fmt.Errorf("request failed: %w", err)
+			return 0, nil, fmt.Errorf("request failed: %w", err)
 		}
 
 		respBody, readErr := io.ReadAll(resp.Body)
@@ -134,7 +138,7 @@ func (c *Client) Do(ctx context.Context, method, path string, body, result any, 
 		statusCode := resp.StatusCode
 		resp.Body.Close()
 		if readErr != nil {
-			return fmt.Errorf("read response: %w", readErr)
+			return 0, nil, fmt.Errorf("read response: %w", readErr)
 		}
 
 		if statusCode == http.StatusTooManyRequests && attempt < rateLimitMaxRetries {
@@ -148,14 +152,24 @@ func (c *Client) Do(ctx context.Context, method, path string, body, result any, 
 			})
 			select {
 			case <-ctx.Done():
-				return ctx.Err()
+				return 0, nil, ctx.Err()
 			case <-time.After(wait):
 			}
 			continue
 		}
 
-		return parseResponse(statusCode, respBody, result)
+		return statusCode, respBody, nil
 	}
+}
+
+// Do issues a request to a V2 API endpoint and decodes the {success,data,errors}
+// envelope into result.
+func (c *Client) Do(ctx context.Context, method, path string, body, result any, opts *RequestOpts) error {
+	statusCode, respBody, err := c.doRequest(ctx, method, path, body, opts)
+	if err != nil {
+		return err
+	}
+	return parseResponse(statusCode, respBody, result)
 }
 
 // parseResponse turns an HTTP response into either nil, a populated result, or an *APIError.
