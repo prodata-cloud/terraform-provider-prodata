@@ -20,7 +20,7 @@ Switching between the two backend modes forces resource replacement; same-mode c
 
 ~> **Note:** `name`, `description`, `port`, and `backend_group` content (VM members) are updated in place. Changing `region`, `project_tag`, `type`, `protocol`, `network_id`, or switching backend modes forces a new resource. The hidden HAProxy VMs are not re-provisioned on in-place updates.
 
-~> **Note:** `description` is **not configurable for CCM (node pool) load balancers.** The panel hard-codes it to `"CCM: <name>"` at create time and silently discards any caller-supplied value. The provider rejects the configuration at plan time to surface the constraint — omit `description` for CCM balancers and let the provider read the panel value back into state.
+~> **Note:** `description` is **not configurable for CCM (node pool) load balancers.** The panel owns it — it sets `"CCM: <name>"` and ignores any caller-supplied value on both create and update. The provider rejects a user-supplied `description` at plan time to surface the constraint — omit `description` for CCM balancers and let the provider read the panel value back into state.
 
 ## Example Usage
 
@@ -141,13 +141,19 @@ The provider polls the LB status every 30s during `create`, `update`, and `delet
 
 ## Import
 
-Load balancers are imported using their numeric ID:
+Load balancers are imported using their numeric ID, scoped to the provider's default region and project:
 
 ```shell
 terraform import prodata_lb.example 42
 ```
 
-After import, `region` and `project_tag` are seeded from the provider defaults. If the LB lives in a different region/project, set them explicitly in your configuration before the next `terraform plan` so the read scopes correctly.
+To import an LB that lives in a different region or project, use the composite form `{region}/{id}@{project_tag}`:
+
+```shell
+terraform import prodata_lb.example UZ-5/42@my-project
+```
+
+With the bare-ID form, `region` and `project_tag` are seeded from the provider defaults; if the LB lives elsewhere, either use the composite form or set them explicitly in your configuration before the next `terraform plan` so the read scopes correctly.
 
 ~> **Note:** A `CCM`-source LB imported with this resource cannot have its `node_pool_id` populated from state — the panel does not surface `node_pool_id` on the GET endpoint. You must set `backend_group.node_pool_id` in your HCL after import to match the actual pool, otherwise the next plan will not be able to manage backend membership and update operations will fail. See "Known Limitations".
 
@@ -157,7 +163,7 @@ After import, `region` and `project_tag` are seeded from the provider defaults. 
 - **`getFreeNetIps` is a snapshot.** Two near-simultaneous LB creates against the same near-full network can both be told the same free IPs, racing for the same VIP. The platform's resolution path is being hardened; for now, serialize LB creates against tight networks (`depends_on` between resources, or `terraform apply -parallelism=1`) when free IP capacity is close to the minimum.
 - **Switching `node_pool_id` requires destroy+recreate.** The panel's configure endpoint has no `nodePoolId` parameter, so the provider gates pool swaps via `RequiresReplace`. Same-pool configures (rename, port edits) are applied in place as expected.
 - **`node_pool_id` is not surfaced on GET.** The panel does not return `nodePoolId` in the load-balancer read shape, so the resource preserves it from prior state. After `terraform import`, you must restate it in HCL — see the Import note. Track node-pool membership separately through your Kubernetes tooling.
-- **`description` is panel-controlled on CCM creates.** The provider rejects a user-supplied `description` at plan time for CCM (node pool) balancers; the panel populates it as `"CCM: <name>"` and that value reads back into state. Frontend (VM-backed) LBs accept user-supplied descriptions normally.
+- **`description` is panel-controlled for CCM balancers.** The provider rejects a user-supplied `description` at plan time for CCM (node pool) balancers, on both create and update; the panel sets it to `"CCM: <name>"` and that value reads back into state. Frontend (VM-backed) LBs accept user-supplied descriptions normally.
 - **`date_created` is preserved across updates.** The panel's configure endpoint resets `dateCreated` to the current time, which would fail Terraform's "computed output must be consistent" check. The provider re-injects the prior `date_created` into state on update so plans stay stable.
 - **Legacy LBs may report empty `source`.** Load balancers created before source tracking landed will read `source = ""`. The provider treats empty source as `FRONTEND` for compatibility on `delete` and surfaces a clear error if you try to `update` such an LB — destroy and recreate to migrate it onto the new schema.
 - **Hidden HAProxy VMs.** Each LB creates two HAProxy VMs in `network_id`. They are managed by the platform and do not appear in `prodata_vms`, but they do consume VM quota — plan capacity accordingly. They are cleaned up on `terraform destroy`.

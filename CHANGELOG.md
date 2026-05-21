@@ -14,8 +14,12 @@ All notable changes to this provider are documented here. The format is based on
 - `LbProtocolTCP`/`LbProtocolUDP` exported client constants.
 - `subcategory: "Load Balancer"` front-matter on the LB resource and data
   source docs so the Terraform Registry sidebar groups them correctly.
+- `prodata_lb` import now also accepts the composite `{region}/{id}@{project_tag}`
+  form for importing load balancers outside the provider's default scope; the
+  bare-ID form continues to work.
 - Regression test asserting the LB client normalizes lowercase `protocol`
-  values from the server to upper-case.
+  values from the server to upper-case; unit tests for import-ID parsing and
+  the new error-humanizing helper.
 
 ### Changed
 
@@ -27,6 +31,12 @@ All notable changes to this provider are documented here. The format is based on
   `RetryOnBusy` to match Create's handling of API error 627 (resource busy).
 - `LoadBalancerRequest.Backends` is now tagged `omitempty`; CCM Update no
   longer emits `"backends":null` on the wire.
+- A user-supplied `description` on a CCM (node pool) load balancer is now
+  rejected at plan time on **update** as well as create — the panel owns the
+  CCM description (`"CCM: <name>"`) and ignores caller values.
+- LB diagnostics surface human-readable messages for known error codes
+  (duplicate name, not found, insufficient free IPs, busy) instead of the raw
+  `api error [code]` string.
 - `.goreleaser.yml` uses GoReleaser v2's `archives[].formats` plural form.
 
 ### Removed
@@ -37,6 +47,14 @@ All notable changes to this provider are documented here. The format is based on
   `validateLbProtocol`, `validatePortCount`, `validateBackendGroupExactlyOne`)
   — the framework validators in the schema are the production path and are
   already covered by direct unit tests.
+
+### Internal
+
+- New `internal/tfutil.StringOrNull` helper centralizes the "empty server
+  string → null state value" idiom; adopted by the LB resource and data
+  sources.
+- Renamed the LB-only `doV1` client helper to `doLBV1`; promoted the
+  per-call terminal-status set constructors to package-level vars.
 
 ## [0.15.0] - 2026-05-20
 
