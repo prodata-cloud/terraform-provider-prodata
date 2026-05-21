@@ -620,6 +620,7 @@ func (c *Client) DeletePublicIP(ctx context.Context, id int64, opts *RequestOpts
 // Vm represents a virtual machine.
 type Vm struct {
 	ID             int64  `json:"id"`
+	Guid           string `json:"guid"`
 	Name           string `json:"name"`
 	Status         string `json:"status"`
 	CPUCores       int64  `json:"cpuCores"`

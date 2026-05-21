@@ -31,6 +31,7 @@ data "prodata_vm" "example" {
 ### Attribute Reference
 
 - `name` (String) The name of the virtual machine.
+- `guid` (String) The VM's globally-unique identifier assigned by the panel. Use this to reference the VM as a load balancer backend (`prodata_lb.backend_group.vm_ids`).
 - `status` (String) The current status of the virtual machine (RUNNING, STOPPED, etc.).
 - `cpu_cores` (Number) The number of CPU cores.
 - `ram` (Number) The amount of RAM in GB.

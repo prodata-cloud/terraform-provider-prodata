@@ -26,6 +26,7 @@ data "prodata_vms" "all" {}
 
 - `vms` (List of Object) List of available virtual machines. Each virtual machine has the following attributes:
   - `id` (Number) The unique identifier of the virtual machine.
+  - `guid` (String) The VM's globally-unique identifier assigned by the panel. Use this to reference the VM as a load balancer backend (`prodata_lb.backend_group.vm_ids`).
   - `name` (String) The name of the virtual machine.
   - `status` (String) The current status of the virtual machine (RUNNING, STOPPED, etc.).
   - `cpu_cores` (Number) The number of CPU cores.

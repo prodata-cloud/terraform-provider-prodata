@@ -115,6 +115,80 @@ func TestAccLb_protocolValidation(t *testing.T) {
 	})
 }
 
+// testAccPreCheckLbVmBackend gates the canonical VM-backend test, which provisions
+// its own VM and wires the LB to it by guid. It needs an image id in addition to a
+// network; if either is absent the test is skipped (it is intentionally heavier than
+// TestAccLb_basic, which references a pre-existing VM guid via env).
+func testAccPreCheckLbVmBackend(t *testing.T) {
+	t.Helper()
+	testAccPreCheck(t)
+	for _, k := range []string{"PRODATA_LB_TEST_NET_ID", "PRODATA_LB_TEST_IMAGE_ID"} {
+		if os.Getenv(k) == "" {
+			t.Skipf("%s must be set for the VM-backend-by-guid acceptance test", k)
+		}
+	}
+}
+
+// TestAccLb_vmBackendByGuid exercises the canonical wiring the docs prescribe:
+// a prodata_vm provisioned in the same network, referenced as a backend through
+// its computed guid (vm_ids = [prodata_vm.backend.guid]). This is the regression
+// guard for the guid attribute at the acceptance layer — if prodata_vm stopped
+// exporting guid, this config would fail to plan. It deliberately does NOT use the
+// PRODATA_LB_TEST_VM_GUID crutch.
+func TestAccLb_vmBackendByGuid(t *testing.T) {
+	name := accName()
+	resourceName := "prodata_lb.test"
+
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testAccPreCheckLbVmBackend(t); testAccProdMutationGuard(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		CheckDestroy:             testAccCheckLbDestroy,
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLbConfigVmBackend(name),
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue(resourceName, tfjsonpath.New("status"), knownvalue.StringExact(client.LbStatusSuccess)),
+					statecheck.ExpectKnownValue(resourceName, tfjsonpath.New("source"), knownvalue.StringExact(client.LbSourceFrontend)),
+					statecheck.ExpectKnownValue(resourceName, tfjsonpath.New("backend_group").AtMapKey("vm_ids"), knownvalue.SetSizeExact(1)),
+				},
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PostApplyPostRefresh: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()},
+				},
+			},
+		},
+	})
+}
+
+func testAccLbConfigVmBackend(name string) string {
+	return fmt.Sprintf(`
+resource "prodata_vm" "backend" {
+  name             = "%[1]s-be"
+  image_id         = %[3]s
+  cpu_cores        = 1
+  ram              = 2
+  disk_size        = 20
+  disk_type        = "SSD"
+  local_network_id = %[2]s
+  password         = "AccTestVmGuid123"
+}
+
+resource "prodata_lb" "test" {
+  name       = %[1]q
+  type       = "internal"
+  protocol   = "TCP"
+  network_id = %[2]s
+
+  port = [
+    { port = 80, target_port = 8080 },
+  ]
+
+  backend_group = {
+    vm_ids = [prodata_vm.backend.guid]
+  }
+}
+`, name, os.Getenv("PRODATA_LB_TEST_NET_ID"), os.Getenv("PRODATA_LB_TEST_IMAGE_ID"))
+}
+
 func testAccLbConfig(name, description string) string {
 	return fmt.Sprintf(`
 resource "prodata_lb" "test" {
