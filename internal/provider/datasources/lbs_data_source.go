@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"terraform-provider-prodata/internal/client"
+	"terraform-provider-prodata/internal/tfutil"
 
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/datasource/schema"
@@ -145,35 +146,22 @@ func (d *LbsDataSource) Read(ctx context.Context, req datasource.ReadRequest, re
 
 	lbs, err := d.c.ListLoadBalancers(ctx, opts)
 	if err != nil {
-		resp.Diagnostics.AddError("Unable to list load balancers", err.Error())
+		resp.Diagnostics.AddError("Unable to list load balancers", client.LBErrorDetail(err))
 		return
 	}
 
 	data.LoadBalancers = make([]LbSummary, 0, len(lbs))
 	for _, lb := range lbs {
-		entry := LbSummary{
-			ID:     types.Int64Value(lb.ID),
-			Name:   types.StringValue(lb.Name),
-			Type:   types.StringValue(lb.Type),
-			Status: types.StringValue(lb.Status),
-			Source: types.StringValue(lb.Source),
-		}
-		if lb.PublicIP != "" {
-			entry.PublicIP = types.StringValue(lb.PublicIP)
-		} else {
-			entry.PublicIP = types.StringNull()
-		}
-		if lb.PrivateIP != "" {
-			entry.PrivateIP = types.StringValue(lb.PrivateIP)
-		} else {
-			entry.PrivateIP = types.StringNull()
-		}
-		if lb.DateCreated != "" {
-			entry.DateCreated = types.StringValue(lb.DateCreated)
-		} else {
-			entry.DateCreated = types.StringNull()
-		}
-		data.LoadBalancers = append(data.LoadBalancers, entry)
+		data.LoadBalancers = append(data.LoadBalancers, LbSummary{
+			ID:          types.Int64Value(lb.ID),
+			Name:        types.StringValue(lb.Name),
+			Type:        types.StringValue(lb.Type),
+			Status:      types.StringValue(lb.Status),
+			Source:      types.StringValue(lb.Source),
+			PublicIP:    tfutil.StringOrNull(lb.PublicIP),
+			PrivateIP:   tfutil.StringOrNull(lb.PrivateIP),
+			DateCreated: tfutil.StringOrNull(lb.DateCreated),
+		})
 	}
 
 	tflog.Debug(ctx, "Listed load balancers", map[string]any{"count": len(lbs)})

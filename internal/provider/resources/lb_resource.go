@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"terraform-provider-prodata/internal/client"
+	"terraform-provider-prodata/internal/tfutil"
 
 	"github.com/hashicorp/terraform-plugin-framework-timeouts/resource/timeouts"
 	"github.com/hashicorp/terraform-plugin-framework-validators/int64validator"
@@ -301,11 +303,12 @@ func (r *LbResource) ConfigValidators(_ context.Context) []resource.ConfigValida
 }
 
 // ModifyPlan handles two concerns:
-//   - CCM Create: the panel hard-codes description to "CCM: <name>" at create time
-//     (CCMLoadBalancerService.createLoadBalancerForCCM) — user-supplied values
-//     would silently lose. Reject the config at plan time so the user can drop
-//     the attribute and let the panel populate it. (Description is Computed, so
-//     omitting it in HCL is valid; the post-create value reads back into state.)
+//   - CCM description: the panel owns the description of CCM (node pool) load
+//     balancers — it hard-codes "CCM: <name>" at create time and ignores
+//     caller-supplied values. Reject a user-set description for CCM balancers on
+//     both create and update so the constraint surfaces at plan time rather than
+//     silently. (Description is Computed, so omitting it in HCL is valid; the
+//     panel value reads back into state.)
 //   - Update: mode-switches (vm_ids <-> node_pool_id) mark backend_group as
 //     requires-replace. Same-mode content changes pass through to Update.
 func (r *LbResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
@@ -325,15 +328,15 @@ func (r *LbResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequ
 	}
 
 	_, hasPool := backendMode(plan.BackendGroup)
-	isCreate := req.State.Raw.IsNull()
 	descriptionSet := !config.Description.IsNull() && !config.Description.IsUnknown()
-	if summary := validateCCMDescriptionNotConfigurable(isCreate, hasPool, descriptionSet); summary != "" {
+	if summary := validateCCMDescriptionNotConfigurable(hasPool, descriptionSet); summary != "" {
 		resp.Diagnostics.AddAttributeError(
 			path.Root("description"),
 			summary,
-			"The panel hard-codes the description of CCM (node pool) load balancers to "+
-				"\"CCM: <name>\" at create time. Remove the `description` attribute from "+
-				"your configuration and let the provider read the panel's value back into state.",
+			"The panel controls the description of CCM (node pool) load balancers — it "+
+				"sets \"CCM: <name>\" and ignores caller-supplied values. Remove the "+
+				"`description` attribute from your configuration and let the provider read "+
+				"the panel's value back into state.",
 		)
 		return
 	}
@@ -448,11 +451,11 @@ func (r *LbResource) Create(ctx context.Context, req resource.CreateRequest, res
 			)
 			return
 		}
-		resp.Diagnostics.AddError("Unable to create load balancer", err.Error())
+		resp.Diagnostics.AddError("Unable to create load balancer", client.LBErrorDetail(err))
 		return
 	}
 
-	final, waitErr := r.waitForTerminalStatus(ctx, lb.ID, opts, lbStatusesTerminalApply())
+	final, waitErr := r.waitForTerminalStatus(ctx, lb.ID, opts, lbTerminalApply)
 	resultLB := final
 	if resultLB == nil {
 		resultLB = lb
@@ -489,7 +492,7 @@ func (r *LbResource) Read(ctx context.Context, req resource.ReadRequest, resp *r
 			resp.State.RemoveResource(ctx)
 			return
 		}
-		resp.Diagnostics.AddError("Unable to read load balancer", err.Error())
+		resp.Diagnostics.AddError("Unable to read load balancer", client.LBErrorDetail(err))
 		return
 	}
 	if lb.Status == client.LbStatusDeleted {
@@ -564,7 +567,7 @@ func (r *LbResource) Update(ctx context.Context, req resource.UpdateRequest, res
 		if _, err := client.RetryOnBusy(ctx, client.RetryTimeoutLong, func() (*client.LoadBalancer, error) {
 			return r.c.ConfigureLoadBalancerFrontend(ctx, id, wire, opts)
 		}); err != nil {
-			resp.Diagnostics.AddError("Unable to update load balancer", err.Error())
+			resp.Diagnostics.AddError("Unable to update load balancer", client.LBErrorDetail(err))
 			return
 		}
 	case client.LbSourceCCM:
@@ -579,7 +582,7 @@ func (r *LbResource) Update(ctx context.Context, req resource.UpdateRequest, res
 		if _, err := client.RetryOnBusy(ctx, client.RetryTimeoutLong, func() (*client.LoadBalancer, error) {
 			return r.c.ConfigureLoadBalancerCCM(ctx, id, wire, opts)
 		}); err != nil {
-			resp.Diagnostics.AddError("Unable to update load balancer", err.Error())
+			resp.Diagnostics.AddError("Unable to update load balancer", client.LBErrorDetail(err))
 			return
 		}
 	default:
@@ -591,7 +594,7 @@ func (r *LbResource) Update(ctx context.Context, req resource.UpdateRequest, res
 		return
 	}
 
-	final, waitErr := r.waitForTerminalStatus(ctx, id, opts, lbStatusesTerminalApply())
+	final, waitErr := r.waitForTerminalStatus(ctx, id, opts, lbTerminalApply)
 	resultLB := final
 	if resultLB == nil {
 		// fall back to a single read so state still reflects the server
@@ -661,11 +664,11 @@ func (r *LbResource) Delete(ctx context.Context, req resource.DeleteRequest, res
 		if client.IsNotFound(err) {
 			return
 		}
-		resp.Diagnostics.AddError("Unable to delete load balancer", err.Error())
+		resp.Diagnostics.AddError("Unable to delete load balancer", client.LBErrorDetail(err))
 		return
 	}
 
-	if _, waitErr := r.waitForTerminalStatus(ctx, id, opts, lbStatusesTerminalDelete()); waitErr != nil {
+	if _, waitErr := r.waitForTerminalStatus(ctx, id, opts, lbTerminalDelete); waitErr != nil {
 		// terminal-after-delete is "removed" (IsNotFound) or status == DELETED; anything
 		// else means the panel is still working on it past the timeout.
 		resp.Diagnostics.AddError(
@@ -679,18 +682,54 @@ func (r *LbResource) Delete(ctx context.Context, req resource.DeleteRequest, res
 // ---- ImportState ----
 
 func (r *LbResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	id, err := strconv.ParseInt(req.ID, 10, 64)
+	id, region, projectTag, err := parseLBImportID(req.ID)
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Invalid Import ID",
-			fmt.Sprintf("Expected an integer load balancer ID, got: %q\n\nExample: terraform import prodata_lb.example 42", req.ID),
+			fmt.Sprintf("Expected a load balancer ID or `{region}/{id}@{project_tag}`, got: %q\n\n"+
+				"Examples:\n  terraform import prodata_lb.example 42\n"+
+				"  terraform import prodata_lb.example UZ-5/42@my-project", req.ID),
 		)
 		return
 	}
-	tflog.Info(ctx, "Importing load balancer", map[string]any{"id": id})
+	// A bare-id import (no scope in the string) falls back to the provider defaults.
+	if region == "" {
+		region = r.c.Region
+	}
+	if projectTag == "" {
+		projectTag = r.c.ProjectTag
+	}
+	tflog.Info(ctx, "Importing load balancer", map[string]any{"id": id, "region": region, "project_tag": projectTag})
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), id)...)
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("region"), r.c.Region)...)
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("project_tag"), r.c.ProjectTag)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("region"), region)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("project_tag"), projectTag)...)
+}
+
+// parseLBImportID accepts either a bare integer id (scoped to the provider
+// defaults) or the composite "{region}/{id}@{project_tag}" form. Region and
+// project_tag are returned empty for the bare form so the caller can apply
+// provider defaults.
+func parseLBImportID(s string) (id int64, region, projectTag string, err error) {
+	if strings.ContainsAny(s, "/@") {
+		slash := strings.IndexByte(s, '/')
+		at := strings.LastIndexByte(s, '@')
+		if slash <= 0 || at <= slash+1 || at >= len(s)-1 {
+			return 0, "", "", fmt.Errorf("malformed composite import id %q", s)
+		}
+		region = s[:slash]
+		idStr := s[slash+1 : at]
+		projectTag = s[at+1:]
+		id, perr := strconv.ParseInt(idStr, 10, 64)
+		if perr != nil {
+			return 0, "", "", fmt.Errorf("id segment %q is not an integer", idStr)
+		}
+		return id, region, projectTag, nil
+	}
+	id, perr := strconv.ParseInt(s, 10, 64)
+	if perr != nil {
+		return 0, "", "", fmt.Errorf("%q is not an integer", s)
+	}
+	return id, "", "", nil
 }
 
 // ---- helpers ----
@@ -729,31 +768,15 @@ func (r *LbResource) applyServerState(m *LbResourceModel, lb *client.LoadBalance
 	m.Region = types.StringValue(region)
 	m.ProjectTag = types.StringValue(projectTag)
 	m.Name = types.StringValue(lb.Name)
-	if lb.Description != "" {
-		m.Description = types.StringValue(lb.Description)
-	} else {
-		m.Description = types.StringNull()
-	}
+	m.Description = tfutil.StringOrNull(lb.Description)
 	m.Type = types.StringValue(lb.Type)
 	m.Protocol = types.StringValue(lb.Protocol)
 	m.NetworkID = types.Int64Value(lb.NetworkID)
 	m.Source = types.StringValue(lb.Source)
 	m.Status = types.StringValue(lb.Status)
-	if lb.PublicIP != "" {
-		m.PublicIP = types.StringValue(lb.PublicIP)
-	} else {
-		m.PublicIP = types.StringNull()
-	}
-	if lb.PrivateIP != "" {
-		m.PrivateIP = types.StringValue(lb.PrivateIP)
-	} else {
-		m.PrivateIP = types.StringNull()
-	}
-	if lb.DateCreated != "" {
-		m.DateCreated = types.StringValue(lb.DateCreated)
-	} else {
-		m.DateCreated = types.StringNull()
-	}
+	m.PublicIP = tfutil.StringOrNull(lb.PublicIP)
+	m.PrivateIP = tfutil.StringOrNull(lb.PrivateIP)
+	m.DateCreated = tfutil.StringOrNull(lb.DateCreated)
 
 	m.Port = portsFromServer(lb.Ports)
 
@@ -846,32 +869,28 @@ func (t lbTerminalSet) isFailure(s string) bool {
 	return ok
 }
 
-// lbStatusesTerminalApply: Create/Update wait set. SUCCESS = good; FAIL or DELETED
+// lbTerminalApply is the Create/Update wait set. SUCCESS = good; FAIL or DELETED
 // are terminal errors (DELETED during create/update is anomalous — scheduler aborted).
-func lbStatusesTerminalApply() lbTerminalSet {
-	return lbTerminalSet{
-		successStatuses: map[string]struct{}{
-			client.LbStatusSuccess: {},
-		},
-		failureStatuses: map[string]struct{}{
-			client.LbStatusFail:    {},
-			client.LbStatusDeleted: {},
-		},
-	}
+var lbTerminalApply = lbTerminalSet{
+	successStatuses: map[string]struct{}{
+		client.LbStatusSuccess: {},
+	},
+	failureStatuses: map[string]struct{}{
+		client.LbStatusFail:    {},
+		client.LbStatusDeleted: {},
+	},
 }
 
-// lbStatusesTerminalDelete: Delete wait set. Either IsNotFound (already removed) or
+// lbTerminalDelete is the Delete wait set. Either IsNotFound (already removed) or
 // status == DELETED is a success; FAIL is a terminal error.
-func lbStatusesTerminalDelete() lbTerminalSet {
-	return lbTerminalSet{
-		successStatuses: map[string]struct{}{
-			client.LbStatusDeleted: {},
-		},
-		failureStatuses: map[string]struct{}{
-			client.LbStatusFail: {},
-		},
-		removedIsSuccess: true,
-	}
+var lbTerminalDelete = lbTerminalSet{
+	successStatuses: map[string]struct{}{
+		client.LbStatusDeleted: {},
+	},
+	failureStatuses: map[string]struct{}{
+		client.LbStatusFail: {},
+	},
+	removedIsSuccess: true,
 }
 
 // portsToWire flattens the resource-model port list into the wire shape.
@@ -969,14 +988,13 @@ func detectModeSwitch(stateVMs, statePool, planVMs, planPool bool) bool {
 	return false
 }
 
-// validateCCMDescriptionNotConfigurable mirrors the ModifyPlan rule that
-// rejects a user-supplied description on CCM (node_pool_id) load balancer
-// creates. The panel hard-codes description to "CCM: <name>" at create time
-// (CCMLoadBalancerService.createLoadBalancerForCCM) and silently discards any
-// caller-supplied value, so we fail the plan to surface the constraint.
-// Returns "" if OK, or the error message to surface.
-func validateCCMDescriptionNotConfigurable(isCreate, hasPool, descriptionSet bool) string {
-	if isCreate && hasPool && descriptionSet {
+// validateCCMDescriptionNotConfigurable mirrors the ModifyPlan rule that rejects
+// a user-supplied description on CCM (node_pool_id) load balancers. The panel
+// owns the description ("CCM: <name>") and ignores caller-supplied values on both
+// create and configure, so we fail the plan to surface the constraint rather
+// than let the value silently diverge. Returns "" if OK, else the error summary.
+func validateCCMDescriptionNotConfigurable(hasPool, descriptionSet bool) string {
+	if hasPool && descriptionSet {
 		return "description not configurable for CCM load balancers"
 	}
 	return ""

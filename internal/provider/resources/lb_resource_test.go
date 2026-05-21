@@ -161,30 +161,57 @@ func TestLb_NameValidator(t *testing.T) {
 	}
 }
 
-// 7 — CCM-create rejects user-supplied description (server hard-codes "CCM: <name>").
+// 7 — CCM load balancers reject a user-supplied description on both create and
+// update (the panel owns it as "CCM: <name>").
 func TestLb_CCMDescriptionNotConfigurable(t *testing.T) {
 	cases := []struct {
 		name           string
-		isCreate       bool
 		hasPool        bool
 		descriptionSet bool
 		wantReject     bool
 	}{
-		{"create + CCM + user description -> rejected", true, true, true, true},
-		{"create + CCM + no description -> OK", true, true, false, false},
-		{"create + Frontend + user description -> OK", true, false, true, false},
-		{"update + CCM + user description -> OK (configure honors it)", false, true, true, false},
-		{"update + CCM + no description -> OK", false, true, false, false},
-		{"create + Frontend + no description -> OK", true, false, false, false},
+		{"CCM + user description -> rejected", true, true, true},
+		{"CCM + no description -> OK", true, false, false},
+		{"Frontend + user description -> OK", false, true, false},
+		{"Frontend + no description -> OK", false, false, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := validateCCMDescriptionNotConfigurable(c.isCreate, c.hasPool, c.descriptionSet)
+			got := validateCCMDescriptionNotConfigurable(c.hasPool, c.descriptionSet)
 			if c.wantReject && got == "" {
 				t.Errorf("expected rejection, got OK")
 			}
 			if !c.wantReject && got != "" {
 				t.Errorf("expected OK, got rejection: %s", got)
+			}
+		})
+	}
+}
+
+// 7b — import ID parsing: bare integer and composite {region}/{id}@{project}.
+func TestLb_ParseImportID(t *testing.T) {
+	t.Run("bare id", func(t *testing.T) {
+		id, region, project, err := parseLBImportID("42")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if id != 42 || region != "" || project != "" {
+			t.Errorf("got id=%d region=%q project=%q, want 42/\"\"/\"\"", id, region, project)
+		}
+	})
+	t.Run("composite", func(t *testing.T) {
+		id, region, project, err := parseLBImportID("UZ-5/42@my-project")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if id != 42 || region != "UZ-5" || project != "my-project" {
+			t.Errorf("got id=%d region=%q project=%q, want 42/UZ-5/my-project", id, region, project)
+		}
+	})
+	for _, bad := range []string{"", "abc", "/42@p", "UZ-5/@p", "UZ-5/42@", "UZ-5/notint@p", "UZ-5/42"} {
+		t.Run("invalid "+bad, func(t *testing.T) {
+			if _, _, _, err := parseLBImportID(bad); err == nil {
+				t.Errorf("expected error for %q, got nil", bad)
 			}
 		})
 	}
