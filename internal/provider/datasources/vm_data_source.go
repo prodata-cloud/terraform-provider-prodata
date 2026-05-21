@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"terraform-provider-prodata/internal/client"
+	"terraform-provider-prodata/internal/tfutil"
 
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/datasource/schema"
@@ -23,6 +24,7 @@ type VmDataSource struct {
 
 type VmDataSourceModel struct {
 	ID             types.Int64  `tfsdk:"id"`
+	Guid           types.String `tfsdk:"guid"`
 	Region         types.String `tfsdk:"region"`
 	ProjectTag     types.String `tfsdk:"project_tag"`
 	Name           types.String `tfsdk:"name"`
@@ -65,6 +67,11 @@ func (d *VmDataSource) Schema(ctx context.Context, req datasource.SchemaRequest,
 			"name": schema.StringAttribute{
 				MarkdownDescription: "The name of the virtual machine.",
 				Computed:            true,
+			},
+			"guid": schema.StringAttribute{
+				MarkdownDescription: "The VM's globally-unique identifier assigned by the panel. " +
+					"Use this to reference the VM as a load balancer backend (`prodata_lb.backend_group.vm_ids`).",
+				Computed: true,
 			},
 			"status": schema.StringAttribute{
 				MarkdownDescription: "The current status of the virtual machine.",
@@ -153,6 +160,7 @@ func (d *VmDataSource) Read(ctx context.Context, req datasource.ReadRequest, res
 		return
 	}
 
+	data.Guid = tfutil.StringOrNull(vm.Guid)
 	data.Name = types.StringValue(vm.Name)
 	data.Status = types.StringValue(vm.Status)
 	data.CPUCores = types.Int64Value(vm.CPUCores)

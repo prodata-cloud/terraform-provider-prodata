@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"terraform-provider-prodata/internal/client"
+	"terraform-provider-prodata/internal/tfutil"
 
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -31,6 +32,7 @@ type VmResource struct {
 
 type VmResourceModel struct {
 	ID             types.Int64  `tfsdk:"id"`
+	Guid           types.String `tfsdk:"guid"`
 	Region         types.String `tfsdk:"region"`
 	ProjectTag     types.String `tfsdk:"project_tag"`
 	Name           types.String `tfsdk:"name"`
@@ -69,6 +71,14 @@ func (r *VmResource) Schema(ctx context.Context, req resource.SchemaRequest, res
 				Computed:            true,
 				PlanModifiers: []planmodifier.Int64{
 					int64planmodifier.UseStateForUnknown(),
+				},
+			},
+			"guid": schema.StringAttribute{
+				MarkdownDescription: "The VM's globally-unique identifier assigned by the panel. " +
+					"Use this to reference the VM as a load balancer backend (`prodata_lb.backend_group.vm_ids`).",
+				Computed: true,
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.UseStateForUnknown(),
 				},
 			},
 			"region": schema.StringAttribute{
@@ -270,8 +280,8 @@ func (r *VmResource) waitForVmReady(ctx context.Context, vmID int64, opts *clien
 		if err != nil {
 			consecutiveErrs++
 			tflog.Warn(ctx, "Transient error polling VM status", map[string]any{
-				"id":                vmID,
-				"error":             err.Error(),
+				"id":                 vmID,
+				"error":              err.Error(),
 				"consecutive_errors": consecutiveErrs,
 			})
 			if consecutiveErrs >= maxConsecutiveErrs {
@@ -442,6 +452,7 @@ func (r *VmResource) Create(ctx context.Context, req resource.CreateRequest, res
 
 	// Set Computed-only attributes from API response
 	data.ID = types.Int64Value(resultVm.ID)
+	data.Guid = tfutil.StringOrNull(resultVm.Guid)
 	data.Region = types.StringValue(region)
 	data.ProjectTag = types.StringValue(projectTag)
 	data.Status = types.StringValue(resultVm.Status)
@@ -537,6 +548,7 @@ func (r *VmResource) Read(ctx context.Context, req resource.ReadRequest, resp *r
 		return
 	}
 
+	data.Guid = tfutil.StringOrNull(vm.Guid)
 	data.Name = types.StringValue(vm.Name)
 	data.Status = types.StringValue(vm.Status)
 	data.CPUCores = types.Int64Value(vm.CPUCores)
