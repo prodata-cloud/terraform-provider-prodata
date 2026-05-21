@@ -1,14 +1,17 @@
 ---
 page_title: "prodata_lb Data Source - ProData Provider"
+subcategory: "Load Balancer"
 description: |-
   Look up a single ProData load balancer by ID.
 ---
 
 # prodata_lb (Data Source)
 
-Look up a single ProData load balancer by ID. Returns the same shape as the [`prodata_lb`](../resources/lb.md) resource, minus `backend_group.node_pool_id` — the panel does not surface that field on GET. A non-existent ID surfaces as a clear error (server error code 736), not an empty result.
+Look up a single ProData load balancer by ID. Returns the load balancer's full attributes except the Kubernetes node-pool ID — the panel does not surface `nodePoolId` on the GET endpoint, so the data source has no way to expose it.
 
-~> **Note:** Backends are flattened on the data source: `vm_ids` is exposed at the top level rather than inside a `backend_group` block. For `CCM`-source load balancers this set is empty; query `prodata_k8s_node_pool` (when available) for node-pool membership.
+A non-existent ID surfaces as a clear error (server error code 736), not an empty result.
+
+~> **Note:** Backends are flattened on the data source: `vm_ids` is exposed at the top level rather than nested inside a `backend_group` block (the way the resource does). For `CCM`-source load balancers this set is empty.
 
 ## Example Usage
 
@@ -60,5 +63,5 @@ output "lb_ports" {
 
 ## Known Limitations
 
-- **`node_pool_id` is not exposed.** The panel does not return `nodePoolId` on the load-balancer GET response, so this data source cannot surface it. Track node-pool membership separately (e.g. through Kubernetes API queries against the cluster) for `CCM`-source LBs.
+- **`node_pool_id` is not exposed.** The panel does not return `nodePoolId` on the load-balancer GET response, so this data source cannot surface it. Track node-pool membership separately through your Kubernetes tooling for `CCM`-source LBs.
 - **Legacy LBs may report empty `source`.** Load balancers created before source tracking landed read with `source = ""`. They are still returned by this data source; downstream callers that switch on `source` should handle the empty case.

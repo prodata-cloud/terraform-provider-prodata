@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"terraform-provider-prodata/internal/client"
+	"terraform-provider-prodata/internal/tfutil"
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
@@ -184,36 +185,20 @@ func (d *LbDataSource) Read(ctx context.Context, req datasource.ReadRequest, res
 
 	lb, err := d.c.GetLoadBalancer(ctx, id, opts)
 	if err != nil {
-		resp.Diagnostics.AddError("Unable to read load balancer", err.Error())
+		resp.Diagnostics.AddError("Unable to read load balancer", client.LBErrorDetail(err))
 		return
 	}
 
 	data.Name = types.StringValue(lb.Name)
-	if lb.Description != "" {
-		data.Description = types.StringValue(lb.Description)
-	} else {
-		data.Description = types.StringNull()
-	}
+	data.Description = tfutil.StringOrNull(lb.Description)
 	data.Type = types.StringValue(lb.Type)
 	data.Protocol = types.StringValue(lb.Protocol)
 	data.NetworkID = types.Int64Value(lb.NetworkID)
 	data.Source = types.StringValue(lb.Source)
 	data.Status = types.StringValue(lb.Status)
-	if lb.PublicIP != "" {
-		data.PublicIP = types.StringValue(lb.PublicIP)
-	} else {
-		data.PublicIP = types.StringNull()
-	}
-	if lb.PrivateIP != "" {
-		data.PrivateIP = types.StringValue(lb.PrivateIP)
-	} else {
-		data.PrivateIP = types.StringNull()
-	}
-	if lb.DateCreated != "" {
-		data.DateCreated = types.StringValue(lb.DateCreated)
-	} else {
-		data.DateCreated = types.StringNull()
-	}
+	data.PublicIP = tfutil.StringOrNull(lb.PublicIP)
+	data.PrivateIP = tfutil.StringOrNull(lb.PrivateIP)
+	data.DateCreated = tfutil.StringOrNull(lb.DateCreated)
 
 	data.Port = make([]LbDataSourcePort, 0, len(lb.Ports))
 	for _, p := range lb.Ports {
@@ -228,13 +213,6 @@ func (d *LbDataSource) Read(ctx context.Context, req datasource.ReadRequest, res
 		values = append(values, types.StringValue(b.Guid))
 	}
 	data.VMIDs = types.SetValueMust(types.StringType, values)
-
-	if data.Region.IsNull() || data.Region.IsUnknown() {
-		data.Region = types.StringNull()
-	}
-	if data.ProjectTag.IsNull() || data.ProjectTag.IsUnknown() {
-		data.ProjectTag = types.StringNull()
-	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
