@@ -4,7 +4,28 @@ All notable changes to this provider are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.17.0] - 2026-05-21
+
+### Added
+
+- Acceptance test suite (`TF_ACC`) for `prodata_lb` and `prodata_s3_bucket`,
+  driving the full create/read/update/delete lifecycle, an import round-trip,
+  and plan-stability checks through the real Terraform runtime.
+- Test sweepers (`make sweep`) that delete leaked acceptance resources by their
+  disposable `tfacc-` name prefix.
+- Production-host mutation guard: mutating acceptance tests are skipped against
+  a production host unless `PRODATA_ACC_ALLOW_PROD_MUTATION=1` is set.
+- `README.md` documenting the build and the three test layers (unit/client,
+  acceptance, and sweepers).
+
+### Changed
+
+- Reworked the unit and client tests onto shared helpers.
+- Raised the `go` directive to 1.25.8 and added `terraform-plugin-testing` and
+  `terraform-plugin-go` as direct test dependencies. Affects building from
+  source and CI only; the released cross-compiled binaries are unaffected.
+
+## [0.16.0] - 2026-05-21
 
 ### Added
 

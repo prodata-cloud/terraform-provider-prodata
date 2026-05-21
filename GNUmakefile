@@ -21,4 +21,10 @@ test:
 testacc:
 	TF_ACC=1 go test -v -cover -timeout 120m ./...
 
-.PHONY: fmt lint test testacc build install generate
+# Sweepers remove leaked acceptance-test resources (those carrying the "tfacc-"
+# name prefix). Requires the same PRODATA_* credentials as the acceptance tests.
+SWEEP ?= prodata
+sweep:
+	go test ./internal/provider/... -v -timeout 60m -sweep=$(SWEEP) -sweep-run=$(SWEEP_RUN)
+
+.PHONY: fmt lint test testacc sweep build install generate

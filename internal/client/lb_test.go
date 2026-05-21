@@ -3,11 +3,8 @@ package client
 import (
 	"context"
 	"errors"
-	"os"
-	"strconv"
 	"strings"
 	"testing"
-	"time"
 )
 
 // A realistic V1 success envelope for an internal, FRONTEND-source load balancer
@@ -29,7 +26,7 @@ func TestCreateLoadBalancerFrontend_Success(t *testing.T) {
 		`"status":{"name":"NEW"},"userNet":500,"provisioningPublicIp":"203.0.113.5",` +
 		`"localUserVip":"10.0.0.10","protocol":"TCP","source":"FRONTEND",` +
 		`"ports":[{"srcPort":443,"dstPort":8443}],"backends":[]}}`
-	server, cap := newCapturingServer(t, 200, body)
+	server, capture := newCapturingServer(t, 200, body)
 	defer server.Close()
 
 	c := newTestClient(t, server)
@@ -45,21 +42,21 @@ func TestCreateLoadBalancerFrontend_Success(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if cap.method != "POST" {
-		t.Errorf("method = %q, want POST", cap.method)
+	if capture.method != "POST" {
+		t.Errorf("method = %q, want POST", capture.method)
 	}
-	if cap.path != "/panel-main/api/loadbalancer/createLoadbalancer" {
-		t.Errorf("path = %q, want /panel-main/api/loadbalancer/createLoadbalancer", cap.path)
+	if capture.path != "/panel-main/api/loadbalancer/createLoadbalancer" {
+		t.Errorf("path = %q, want /panel-main/api/loadbalancer/createLoadbalancer", capture.path)
 	}
 	// ADR-4 / PR1b A3: the provider never pins loadBalancerVip or extraIps —
 	// panel-main auto-allocates them.
-	if _, ok := cap.body["loadBalancerVip"]; ok {
+	if _, ok := capture.body["loadBalancerVip"]; ok {
 		t.Error("request body must not contain loadBalancerVip")
 	}
-	if _, ok := cap.body["extraIps"]; ok {
+	if _, ok := capture.body["extraIps"]; ok {
 		t.Error("request body must not contain extraIps")
 	}
-	if _, ok := cap.body["userNetId"]; !ok {
+	if _, ok := capture.body["userNetId"]; !ok {
 		t.Error("request body must contain userNetId")
 	}
 
@@ -77,7 +74,7 @@ func TestCreateLoadBalancerFrontend_Success(t *testing.T) {
 func TestCreateLoadBalancerCCM_Success(t *testing.T) {
 	body := `{"error":0,"errMessage":null,"data":{"id":301,"name":"k8s-lb","isPublic":false,` +
 		`"status":{"name":"NEW"},"source":"CCM","protocol":"TCP"}}`
-	server, cap := newCapturingServer(t, 200, body)
+	server, capture := newCapturingServer(t, 200, body)
 	defer server.Close()
 
 	c := newTestClient(t, server)
@@ -92,10 +89,10 @@ func TestCreateLoadBalancerCCM_Success(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if cap.path != "/panel-main/api/ccm/loadbalancer/create" {
-		t.Errorf("path = %q, want /panel-main/api/ccm/loadbalancer/create", cap.path)
+	if capture.path != "/panel-main/api/ccm/loadbalancer/create" {
+		t.Errorf("path = %q, want /panel-main/api/ccm/loadbalancer/create", capture.path)
 	}
-	if got := cap.body["nodePoolId"]; got != float64(88) {
+	if got := capture.body["nodePoolId"]; got != float64(88) {
 		t.Errorf("request nodePoolId = %v, want 88", got)
 	}
 	if lb.Source != LbSourceCCM {
@@ -104,7 +101,7 @@ func TestCreateLoadBalancerCCM_Success(t *testing.T) {
 }
 
 func TestGetLoadBalancer_Success(t *testing.T) {
-	server, cap := newCapturingServer(t, 200, lbGetSuccessBody)
+	server, capture := newCapturingServer(t, 200, lbGetSuccessBody)
 	defer server.Close()
 
 	c := newTestClient(t, server)
@@ -113,11 +110,11 @@ func TestGetLoadBalancer_Success(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if cap.method != "GET" {
-		t.Errorf("method = %q, want GET", cap.method)
+	if capture.method != "GET" {
+		t.Errorf("method = %q, want GET", capture.method)
 	}
-	if !strings.Contains(cap.rawQuery, "loadBalancerId=236") {
-		t.Errorf("rawQuery = %q, want loadBalancerId=236", cap.rawQuery)
+	if !strings.Contains(capture.rawQuery, "loadBalancerId=236") {
+		t.Errorf("rawQuery = %q, want loadBalancerId=236", capture.rawQuery)
 	}
 
 	if lb.ID != 236 || lb.Name != "lb1b65-probe" {
@@ -259,7 +256,7 @@ func TestListLoadBalancers_Empty(t *testing.T) {
 }
 
 func TestConfigureLoadBalancerFrontend_Success(t *testing.T) {
-	server, cap := newCapturingServer(t, 200, lbGetSuccessBody)
+	server, capture := newCapturingServer(t, 200, lbGetSuccessBody)
 	defer server.Close()
 
 	c := newTestClient(t, server)
@@ -273,16 +270,16 @@ func TestConfigureLoadBalancerFrontend_Success(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cap.method != "POST" {
-		t.Errorf("method = %q, want POST", cap.method)
+	if capture.method != "POST" {
+		t.Errorf("method = %q, want POST", capture.method)
 	}
-	if cap.path != "/panel-main/api/loadbalancer/configureLoadbalancer/55" {
-		t.Errorf("path = %q, want .../api/loadbalancer/configureLoadbalancer/55", cap.path)
+	if capture.path != "/panel-main/api/loadbalancer/configureLoadbalancer/55" {
+		t.Errorf("path = %q, want .../api/loadbalancer/configureLoadbalancer/55", capture.path)
 	}
 }
 
 func TestConfigureLoadBalancerCCM_Success(t *testing.T) {
-	server, cap := newCapturingServer(t, 200, lbGetSuccessBody)
+	server, capture := newCapturingServer(t, 200, lbGetSuccessBody)
 	defer server.Close()
 
 	c := newTestClient(t, server)
@@ -295,29 +292,29 @@ func TestConfigureLoadBalancerCCM_Success(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cap.path != "/panel-main/api/ccm/loadbalancer/configureLoadbalancer/55" {
-		t.Errorf("path = %q, want .../api/ccm/loadbalancer/configureLoadbalancer/55", cap.path)
+	if capture.path != "/panel-main/api/ccm/loadbalancer/configureLoadbalancer/55" {
+		t.Errorf("path = %q, want .../api/ccm/loadbalancer/configureLoadbalancer/55", capture.path)
 	}
 }
 
 func TestDeleteLoadBalancerFrontend_Success(t *testing.T) {
-	server, cap := newCapturingServer(t, 200, `{"error":0,"errMessage":null,"data":{}}`)
+	server, capture := newCapturingServer(t, 200, `{"error":0,"errMessage":null,"data":{}}`)
 	defer server.Close()
 
 	c := newTestClient(t, server)
 	if err := c.DeleteLoadBalancerFrontend(context.Background(), 77, nil); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cap.method != "POST" {
-		t.Errorf("method = %q, want POST", cap.method)
+	if capture.method != "POST" {
+		t.Errorf("method = %q, want POST", capture.method)
 	}
-	if cap.path != "/panel-main/api/loadbalancer/deleteLoadbalancer/77" {
-		t.Errorf("path = %q, want .../api/loadbalancer/deleteLoadbalancer/77", cap.path)
+	if capture.path != "/panel-main/api/loadbalancer/deleteLoadbalancer/77" {
+		t.Errorf("path = %q, want .../api/loadbalancer/deleteLoadbalancer/77", capture.path)
 	}
 }
 
 func TestDeleteLoadBalancerCCM_Success(t *testing.T) {
-	server, cap := newCapturingServer(t, 200, `{"error":0,"errMessage":null,"data":{}}`)
+	server, capture := newCapturingServer(t, 200, `{"error":0,"errMessage":null,"data":{}}`)
 	defer server.Close()
 
 	c := newTestClient(t, server)
@@ -325,8 +322,8 @@ func TestDeleteLoadBalancerCCM_Success(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	// verified-fact-8: the explicit long-form CCM delete path.
-	if cap.path != "/panel-main/api/ccm/loadbalancer/deleteLoadbalancer/77" {
-		t.Errorf("path = %q, want .../api/ccm/loadbalancer/deleteLoadbalancer/77", cap.path)
+	if capture.path != "/panel-main/api/ccm/loadbalancer/deleteLoadbalancer/77" {
+		t.Errorf("path = %q, want .../api/ccm/loadbalancer/deleteLoadbalancer/77", capture.path)
 	}
 }
 
@@ -388,86 +385,6 @@ func TestConfigureLoadBalancerFrontend_DuplicateName701(t *testing.T) {
 	}
 }
 
-// ---- live test, gated behind PRODATA_LIVE_TEST=1; if hitting a prod-kz host,
-// also requires PRODATA_ALLOW_PROD_KZ_MUTATION + a tf-iac-33821- name prefix ----
-
-const liveLbPrefix = "tf-iac-33821-"
-
-func requireLbProdKzMutationAllowed(t *testing.T, baseURL, lbName string) {
-	t.Helper()
-	if !strings.Contains(baseURL, "kz") {
-		return
-	}
-	if os.Getenv("PRODATA_ALLOW_PROD_KZ_MUTATION") != "tf-iac-33821" {
-		t.Skip("prod-kz target detected — set PRODATA_ALLOW_PROD_KZ_MUTATION=tf-iac-33821 to allow mutating tests")
-	}
-	if !strings.HasPrefix(lbName, liveLbPrefix) {
-		t.Fatalf("prod-kz load balancer name %q must start with %q", lbName, liveLbPrefix)
-	}
-}
-
-func TestLive_LoadBalancerCRUD(t *testing.T) {
-	if os.Getenv("PRODATA_LIVE_TEST") != "1" {
-		t.Skip("set PRODATA_LIVE_TEST=1 to run live API tests")
-	}
-
-	baseURL := os.Getenv("PRODATA_API_BASE_URL")
-	apiKey := os.Getenv("PRODATA_API_KEY_ID")
-	apiSecret := os.Getenv("PRODATA_API_SECRET_KEY")
-	region := os.Getenv("PRODATA_REGION")
-	projectTag := os.Getenv("PRODATA_PROJECT_TAG")
-	netIDRaw := os.Getenv("PRODATA_LB_TEST_NET_ID")
-	backendGuid := os.Getenv("PRODATA_LB_TEST_VM_GUID")
-	if baseURL == "" || apiKey == "" || apiSecret == "" || region == "" ||
-		projectTag == "" || netIDRaw == "" || backendGuid == "" {
-		t.Skip("PRODATA_API_BASE_URL/API_KEY_ID/API_SECRET_KEY/REGION/PROJECT_TAG/LB_TEST_NET_ID/LB_TEST_VM_GUID must be set")
-	}
-	netID, err := strconv.ParseInt(netIDRaw, 10, 64)
-	if err != nil {
-		t.Fatalf("PRODATA_LB_TEST_NET_ID = %q: %v", netIDRaw, err)
-	}
-
-	lbName := liveLbPrefix + "live-crud-" + strings.ToLower(time.Now().UTC().Format("20060102-150405"))
-	requireLbProdKzMutationAllowed(t, baseURL, lbName)
-
-	c, err := New(Config{
-		APIBaseURL:   baseURL,
-		APIKeyID:     apiKey,
-		APISecretKey: apiSecret,
-		UserAgent:    "tf-provider-prodata/live-test",
-		Region:       region,
-		ProjectTag:   projectTag,
-	})
-	if err != nil {
-		t.Fatalf("client: %v", err)
-	}
-
-	ctx := context.Background()
-	lb, err := c.CreateLoadBalancerFrontend(ctx, LoadBalancerRequest{
-		Name:      lbName,
-		IsPublic:  false,
-		Protocol:  "TCP",
-		UserNetID: netID,
-		Backends:  []LbBackendRef{{UserVmID: backendGuid}},
-		Ports:     []LbPortReq{{BalancerPort: 80, BackendPort: 8080}},
-	}, nil)
-	if err != nil {
-		t.Fatalf("CreateLoadBalancerFrontend: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := c.DeleteLoadBalancerFrontend(context.Background(), lb.ID, nil); err != nil && !IsNotFound(err) {
-			t.Logf("cleanup DeleteLoadBalancerFrontend(%d): %v", lb.ID, err)
-		}
-	})
-
-	got, err := c.GetLoadBalancer(ctx, lb.ID, nil)
-	if err != nil {
-		t.Fatalf("GetLoadBalancer(%d): %v", lb.ID, err)
-	}
-	if got.Name != lbName {
-		t.Errorf("GetLoadBalancer name = %q, want %q", got.Name, lbName)
-	}
-	if got.Source != LbSourceFrontend {
-		t.Errorf("Source = %q, want %q", got.Source, LbSourceFrontend)
-	}
-}
+// Full create/read/update/delete behavior against a live API is covered by the
+// TF_ACC acceptance suite in the provider package (TestAccLb_basic), which also
+// owns the production-mutation guard and disposable name prefix.

@@ -1,22 +1,17 @@
 package resources
 
 import (
-	"context"
 	"strings"
 	"testing"
-
-	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
-	"github.com/hashicorp/terraform-plugin-framework/path"
-	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
-	"github.com/hashicorp/terraform-plugin-framework/types"
 )
 
 // Unit tests for the prodata_s3_bucket resource's plan-time validation logic.
-// These exercise the extracted pure-function helpers + the framework validator
-// shims; full Create/Read/Update/Delete acceptance coverage is in the separate
-// TF_ACC=1 suite (step 2.5 / 2.6 of the task-30455 plan).
+// These exercise the pure-function helpers we wrote (name rules, the object-lock
+// cross-field rule, and import-id parsing) — not the framework validators wired
+// into the schema. Full create/read/update/delete behavior is covered by the
+// TF_ACC acceptance suite in the provider package.
 
-// Test 1 — invalid name regex.
+// Invalid name characters are rejected by our validator.
 func TestS3Bucket_NameRegexRejectsBadChars(t *testing.T) {
 	for _, name := range []string{"MyBucket", "my_bucket", "my bucket", "my/bucket", "myBucket"} {
 		if msg := validateBucketNameStr(name); msg == "" {
@@ -25,7 +20,7 @@ func TestS3Bucket_NameRegexRejectsBadChars(t *testing.T) {
 	}
 }
 
-// Test 2 — invalid name length (both too short and too long).
+// Invalid name length (both too short and too long) is rejected by our validator.
 func TestS3Bucket_NameLengthRejects(t *testing.T) {
 	cases := map[string]string{
 		"too-short": "ab",
@@ -44,23 +39,7 @@ func TestS3Bucket_NameLengthRejects(t *testing.T) {
 	}
 }
 
-// Test 3 — invalid acl enum.
-func TestS3Bucket_AclOneOfRejectsBadValue(t *testing.T) {
-	v := stringvalidator.OneOf("private", "public-read", "public-read-write")
-	for _, bad := range []string{"public", "PRIVATE", "public-read-only", "world-readable", ""} {
-		req := validator.StringRequest{
-			Path:        path.Root("acl"),
-			ConfigValue: types.StringValue(bad),
-		}
-		resp := &validator.StringResponse{}
-		v.ValidateString(context.Background(), req, resp)
-		if !resp.Diagnostics.HasError() {
-			t.Errorf("expected acl=%q to fail OneOf validation, but it passed", bad)
-		}
-	}
-}
-
-// Test 4 — object_lock_enabled=true requires versioning=true.
+// object_lock_enabled=true requires versioning=true (our cross-field rule).
 func TestS3Bucket_ObjectLockRequiresEnabledVersioning(t *testing.T) {
 	cases := []struct {
 		objectLock bool
@@ -83,7 +62,7 @@ func TestS3Bucket_ObjectLockRequiresEnabledVersioning(t *testing.T) {
 	}
 }
 
-// Test 5 — happy path: valid names and a valid object_lock+versioning combo pass.
+// Happy path: valid names and a valid object_lock+versioning combo pass.
 func TestS3Bucket_HappyPathValidations(t *testing.T) {
 	for _, name := range []string{"my-bucket", "logs.2026", "abc", "a-b-c"} {
 		if msg := validateBucketNameStr(name); msg != "" {
@@ -95,12 +74,12 @@ func TestS3Bucket_HappyPathValidations(t *testing.T) {
 	}
 }
 
-// Bonus — import ID parser covers a path the acceptance suite implicitly exercises
-// but with cheap unit coverage so a malformed user input gets a deterministic error.
+// Import ID parsing: {region}/{name}@{project_tag}, with deterministic rejection
+// of malformed inputs.
 func TestS3Bucket_ParseImportID(t *testing.T) {
 	good := []struct {
-		in                            string
-		region, name, projectTag      string
+		in                       string
+		region, name, projectTag string
 	}{
 		{"UZ-5/my-bucket@my-project", "UZ-5", "my-bucket", "my-project"},
 		{"KZ-1/my.bucket.v2@prod", "KZ-1", "my.bucket.v2", "prod"},

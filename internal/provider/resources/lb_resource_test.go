@@ -1,168 +1,36 @@
 package resources
 
 import (
-	"context"
 	"testing"
 
-	"terraform-provider-prodata/internal/client"
-
-	"github.com/hashicorp/terraform-plugin-framework-validators/setvalidator"
-	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/attr"
-	"github.com/hashicorp/terraform-plugin-framework/path"
-	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
 
-// Unit tests for the prodata_lb resource's plan-time validation logic. These
-// exercise the framework validators wired into Schema/ConfigValidators
-// directly; full create/read/update/destroy behavior is covered by the live-API
-// gated test in the client package and (eventually) a TF_ACC=1 acceptance suite.
+// Unit tests for the prodata_lb resource's plan-time logic. These exercise the
+// pure helpers and the name pattern we wrote — not the framework validators wired
+// into the schema (OneOf / Size*), whose behavior is asserted through the real
+// validation path in the TF_ACC acceptance suite. Full create/read/update/destroy
+// behavior is covered by that same acceptance suite in the provider package.
 
-// 1 — invalid `type` enum.
-func TestLb_TypeOneOfRejectsBadValue(t *testing.T) {
-	v := stringvalidator.OneOf(client.LbTypeExternal, client.LbTypeInternal)
-	for _, bad := range []string{"EXTERNAL", "Internal", "public", "", "private"} {
-		req := validator.StringRequest{
-			Path:        path.Root("type"),
-			ConfigValue: types.StringValue(bad),
-		}
-		resp := &validator.StringResponse{}
-		v.ValidateString(context.Background(), req, resp)
-		if !resp.Diagnostics.HasError() {
-			t.Errorf("expected type=%q to fail OneOf validation, but it passed", bad)
+// lbNameRegex is our own (hostname-shaped) pattern, so it is worth locking down;
+// the length bounds are enforced by the framework's LengthBetween and are not
+// re-tested here.
+func TestLb_NameRegexPattern(t *testing.T) {
+	for _, bad := range []string{"", "-lead", "trail-", "has space", "has_underscore", "has.dot"} {
+		if lbNameRegex.MatchString(bad) {
+			t.Errorf("expected name %q to be rejected by lbNameRegex, but it matched", bad)
 		}
 	}
-
-	// Sanity: the canonical values must pass.
-	for _, good := range []string{client.LbTypeExternal, client.LbTypeInternal} {
-		req := validator.StringRequest{
-			Path:        path.Root("type"),
-			ConfigValue: types.StringValue(good),
-		}
-		resp := &validator.StringResponse{}
-		v.ValidateString(context.Background(), req, resp)
-		if resp.Diagnostics.HasError() {
-			t.Errorf("expected type=%q to pass, got: %s", good, resp.Diagnostics)
+	for _, good := range []string{"abc", "web-lb", "metrics-collector", "lb-1", "a1"} {
+		if !lbNameRegex.MatchString(good) {
+			t.Errorf("expected name %q to match lbNameRegex, but it did not", good)
 		}
 	}
 }
 
-// 2 — invalid `protocol` enum (case-sensitive).
-func TestLb_ProtocolOneOfRejectsBadValue(t *testing.T) {
-	v := stringvalidator.OneOf(client.LbProtocolTCP, client.LbProtocolUDP)
-	// Includes lowercase variants because the server silently downgrades unknown
-	// values to TCP — the plan-time validator is the only line of defence.
-	for _, bad := range []string{"tcp", "udp", "Tcp", "HTTP", "https", "", "ICMP"} {
-		req := validator.StringRequest{
-			Path:        path.Root("protocol"),
-			ConfigValue: types.StringValue(bad),
-		}
-		resp := &validator.StringResponse{}
-		v.ValidateString(context.Background(), req, resp)
-		if !resp.Diagnostics.HasError() {
-			t.Errorf("expected protocol=%q to fail OneOf validation, but it passed", bad)
-		}
-	}
-}
-
-// 3 — `port` set must be between 1 and 10 entries (empty rejected).
-func TestLb_PortSetSizeRejectsEmpty(t *testing.T) {
-	v := setvalidator.SizeBetween(lbMinPorts, lbMaxPorts)
-	empty, diags := types.SetValue(types.StringType, nil)
-	if diags.HasError() {
-		t.Fatalf("constructing empty Set: %s", diags)
-	}
-	req := validator.SetRequest{
-		Path:        path.Root("port"),
-		ConfigValue: empty,
-	}
-	resp := &validator.SetResponse{}
-	v.ValidateSet(context.Background(), req, resp)
-	if !resp.Diagnostics.HasError() {
-		t.Errorf("expected empty port set to fail SizeBetween, but it passed")
-	}
-}
-
-// 4 — `port` set must be between 1 and 10 entries (eleven rejected).
-func TestLb_PortSetSizeRejectsOverflow(t *testing.T) {
-	v := setvalidator.SizeBetween(lbMinPorts, lbMaxPorts)
-	elems := make([]attr.Value, 0, 11)
-	for i := 0; i < 11; i++ {
-		elems = append(elems, types.StringValue(string(rune('a'+i))))
-	}
-	eleven, diags := types.SetValue(types.StringType, elems)
-	if diags.HasError() {
-		t.Fatalf("constructing 11-entry Set: %s", diags)
-	}
-	req := validator.SetRequest{
-		Path:        path.Root("port"),
-		ConfigValue: eleven,
-	}
-	resp := &validator.SetResponse{}
-	v.ValidateSet(context.Background(), req, resp)
-	if !resp.Diagnostics.HasError() {
-		t.Errorf("expected 11-entry port set to fail SizeBetween, but it passed")
-	}
-}
-
-// 5 — `vm_ids` set must contain at least one entry when set.
-func TestLb_VmIdsSizeAtLeastOne(t *testing.T) {
-	v := setvalidator.SizeAtLeast(1)
-	empty, diags := types.SetValue(types.StringType, nil)
-	if diags.HasError() {
-		t.Fatalf("constructing empty Set: %s", diags)
-	}
-	req := validator.SetRequest{
-		Path:        path.Root("backend_group").AtName("vm_ids"),
-		ConfigValue: empty,
-	}
-	resp := &validator.SetResponse{}
-	v.ValidateSet(context.Background(), req, resp)
-	if !resp.Diagnostics.HasError() {
-		t.Errorf("expected empty vm_ids to fail SizeAtLeast(1), but it passed")
-	}
-
-	one, diags := types.SetValue(types.StringType, []attr.Value{types.StringValue("VM-GUID-1")})
-	if diags.HasError() {
-		t.Fatalf("constructing single-entry Set: %s", diags)
-	}
-	req.ConfigValue = one
-	resp = &validator.SetResponse{}
-	v.ValidateSet(context.Background(), req, resp)
-	if resp.Diagnostics.HasError() {
-		t.Errorf("expected single-entry vm_ids to pass: %s", resp.Diagnostics)
-	}
-}
-
-// 6 — `name` length + charset validation.
-func TestLb_NameValidator(t *testing.T) {
-	lengthV := stringvalidator.LengthBetween(lbMinNameLen, lbMaxNameLen)
-	regexV := stringvalidator.RegexMatches(lbNameRegex, "")
-
-	for _, bad := range []string{"", "ab", "-lead", "trail-", "has space", "has_underscore", "has.dot"} {
-		req := validator.StringRequest{Path: path.Root("name"), ConfigValue: types.StringValue(bad)}
-		lResp, rResp := &validator.StringResponse{}, &validator.StringResponse{}
-		lengthV.ValidateString(context.Background(), req, lResp)
-		regexV.ValidateString(context.Background(), req, rResp)
-		if !lResp.Diagnostics.HasError() && !rResp.Diagnostics.HasError() {
-			t.Errorf("expected name=%q to fail length or regex, both passed", bad)
-		}
-	}
-
-	for _, good := range []string{"abc", "web-lb", "metrics-collector", "lb-1"} {
-		req := validator.StringRequest{Path: path.Root("name"), ConfigValue: types.StringValue(good)}
-		lResp, rResp := &validator.StringResponse{}, &validator.StringResponse{}
-		lengthV.ValidateString(context.Background(), req, lResp)
-		regexV.ValidateString(context.Background(), req, rResp)
-		if lResp.Diagnostics.HasError() || rResp.Diagnostics.HasError() {
-			t.Errorf("expected name=%q to pass, got length=%s regex=%s", good, lResp.Diagnostics, rResp.Diagnostics)
-		}
-	}
-}
-
-// 7 — CCM load balancers reject a user-supplied description on both create and
-// update (the panel owns it as "CCM: <name>").
+// CCM load balancers reject a user-supplied description on both create and update
+// (the panel owns it as "CCM: <name>").
 func TestLb_CCMDescriptionNotConfigurable(t *testing.T) {
 	cases := []struct {
 		name           string
@@ -188,7 +56,7 @@ func TestLb_CCMDescriptionNotConfigurable(t *testing.T) {
 	}
 }
 
-// 7b — import ID parsing: bare integer and composite {region}/{id}@{project}.
+// Import ID parsing: bare integer and composite {region}/{id}@{project}.
 func TestLb_ParseImportID(t *testing.T) {
 	t.Run("bare id", func(t *testing.T) {
 		id, region, project, err := parseLBImportID("42")
@@ -217,7 +85,8 @@ func TestLb_ParseImportID(t *testing.T) {
 	}
 }
 
-// 8 — mode-switch detection (state vm_ids -> plan node_pool_id, and vice versa).
+// Mode-switch detection (state vm_ids -> plan node_pool_id, and vice versa) plus
+// the backendMode helper that feeds it.
 func TestLb_DetectModeSwitch(t *testing.T) {
 	cases := []struct {
 		name                                   string
@@ -240,15 +109,12 @@ func TestLb_DetectModeSwitch(t *testing.T) {
 		})
 	}
 
-	// Sanity check the backendMode helper that feeds detectModeSwitch.
 	t.Run("backendMode reads pointer + null + unknown correctly", func(t *testing.T) {
-		// nil backend_group → both false.
 		hasVMs, hasPool := backendMode(nil)
 		if hasVMs || hasPool {
 			t.Errorf("backendMode(nil) = (%v,%v), want (false,false)", hasVMs, hasPool)
 		}
 
-		// Empty (null fields) → both false.
 		bg := &LbBackendGroupModel{
 			VMIDs:      types.SetNull(types.StringType),
 			NodePoolID: types.Int64Null(),
@@ -258,14 +124,12 @@ func TestLb_DetectModeSwitch(t *testing.T) {
 			t.Errorf("backendMode(empty) = (%v,%v), want (false,false)", hasVMs, hasPool)
 		}
 
-		// Set vm_ids → hasVMs=true.
 		bg.VMIDs = types.SetValueMust(types.StringType, []attr.Value{types.StringValue("VM-GUID-1")})
 		hasVMs, hasPool = backendMode(bg)
 		if !hasVMs || hasPool {
 			t.Errorf("backendMode(vm_ids set) = (%v,%v), want (true,false)", hasVMs, hasPool)
 		}
 
-		// Set node_pool_id only → hasPool=true.
 		bg = &LbBackendGroupModel{
 			VMIDs:      types.SetNull(types.StringType),
 			NodePoolID: types.Int64Value(42),

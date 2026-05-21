@@ -3,14 +3,11 @@ package client
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
-	"time"
 )
 
 // captureReq inspects the incoming HTTP request and stores its method, path,
@@ -24,15 +21,15 @@ type captureReq struct {
 
 func newCapturingServer(t *testing.T, status int, body string) (*httptest.Server, *captureReq) {
 	t.Helper()
-	cap := &captureReq{}
+	capture := &captureReq{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		cap.method = r.Method
-		cap.path = r.URL.Path
-		cap.rawQuery = r.URL.RawQuery
+		capture.method = r.Method
+		capture.path = r.URL.Path
+		capture.rawQuery = r.URL.RawQuery
 		if r.Body != nil {
 			raw, _ := io.ReadAll(r.Body)
 			if len(raw) > 0 {
-				_ = json.Unmarshal(raw, &cap.body)
+				_ = json.Unmarshal(raw, &capture.body)
 			}
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -43,13 +40,13 @@ func newCapturingServer(t *testing.T, status int, body string) (*httptest.Server
 			_, _ = w.Write([]byte(body))
 		}
 	}))
-	return srv, cap
+	return srv, capture
 }
 
 // ---- 1. CreateBucket happy path: 201 + empty body returns no error ----
 
 func TestCreateBucket_HappyPath(t *testing.T) {
-	srv, cap := newCapturingServer(t, http.StatusCreated, "")
+	srv, capture := newCapturingServer(t, http.StatusCreated, "")
 	defer srv.Close()
 
 	c := newTestClient(t, srv)
@@ -60,18 +57,18 @@ func TestCreateBucket_HappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cap.method != http.MethodPost {
-		t.Errorf("method = %q, want POST", cap.method)
+	if capture.method != http.MethodPost {
+		t.Errorf("method = %q, want POST", capture.method)
 	}
-	if cap.path != "/panel-main/storage/api/v1/buckets" {
-		t.Errorf("path = %q", cap.path)
+	if capture.path != "/panel-main/storage/api/v1/buckets" {
+		t.Errorf("path = %q", capture.path)
 	}
 }
 
 // ---- 2. CreateBucket sends Java enum NAMES on the wire (PRIVATE, ENABLED) ----
 
 func TestCreateBucket_SendsEnumNames(t *testing.T) {
-	srv, cap := newCapturingServer(t, http.StatusCreated, "")
+	srv, capture := newCapturingServer(t, http.StatusCreated, "")
 	defer srv.Close()
 
 	c := newTestClient(t, srv)
@@ -86,28 +83,28 @@ func TestCreateBucket_SendsEnumNames(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if got := cap.body["bucketKey"]; got != "my-bucket" {
+	if got := capture.body["bucketKey"]; got != "my-bucket" {
 		t.Errorf("bucketKey = %v, want %q", got, "my-bucket")
 	}
-	if got := cap.body["acl"]; got != "PUBLIC_READ" {
+	if got := capture.body["acl"]; got != "PUBLIC_READ" {
 		t.Errorf("acl = %v, want %q (Java enum NAME, not wire value)", got, "PUBLIC_READ")
 	}
-	vc, _ := cap.body["versioningConfiguration"].(map[string]any)
+	vc, _ := capture.body["versioningConfiguration"].(map[string]any)
 	if vc == nil || vc["status"] != "ENABLED" {
-		t.Errorf("versioningConfiguration.status = %v, want %q", cap.body["versioningConfiguration"], "ENABLED")
+		t.Errorf("versioningConfiguration.status = %v, want %q", capture.body["versioningConfiguration"], "ENABLED")
 	}
-	if got := cap.body["objectLockEnabledForBucket"]; got != true {
+	if got := capture.body["objectLockEnabledForBucket"]; got != true {
 		t.Errorf("objectLockEnabledForBucket = %v, want true", got)
 	}
-	if _, present := cap.body["name"]; present {
-		t.Errorf("payload contains forbidden field `name` — must use `bucketKey`: %v", cap.body)
+	if _, present := capture.body["name"]; present {
+		t.Errorf("payload contains forbidden field `name` — must use `bucketKey`: %v", capture.body)
 	}
 }
 
 // ---- 3. CreateBucket omits versioningConfiguration when nil (object_lock=false case) ----
 
 func TestCreateBucket_OmitsNilVersioning(t *testing.T) {
-	srv, cap := newCapturingServer(t, http.StatusCreated, "")
+	srv, capture := newCapturingServer(t, http.StatusCreated, "")
 	defer srv.Close()
 
 	c := newTestClient(t, srv)
@@ -119,11 +116,11 @@ func TestCreateBucket_OmitsNilVersioning(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if _, present := cap.body["versioningConfiguration"]; present {
-		t.Errorf("expected versioningConfiguration to be omitted when nil, got: %v", cap.body)
+	if _, present := capture.body["versioningConfiguration"]; present {
+		t.Errorf("expected versioningConfiguration to be omitted when nil, got: %v", capture.body)
 	}
-	if _, present := cap.body["objectLockEnabledForBucket"]; present {
-		t.Errorf("expected objectLockEnabledForBucket to be omitted when nil, got: %v", cap.body)
+	if _, present := capture.body["objectLockEnabledForBucket"]; present {
+		t.Errorf("expected objectLockEnabledForBucket to be omitted when nil, got: %v", capture.body)
 	}
 }
 
@@ -145,7 +142,7 @@ func TestCreateBucket_AlreadyExists(t *testing.T) {
 
 func TestGetBucket_HappyPath(t *testing.T) {
 	body := `{"success":true,"data":{"name":"my-bucket","creationDate":"2026-01-15T10:30:00Z","size":1024,"objectCount":3}}`
-	srv, cap := newCapturingServer(t, http.StatusOK, body)
+	srv, capture := newCapturingServer(t, http.StatusOK, body)
 	defer srv.Close()
 
 	c := newTestClient(t, srv)
@@ -156,8 +153,8 @@ func TestGetBucket_HappyPath(t *testing.T) {
 	if b.Name != "my-bucket" || b.CreationDate == "" || b.Size == nil || *b.Size != 1024 {
 		t.Errorf("got %+v", b)
 	}
-	if cap.path != "/panel-main/storage/api/v1/buckets/my-bucket" {
-		t.Errorf("path = %q", cap.path)
+	if capture.path != "/panel-main/storage/api/v1/buckets/my-bucket" {
+		t.Errorf("path = %q", capture.path)
 	}
 }
 
@@ -274,7 +271,7 @@ func TestListBuckets_Empty(t *testing.T) {
 // ---- 11. PutBucketAcl — sends correct path + canned ACL on the wire ----
 
 func TestPutBucketAcl_HappyPath(t *testing.T) {
-	srv, cap := newCapturingServer(t, http.StatusNoContent, "")
+	srv, capture := newCapturingServer(t, http.StatusNoContent, "")
 	defer srv.Close()
 
 	c := newTestClient(t, srv)
@@ -282,24 +279,24 @@ func TestPutBucketAcl_HappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cap.method != http.MethodPut {
-		t.Errorf("method = %q, want PUT", cap.method)
+	if capture.method != http.MethodPut {
+		t.Errorf("method = %q, want PUT", capture.method)
 	}
-	if cap.path != "/panel-main/storage/api/v1/buckets/my-bucket/acl" {
-		t.Errorf("path = %q", cap.path)
+	if capture.path != "/panel-main/storage/api/v1/buckets/my-bucket/acl" {
+		t.Errorf("path = %q", capture.path)
 	}
-	if cap.body["acl"] != "PUBLIC_READ_WRITE" {
-		t.Errorf("acl = %v, want PUBLIC_READ_WRITE", cap.body["acl"])
+	if capture.body["acl"] != "PUBLIC_READ_WRITE" {
+		t.Errorf("acl = %v, want PUBLIC_READ_WRITE", capture.body["acl"])
 	}
-	if _, present := cap.body["accessControlPolicy"]; present {
-		t.Errorf("expected accessControlPolicy to be omitted when nil, got %v", cap.body)
+	if _, present := capture.body["accessControlPolicy"]; present {
+		t.Errorf("expected accessControlPolicy to be omitted when nil, got %v", capture.body)
 	}
 }
 
 // ---- 12. PutBucketVersioning — body uses Java enum NAME `ENABLED` ----
 
 func TestPutBucketVersioning_SendsEnabled(t *testing.T) {
-	srv, cap := newCapturingServer(t, http.StatusNoContent, "")
+	srv, capture := newCapturingServer(t, http.StatusNoContent, "")
 	defer srv.Close()
 
 	c := newTestClient(t, srv)
@@ -308,19 +305,19 @@ func TestPutBucketVersioning_SendsEnabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	vc, _ := cap.body["versioningConfiguration"].(map[string]any)
+	vc, _ := capture.body["versioningConfiguration"].(map[string]any)
 	if vc == nil || vc["status"] != "ENABLED" {
-		t.Errorf("versioningConfiguration.status = %v, want ENABLED", cap.body["versioningConfiguration"])
+		t.Errorf("versioningConfiguration.status = %v, want ENABLED", capture.body["versioningConfiguration"])
 	}
-	if cap.path != "/panel-main/storage/api/v1/buckets/my-bucket/versioning" {
-		t.Errorf("path = %q", cap.path)
+	if capture.path != "/panel-main/storage/api/v1/buckets/my-bucket/versioning" {
+		t.Errorf("path = %q", capture.path)
 	}
 }
 
 // ---- 13. PutObjectLockConfiguration — body shape ----
 
 func TestPutObjectLockConfiguration_SendsEnabled(t *testing.T) {
-	srv, cap := newCapturingServer(t, http.StatusNoContent, "")
+	srv, capture := newCapturingServer(t, http.StatusNoContent, "")
 	defer srv.Close()
 
 	c := newTestClient(t, srv)
@@ -329,12 +326,12 @@ func TestPutObjectLockConfiguration_SendsEnabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	olc, _ := cap.body["objectLockConfiguration"].(map[string]any)
+	olc, _ := capture.body["objectLockConfiguration"].(map[string]any)
 	if olc == nil || olc["objectLockEnabled"] != "ENABLED" {
-		t.Errorf("objectLockConfiguration.objectLockEnabled = %v, want ENABLED", cap.body["objectLockConfiguration"])
+		t.Errorf("objectLockConfiguration.objectLockEnabled = %v, want ENABLED", capture.body["objectLockConfiguration"])
 	}
-	if cap.path != "/panel-main/storage/api/v1/buckets/my-bucket/object-locking" {
-		t.Errorf("path = %q", cap.path)
+	if capture.path != "/panel-main/storage/api/v1/buckets/my-bucket/object-locking" {
+		t.Errorf("path = %q", capture.path)
 	}
 }
 
@@ -358,7 +355,7 @@ func TestGetObjectLockConfiguration_NullMeansNotConfigured(t *testing.T) {
 // ---- 15. DeleteBucket always sends ?forceDestroy=false ----
 
 func TestDeleteBucket_SendsForceDestroyFalse(t *testing.T) {
-	srv, cap := newCapturingServer(t, http.StatusNoContent, "")
+	srv, capture := newCapturingServer(t, http.StatusNoContent, "")
 	defer srv.Close()
 
 	c := newTestClient(t, srv)
@@ -366,11 +363,11 @@ func TestDeleteBucket_SendsForceDestroyFalse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cap.method != http.MethodDelete {
-		t.Errorf("method = %q, want DELETE", cap.method)
+	if capture.method != http.MethodDelete {
+		t.Errorf("method = %q, want DELETE", capture.method)
 	}
-	if !strings.Contains(cap.rawQuery, "forceDestroy=false") {
-		t.Errorf("rawQuery = %q, want forceDestroy=false", cap.rawQuery)
+	if !strings.Contains(capture.rawQuery, "forceDestroy=false") {
+		t.Errorf("rawQuery = %q, want forceDestroy=false", capture.rawQuery)
 	}
 }
 
@@ -378,7 +375,7 @@ func TestDeleteBucket_SendsForceDestroyFalse(t *testing.T) {
 
 func TestDeleteBucket_AlreadyGone(t *testing.T) {
 	body := `{"success":false,"data":null,"errors":[{"code":628,"message":"bucket not found"}]}`
-	srv, cap := newCapturingServer(t, http.StatusBadRequest, body)
+	srv, capture := newCapturingServer(t, http.StatusBadRequest, body)
 	defer srv.Close()
 
 	c := newTestClient(t, srv)
@@ -386,104 +383,11 @@ func TestDeleteBucket_AlreadyGone(t *testing.T) {
 	if !IsNotFound(err) {
 		t.Fatalf("expected IsNotFound=true for 628 on delete, got: %v", err)
 	}
-	if !strings.Contains(cap.rawQuery, "forceDestroy=false") {
-		t.Errorf("rawQuery = %q, want forceDestroy=false", cap.rawQuery)
+	if !strings.Contains(capture.rawQuery, "forceDestroy=false") {
+		t.Errorf("rawQuery = %q, want forceDestroy=false", capture.rawQuery)
 	}
 }
 
-// ---- live test, gated behind PRODATA_LIVE_TEST=1; if hitting prod-kz host,
-// also requires PRODATA_ALLOW_PROD_KZ_MUTATION=tf-iac-30455 + tf-iac-30455- name prefix ----
-
-const liveBucketPrefix = "tf-iac-30455-"
-
-func requireProdKzMutationAllowed(t *testing.T, baseURL, bucketName string) {
-	t.Helper()
-	if !strings.Contains(baseURL, "kz") {
-		return
-	}
-	if os.Getenv("PRODATA_ALLOW_PROD_KZ_MUTATION") != "tf-iac-30455" {
-		t.Skip("prod-kz target detected — set PRODATA_ALLOW_PROD_KZ_MUTATION=tf-iac-30455 to allow mutating tests")
-	}
-	if !strings.HasPrefix(bucketName, liveBucketPrefix) {
-		t.Fatalf("prod-kz bucket name %q must start with %q", bucketName, liveBucketPrefix)
-	}
-}
-
-func TestLive_BucketCRUD(t *testing.T) {
-	if os.Getenv("PRODATA_LIVE_TEST") != "1" {
-		t.Skip("set PRODATA_LIVE_TEST=1 to run live API tests")
-	}
-
-	baseURL := os.Getenv("PRODATA_API_BASE_URL")
-	apiKey := os.Getenv("PRODATA_API_KEY_ID")
-	apiSecret := os.Getenv("PRODATA_API_SECRET_KEY")
-	region := os.Getenv("PRODATA_REGION")
-	projectTag := os.Getenv("PRODATA_PROJECT_TAG")
-	if baseURL == "" || apiKey == "" || apiSecret == "" || region == "" || projectTag == "" {
-		t.Skip("PRODATA_API_BASE_URL/API_KEY_ID/API_SECRET_KEY/REGION/PROJECT_TAG must be set")
-	}
-
-	bucketName := liveBucketPrefix + "live-crud-" + strings.ToLower(time.Now().UTC().Format("20060102-150405"))
-	requireProdKzMutationAllowed(t, baseURL, bucketName)
-
-	c, err := New(Config{
-		APIBaseURL:   baseURL,
-		APIKeyID:     apiKey,
-		APISecretKey: apiSecret,
-		UserAgent:    "tf-provider-prodata/live-test",
-		Region:       region,
-		ProjectTag:   projectTag,
-	})
-	if err != nil {
-		t.Fatalf("client: %v", err)
-	}
-
-	ctx := context.Background()
-
-	if err := c.CreateBucket(ctx, CreateBucketRequest{
-		BucketKey: bucketName,
-		Acl:       "PRIVATE",
-	}, nil); err != nil {
-		t.Fatalf("CreateBucket: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := c.DeleteBucket(context.Background(), bucketName, nil); err != nil && !IsNotFound(err) {
-			t.Logf("cleanup DeleteBucket: %v", err)
-		}
-	})
-
-	got, err := c.GetBucket(ctx, bucketName, nil)
-	if err != nil {
-		t.Fatalf("GetBucket: %v", err)
-	}
-	if got.Name != bucketName {
-		t.Errorf("GetBucket name = %q, want %q", got.Name, bucketName)
-	}
-
-	if err := c.PutBucketVersioning(ctx, bucketName,
-		PutBucketVersioningRequest{VersioningConfiguration: &VersioningConfiguration{Status: "ENABLED"}}, nil); err != nil {
-		t.Fatalf("PutBucketVersioning: %v", err)
-	}
-	v, err := c.GetBucketVersioning(ctx, bucketName, nil)
-	if err != nil {
-		t.Fatalf("GetBucketVersioning: %v", err)
-	}
-	if v == nil || v.Status != "ENABLED" {
-		t.Errorf("GetBucketVersioning = %+v, want ENABLED", v)
-	}
-
-	if err := c.DeleteBucket(ctx, bucketName, nil); err != nil {
-		t.Fatalf("DeleteBucket on empty bucket: %v", err)
-	}
-
-	if _, err := c.GetBucket(ctx, bucketName, nil); !IsNotFound(err) {
-		t.Errorf("GetBucket after delete: expected IsNotFound, got %v", err)
-	}
-
-	if err := c.DeleteBucket(ctx, bucketName, nil); !IsNotFound(err) {
-		var apiErr *APIError
-		if !errors.As(err, &apiErr) || !apiErr.HasCode(628) {
-			t.Errorf("idempotent DeleteBucket: expected IsNotFound, got %v", err)
-		}
-	}
-}
+// Full create/read/update/delete behavior against a live API is covered by the
+// TF_ACC acceptance suite in the provider package (TestAccS3Bucket_basic), which
+// also owns the production-mutation guard and disposable name prefix.
