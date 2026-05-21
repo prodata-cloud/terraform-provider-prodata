@@ -73,6 +73,7 @@ resource "prodata_vm" "web_server" {
 ### Attribute Reference
 
 - `id` (Number) The unique identifier of the virtual machine.
+- `guid` (String) The VM's globally-unique identifier assigned by the panel. Use this to reference the VM as a load balancer backend (`prodata_lb.backend_group.vm_ids`).
 - `status` (String) The current status of the virtual machine (CREATING, RUNNING, STOPPED, etc.).
 - `public_ip` (String) The public IP address assigned to the virtual machine (if any).
 - `image_name` (String) The name of the OS image (e.g. `Ubuntu 22.04`). Populated from the API.
