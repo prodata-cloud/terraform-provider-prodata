@@ -1,5 +1,6 @@
 ---
 page_title: "prodata_public_ips Data Source - ProData Provider"
+subcategory: "Networking"
 description: |-
   List all available ProData public IPs.
 ---

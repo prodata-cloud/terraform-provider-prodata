@@ -53,7 +53,7 @@ func (d *PublicIPsDataSource) Schema(ctx context.Context, req datasource.SchemaR
 				Optional:            true,
 			},
 			"project_tag": schema.StringAttribute{
-				MarkdownDescription: "Project ID override. If not specified, uses the provider's default project id.",
+				MarkdownDescription: "Project Tag override. If not specified, uses the provider's default project tag.",
 				Optional:            true,
 			},
 			"public_ips": schema.ListNestedAttribute{

@@ -1,5 +1,6 @@
 ---
 page_title: "prodata_volume Data Source - ProData Provider"
+subcategory: "Storage"
 description: |-
   Lookup a ProData volume by ID.
 ---

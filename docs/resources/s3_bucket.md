@@ -1,5 +1,6 @@
 ---
 page_title: "prodata_s3_bucket Resource - ProData Provider"
+subcategory: "Storage"
 description: |-
   Manages a ProData S3 (Ceph RGW) bucket.
 ---

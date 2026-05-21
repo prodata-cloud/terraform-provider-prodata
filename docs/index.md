@@ -25,7 +25,7 @@ terraform {
   required_providers {
     prodata = {
       source  = "prodata-cloud/prodata"
-      version = "~> 0.1"
+      version = "~> 0.17"
     }
   }
 }
@@ -40,7 +40,7 @@ terraform {
   required_providers {
     prodata = {
       source  = "prodata-cloud/prodata"
-      version = "~> 0.1"
+      version = "~> 0.17"
     }
   }
 }

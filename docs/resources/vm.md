@@ -1,5 +1,6 @@
 ---
 page_title: "prodata_vm Resource - ProData Provider"
+subcategory: "Compute"
 description: |-
   Manages a ProData virtual machine.
 ---
@@ -65,6 +66,7 @@ resource "prodata_vm" "web_server" {
 - `region` (String) Region where the VM will be created. If not specified, uses the provider's default region. Changing this forces a new resource.
 - `project_tag` (String) Project tag where the VM will be created. If not specified, uses the provider's default project_tag. Changing this forces a new resource.
 - `private_ip` (String) The private IP address for the virtual machine. If not specified, an available IP will be auto-assigned from the local network. Changing this forces a new resource.
+- `public_ip_id` (Number) The ID of a public IP to attach to the VM at creation time. If not specified, no public IP is attached. Changing this forces a new resource.
 - `ssh_public_key` (String) SSH public key for authentication. Changing this forces a new resource.
 - `description` (String) Description of the virtual machine. Changing this forces a new resource.
 
@@ -73,6 +75,8 @@ resource "prodata_vm" "web_server" {
 - `id` (Number) The unique identifier of the virtual machine.
 - `status` (String) The current status of the virtual machine (CREATING, RUNNING, STOPPED, etc.).
 - `public_ip` (String) The public IP address assigned to the virtual machine (if any).
+- `image_name` (String) The name of the OS image (e.g. `Ubuntu 22.04`). Populated from the API.
+- `image_slug` (String) The slug of the OS template (e.g. `ubuntu-22.04`). Null for custom images and for VMs created before this feature.
 
 ## Import
 

@@ -1,5 +1,6 @@
 ---
 page_title: "prodata_local_networks Data Source - ProData Provider"
+subcategory: "Networking"
 description: |-
   List all available ProData local networks.
 ---

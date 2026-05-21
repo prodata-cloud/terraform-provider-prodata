@@ -1,5 +1,6 @@
 ---
 page_title: "prodata_vm Data Source - ProData Provider"
+subcategory: "Compute"
 description: |-
   Lookup a ProData virtual machine by ID.
 ---

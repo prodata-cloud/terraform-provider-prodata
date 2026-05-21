@@ -1,5 +1,6 @@
 ---
 page_title: "prodata_s3_bucket Data Source - ProData Provider"
+subcategory: "Storage"
 description: |-
   Look up a single ProData S3 (Ceph RGW) bucket by name.
 ---

@@ -1,5 +1,6 @@
 ---
 page_title: "prodata_public_ip_attachment Resource - ProData Provider"
+subcategory: "Networking"
 description: |-
   Attaches a ProData public IP to a virtual machine.
 ---

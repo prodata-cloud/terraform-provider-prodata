@@ -1,5 +1,6 @@
 ---
 page_title: "prodata_volume Resource - ProData Provider"
+subcategory: "Storage"
 description: |-
   Manages a ProData volume.
 ---

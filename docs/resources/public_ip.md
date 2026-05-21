@@ -1,5 +1,6 @@
 ---
 page_title: "prodata_public_ip Resource - ProData Provider"
+subcategory: "Networking"
 description: |-
   Manages a ProData public IP address.
 ---

@@ -1,5 +1,6 @@
 ---
 page_title: "prodata_s3_buckets Data Source - ProData Provider"
+subcategory: "Storage"
 description: |-
   List all ProData S3 (Ceph RGW) buckets owned by the project.
 ---

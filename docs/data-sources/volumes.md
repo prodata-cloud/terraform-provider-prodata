@@ -1,5 +1,6 @@
 ---
 page_title: "prodata_volumes Data Source - ProData Provider"
+subcategory: "Storage"
 description: |-
   List all available ProData volumes.
 ---

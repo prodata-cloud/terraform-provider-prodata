@@ -4,6 +4,29 @@ All notable changes to this provider are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.1] - 2026-05-21
+
+### Added
+
+- `subcategory` front-matter on all remaining resources and data sources
+  (`Compute`, `Storage`, `Networking`), so the Terraform Registry sidebar groups
+  the entire provider — extending the Load Balancer grouping added in 0.16.0.
+
+### Fixed
+
+- Documented three `prodata_vm` attributes that were present in the schema but
+  missing from the resource docs: `public_ip_id` (optional) and the read-only
+  `image_name` and `image_slug`.
+- `prodata_public_ips` data source: corrected the `project_tag` argument
+  description, which incorrectly read "Project ID".
+
+### Changed
+
+- Provider example in the docs index now pins `version = "~> 0.17"`.
+- Documentation is hand-maintained and checked with `tfplugindocs validate`
+  (enforcing a `Compute`/`Storage`/`Networking`/`Load Balancer` subcategory
+  allowlist) instead of the unused `generate` scaffold. Build tooling only.
+
 ## [0.17.0] - 2026-05-21
 
 ### Added

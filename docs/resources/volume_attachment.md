@@ -1,5 +1,6 @@
 ---
 page_title: "prodata_volume_attachment Resource - ProData Provider"
+subcategory: "Storage"
 description: |-
   Attaches a ProData volume to a virtual machine.
 ---

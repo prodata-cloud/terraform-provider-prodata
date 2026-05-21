@@ -1,5 +1,6 @@
 ---
 page_title: "prodata_local_network Resource - ProData Provider"
+subcategory: "Networking"
 description: |-
   Manages a ProData local network.
 ---

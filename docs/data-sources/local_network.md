@@ -1,5 +1,6 @@
 ---
 page_title: "prodata_local_network Data Source - ProData Provider"
+subcategory: "Networking"
 description: |-
   Lookup a ProData local network by ID.
 ---

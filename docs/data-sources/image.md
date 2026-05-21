@@ -1,5 +1,6 @@
 ---
 page_title: "prodata_image Data Source - ProData Provider"
+subcategory: "Compute"
 description: |-
   Lookup ProData images (OS templates or custom images) by slug or name.
 ---

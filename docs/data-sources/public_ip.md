@@ -1,5 +1,6 @@
 ---
 page_title: "prodata_public_ip Data Source - ProData Provider"
+subcategory: "Networking"
 description: |-
   Lookup a ProData public IP by ID.
 ---

@@ -1,5 +1,6 @@
 ---
 page_title: "prodata_vms Data Source - ProData Provider"
+subcategory: "Compute"
 description: |-
   List all available ProData virtual machines.
 ---
