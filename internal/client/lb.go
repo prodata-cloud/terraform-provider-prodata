@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -193,9 +194,9 @@ func lbTypeFromIsPublic(isPublic bool) string {
 	return LbTypeInternal
 }
 
-// doV1 issues a request to a V1 (load-balancer) endpoint and decodes the V1
+// doLBV1 issues a request to a V1 (load-balancer) endpoint and decodes the V1
 // envelope into T.
-func doV1[T any](ctx context.Context, c *Client, method, path string, body any, opts *RequestOpts) (T, error) {
+func doLBV1[T any](ctx context.Context, c *Client, method, path string, body any, opts *RequestOpts) (T, error) {
 	var zero T
 	statusCode, respBody, err := c.doRequest(ctx, method, path, body, opts)
 	if err != nil {
@@ -218,15 +219,35 @@ func singleLB(dto *lbDTO, err error, op string) (*LoadBalancer, error) {
 	return dto.toLoadBalancer(), nil
 }
 
+// LBErrorDetail maps known load-balancer error codes to a clean, user-facing
+// message so Terraform diagnostics don't surface the raw "api error [code]
+// (http ...)" form. Unrecognized errors fall through to err.Error().
+func LBErrorDetail(err error) string {
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		switch {
+		case apiErr.HasCode(701):
+			return "A load balancer with this name already exists in this region. Choose a different name."
+		case apiErr.HasCode(736):
+			return "Load balancer not found."
+		case apiErr.HasCode(737):
+			return "The local network does not have enough free IPs. A load balancer needs at least three: one VIP plus two for the hidden HAProxy VMs."
+		case apiErr.HasCode(627):
+			return "The load balancer is busy with another operation. Retry shortly."
+		}
+	}
+	return err.Error()
+}
+
 // CreateLoadBalancerFrontend creates a VM-backed load balancer.
 func (c *Client) CreateLoadBalancerFrontend(ctx context.Context, req LoadBalancerRequest, opts *RequestOpts) (*LoadBalancer, error) {
-	dto, err := doV1[*lbDTO](ctx, c, http.MethodPost, "/api/loadbalancer/createLoadbalancer", req, opts)
+	dto, err := doLBV1[*lbDTO](ctx, c, http.MethodPost, "/api/loadbalancer/createLoadbalancer", req, opts)
 	return singleLB(dto, err, "create load balancer")
 }
 
 // CreateLoadBalancerCCM creates a K8S-node-pool-backed load balancer.
 func (c *Client) CreateLoadBalancerCCM(ctx context.Context, req CreateLoadBalancerCCMRequest, opts *RequestOpts) (*LoadBalancer, error) {
-	dto, err := doV1[*lbDTO](ctx, c, http.MethodPost, "/api/ccm/loadbalancer/create", req, opts)
+	dto, err := doLBV1[*lbDTO](ctx, c, http.MethodPost, "/api/ccm/loadbalancer/create", req, opts)
 	return singleLB(dto, err, "create load balancer")
 }
 
@@ -235,14 +256,14 @@ func (c *Client) CreateLoadBalancerCCM(ctx context.Context, req CreateLoadBalanc
 func (c *Client) GetLoadBalancer(ctx context.Context, id int64, opts *RequestOpts) (*LoadBalancer, error) {
 	path := "/api/loadbalancer/getLoadBalancer?" +
 		url.Values{"loadBalancerId": {strconv.FormatInt(id, 10)}}.Encode()
-	dto, err := doV1[*lbDTO](ctx, c, http.MethodGet, path, nil, opts)
+	dto, err := doLBV1[*lbDTO](ctx, c, http.MethodGet, path, nil, opts)
 	return singleLB(dto, err, fmt.Sprintf("get load balancer %d", id))
 }
 
 // ListLoadBalancers returns every load balancer visible to the current project.
 // The endpoint is not paginated.
 func (c *Client) ListLoadBalancers(ctx context.Context, opts *RequestOpts) ([]LoadBalancer, error) {
-	dtos, err := doV1[[]lbDTO](ctx, c, http.MethodGet, "/api/loadbalancer/getUserLoadBalancers", nil, opts)
+	dtos, err := doLBV1[[]lbDTO](ctx, c, http.MethodGet, "/api/loadbalancer/getUserLoadBalancers", nil, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -256,14 +277,14 @@ func (c *Client) ListLoadBalancers(ctx context.Context, opts *RequestOpts) ([]Lo
 // ConfigureLoadBalancerFrontend updates a Frontend-source load balancer in place.
 func (c *Client) ConfigureLoadBalancerFrontend(ctx context.Context, id int64, req LoadBalancerRequest, opts *RequestOpts) (*LoadBalancer, error) {
 	path := fmt.Sprintf("/api/loadbalancer/configureLoadbalancer/%d", id)
-	dto, err := doV1[*lbDTO](ctx, c, http.MethodPost, path, req, opts)
+	dto, err := doLBV1[*lbDTO](ctx, c, http.MethodPost, path, req, opts)
 	return singleLB(dto, err, fmt.Sprintf("configure load balancer %d", id))
 }
 
 // ConfigureLoadBalancerCCM updates a CCM-source load balancer in place.
 func (c *Client) ConfigureLoadBalancerCCM(ctx context.Context, id int64, req LoadBalancerRequest, opts *RequestOpts) (*LoadBalancer, error) {
 	path := fmt.Sprintf("/api/ccm/loadbalancer/configureLoadbalancer/%d", id)
-	dto, err := doV1[*lbDTO](ctx, c, http.MethodPost, path, req, opts)
+	dto, err := doLBV1[*lbDTO](ctx, c, http.MethodPost, path, req, opts)
 	return singleLB(dto, err, fmt.Sprintf("configure load balancer %d", id))
 }
 
@@ -271,13 +292,13 @@ func (c *Client) ConfigureLoadBalancerCCM(ctx context.Context, id int64, req Loa
 // hidden service VMs.
 func (c *Client) DeleteLoadBalancerFrontend(ctx context.Context, id int64, opts *RequestOpts) error {
 	path := fmt.Sprintf("/api/loadbalancer/deleteLoadbalancer/%d", id)
-	_, err := doV1[json.RawMessage](ctx, c, http.MethodPost, path, nil, opts)
+	_, err := doLBV1[json.RawMessage](ctx, c, http.MethodPost, path, nil, opts)
 	return err
 }
 
 // DeleteLoadBalancerCCM deletes a CCM-source load balancer and its hidden service VMs.
 func (c *Client) DeleteLoadBalancerCCM(ctx context.Context, id int64, opts *RequestOpts) error {
 	path := fmt.Sprintf("/api/ccm/loadbalancer/deleteLoadbalancer/%d", id)
-	_, err := doV1[json.RawMessage](ctx, c, http.MethodPost, path, nil, opts)
+	_, err := doLBV1[json.RawMessage](ctx, c, http.MethodPost, path, nil, opts)
 	return err
 }

@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strconv"
 	"strings"
@@ -179,6 +180,29 @@ func TestGetLoadBalancer_ProtocolUDPLowercase(t *testing.T) {
 	}
 	if lb.Protocol != LbProtocolUDP {
 		t.Errorf("lb.Protocol = %q, want %q (upper-cased from lowercase fixture)", lb.Protocol, LbProtocolUDP)
+	}
+}
+
+func TestLBErrorDetail(t *testing.T) {
+	cases := []struct {
+		name      string
+		err       error
+		wantSubst string
+	}{
+		{"701 duplicate name", &APIError{StatusCode: 400, Codes: []int{701}, Message: "x"}, "already exists"},
+		{"736 not found", &APIError{StatusCode: 404, Codes: []int{736}, Message: "x"}, "not found"},
+		{"737 free IPs", &APIError{StatusCode: 400, Codes: []int{737}, Message: "x"}, "free IPs"},
+		{"627 busy", &APIError{StatusCode: 409, Codes: []int{627}, Message: "x"}, "busy"},
+		{"unknown code falls through", &APIError{StatusCode: 500, Codes: []int{999}, Message: "raw msg"}, "raw msg"},
+		{"non-api error falls through", errors.New("plain"), "plain"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := LBErrorDetail(c.err)
+			if !strings.Contains(got, c.wantSubst) {
+				t.Errorf("LBErrorDetail() = %q, want substring %q", got, c.wantSubst)
+			}
+		})
 	}
 }
 
