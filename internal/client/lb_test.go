@@ -189,7 +189,10 @@ func TestLBErrorDetail(t *testing.T) {
 		{"701 duplicate name", &APIError{StatusCode: 400, Codes: []int{701}, Message: "x"}, "already exists"},
 		{"736 not found", &APIError{StatusCode: 404, Codes: []int{736}, Message: "x"}, "not found"},
 		{"737 free IPs", &APIError{StatusCode: 400, Codes: []int{737}, Message: "x"}, "free IPs"},
-		{"627 busy", &APIError{StatusCode: 409, Codes: []int{627}, Message: "x"}, "busy"},
+		{"743 no ip pool", &APIError{StatusCode: 503, Codes: []int{743}, Message: "x"}, "IP pool"},
+		{"744 no compute capacity", &APIError{StatusCode: 503, Codes: []int{744}, Message: "x"}, "compute capacity"},
+		{"747 provisioning failed", &APIError{StatusCode: 502, Codes: []int{747}, Message: "x"}, "could not be provisioned"},
+		{"627 unhandled falls through to raw", &APIError{StatusCode: 500, Codes: []int{627}, Message: "Unhandled error"}, "627"},
 		{"unknown code falls through", &APIError{StatusCode: 500, Codes: []int{999}, Message: "raw msg"}, "raw msg"},
 		{"non-api error falls through", errors.New("plain"), "plain"},
 	}

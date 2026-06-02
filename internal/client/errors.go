@@ -67,3 +67,17 @@ func IsInsufficientFreeIPs(err error) bool {
 	}
 	return apiErr.HasCode(737)
 }
+
+// IsRetryableTransient reports whether err is a genuinely transient failure
+// that is worth retrying — an HTTP 503 (Service Unavailable). The panel uses
+// 503 for "no compute capacity" (744) and "no IP pool in region" (743), which
+// may clear on their own. It deliberately excludes code 627 (a generic HTTP
+// 500 catch-all for any unmapped/downstream failure): retrying that only masks
+// the real error and stalls the apply.
+func IsRetryableTransient(err error) bool {
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	return apiErr.StatusCode == 503
+}

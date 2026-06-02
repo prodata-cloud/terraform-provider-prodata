@@ -109,3 +109,29 @@ func TestIsNotFound(t *testing.T) {
 		})
 	}
 }
+
+func TestIsRetryableTransient(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"http 503 no capacity (744)", &APIError{StatusCode: 503, Codes: []int{744}, Message: "no capacity"}, true},
+		{"http 503 no ip pool (743)", &APIError{StatusCode: 503, Codes: []int{743}, Message: "no ip pool"}, true},
+		{"code 627 http 500 NOT transient", &APIError{StatusCode: 500, Codes: []int{627}, Message: "Unhandled error"}, false},
+		{"http 502 provisioning (747) NOT transient", &APIError{StatusCode: 502, Codes: []int{747}, Message: "provisioning failed"}, false},
+		{"http 400 NOT transient", &APIError{StatusCode: 400, Codes: []int{666}, Message: "conflict"}, false},
+		{"wrapped 503", fmt.Errorf("wrap: %w", &APIError{StatusCode: 503, Codes: []int{744}}), true},
+		{"plain error", errors.New("boom"), false},
+		{"nil", nil, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := IsRetryableTransient(tt.err)
+			if got != tt.want {
+				t.Errorf("IsRetryableTransient() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
