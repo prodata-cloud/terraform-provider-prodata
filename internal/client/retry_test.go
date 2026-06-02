@@ -39,7 +39,29 @@ func TestRetryOnBusy_NonRetryableError(t *testing.T) {
 		t.Errorf("expected code 666, got: %v", err)
 	}
 	if calls != 1 {
-		t.Errorf("expected 1 call (no retry on non-627), got %d", calls)
+		t.Errorf("expected 1 call (no retry on a non-503 error), got %d", calls)
+	}
+}
+
+// TestRetryOnBusy_627NotRetried guards the fix: 627 is the panel's generic HTTP
+// 500 "Unhandled error" catch-all (e.g. a downstream provisioning service
+// returning 5xx), not a transient/busy condition. It must fail fast — one call,
+// no backoff loop — so the apply does not hang for the whole timeout.
+func TestRetryOnBusy_627NotRetried(t *testing.T) {
+	calls := 0
+	_, err := RetryOnBusy(context.Background(), 5*time.Second, func() (string, error) {
+		calls++
+		return "", &APIError{StatusCode: 500, Codes: []int{627}, Message: "Unhandled error"}
+	})
+
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !IsAPIError(err, 627) {
+		t.Errorf("expected code 627 surfaced verbatim, got: %v", err)
+	}
+	if calls != 1 {
+		t.Errorf("expected exactly 1 call (627 must not be retried), got %d", calls)
 	}
 }
 
@@ -48,7 +70,7 @@ func TestRetryOnBusy_RetryThenSuccess(t *testing.T) {
 	result, err := RetryOnBusy(context.Background(), 30*time.Second, func() (string, error) {
 		calls++
 		if calls < 3 {
-			return "", &APIError{StatusCode: 500, Codes: []int{627}, Message: "busy"}
+			return "", &APIError{StatusCode: 503, Codes: []int{744}, Message: "no capacity"}
 		}
 		return "done", nil
 	})
@@ -68,7 +90,7 @@ func TestRetryOnBusy_Timeout(t *testing.T) {
 	calls := 0
 	_, err := RetryOnBusy(context.Background(), 1*time.Second, func() (string, error) {
 		calls++
-		return "", &APIError{StatusCode: 500, Codes: []int{627}, Message: "busy"}
+		return "", &APIError{StatusCode: 503, Codes: []int{744}, Message: "no capacity"}
 	})
 
 	if err == nil {
@@ -94,7 +116,7 @@ func TestRetryOnBusy_ContextCancelled(t *testing.T) {
 		calls++
 		// Cancel context after first call so the select picks it up
 		cancel()
-		return "", &APIError{StatusCode: 500, Codes: []int{627}, Message: "busy"}
+		return "", &APIError{StatusCode: 503, Codes: []int{744}, Message: "no capacity"}
 	})
 
 	if err == nil {
@@ -110,7 +132,7 @@ func TestRetryVoidOnBusy(t *testing.T) {
 	err := RetryVoidOnBusy(context.Background(), 30*time.Second, func() error {
 		calls++
 		if calls < 2 {
-			return &APIError{StatusCode: 500, Codes: []int{627}, Message: "busy"}
+			return &APIError{StatusCode: 503, Codes: []int{744}, Message: "no capacity"}
 		}
 		return nil
 	})
@@ -129,7 +151,7 @@ func TestRetryOnBusy_ExponentialBackoff(t *testing.T) {
 	_, _ = RetryOnBusy(context.Background(), 10*time.Second, func() (string, error) {
 		timestamps = append(timestamps, time.Now())
 		if len(timestamps) < 4 {
-			return "", &APIError{StatusCode: 500, Codes: []int{627}, Message: "busy"}
+			return "", &APIError{StatusCode: 503, Codes: []int{744}, Message: "no capacity"}
 		}
 		return "done", nil
 	})
