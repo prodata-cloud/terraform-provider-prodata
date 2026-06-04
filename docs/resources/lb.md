@@ -2,12 +2,12 @@
 page_title: "prodata_lb Resource - ProData Provider"
 subcategory: "Load Balancer"
 description: |-
-  Manages a ProData L4 load balancer (TCP/UDP) backed by hidden HAProxy VMs.
+  Manages a ProData L4 load balancer (TCP/UDP) backed by hidden nginx VMs.
 ---
 
 # prodata_lb (Resource)
 
-Manages a ProData layer-4 load balancer (TCP or UDP). The platform provisions two hidden HAProxy VMs in the target local network to back the LB; these VMs are not directly visible or manageable through this provider.
+Manages a ProData layer-4 load balancer (TCP or UDP). The platform provisions two hidden nginx VMs in the target local network to back the LB; these VMs are not directly visible or manageable through this provider. Traffic is distributed across the backend VMs in round-robin order.
 
 A balancer can dispatch traffic to either:
 
@@ -16,9 +16,9 @@ A balancer can dispatch traffic to either:
 
 Switching between the two backend modes forces resource replacement; same-mode content changes (renaming, port edits, swapping VM members in/out, adjusting `description`) are applied in place.
 
-~> **Note:** Creating a load balancer requires at least **three** free IPs in `network_id` (one VIP plus two for the hidden HAProxy VMs). The server returns error code 737 ("Insufficient free IPs in network for load balancer.") when the network does not have enough; the provider surfaces this as a clear plan/apply error.
+~> **Note:** Creating a load balancer requires at least **three** free IPs in `network_id` (one VIP plus two for the hidden nginx VMs). The server returns error code 737 ("Insufficient free IPs in network for load balancer.") when the network does not have enough; the provider surfaces this as a clear plan/apply error.
 
-~> **Note:** `name`, `description`, `port`, and `backend_group` content (VM members) are updated in place. Changing `region`, `project_tag`, `type`, `protocol`, `network_id`, or switching backend modes forces a new resource. The hidden HAProxy VMs are not re-provisioned on in-place updates.
+~> **Note:** `name`, `description`, `port`, and `backend_group` content (VM members) are updated in place. Changing `region`, `project_tag`, `type`, `protocol`, `network_id`, or switching backend modes forces a new resource. The hidden nginx VMs are not re-provisioned on in-place updates.
 
 ~> **Note:** `description` is **not configurable for CCM (node pool) load balancers.** The panel owns it — it sets `"CCM: <name>"` and ignores any caller-supplied value on both create and update. The provider rejects a user-supplied `description` at plan time to surface the constraint — omit `description` for CCM balancers and let the provider read the panel value back into state.
 
@@ -99,6 +99,8 @@ resource "prodata_lb" "ingress" {
   - `target_port` (Number, required) Port on each backend (1-65535).
 - `backend_group` (Object) Backend selection. Exactly one of `vm_ids` or `node_pool_id` must be set:
   - `vm_ids` (Set of String, optional) Set of VM guids — the `guid` attribute on `prodata_vm`. At least one entry required when this mode is used. Re-ordering produces no diff. Used by `FRONTEND`-source LBs.
+
+~> **Note:** `vm_ids` expects VM **guids** — the computed `guid` attribute of `prodata_vm` (e.g. `prodata_vm.web[*].guid`), **not** the numeric `prodata_vm.id`. Passing the id (or any non-guid value) fails the create with a backend-not-found error.
   - `node_pool_id` (Number, optional) Kubernetes node pool ID. Whole-pool only (no partial backends). Changing the pool itself forces a new resource — see "Known Limitations" for the reason.
 
 ### Optional
@@ -119,7 +121,7 @@ resource "prodata_lb" "ingress" {
 
 ### Timeouts
 
-Configure operation timeouts via the optional `timeouts` attribute. Defaults are tuned to typical HAProxy VM provisioning latency:
+Configure operation timeouts via the optional `timeouts` attribute. Defaults are tuned to typical nginx VM provisioning latency:
 
 ```terraform
 resource "prodata_lb" "example" {
@@ -159,12 +161,12 @@ With the bare-ID form, `region` and `project_tag` are seeded from the provider d
 
 ## Known Limitations
 
-- **IP auto-allocation is API-key only.** Creates that omit explicit IPs allocate a VIP and the two HAProxy backend IPs from the network's free pool — this is enabled for API-key callers (i.e. Terraform) but not for JWT/UI callers. If the network has fewer than three free IPs the create fails with server error 737.
+- **IP auto-allocation is API-key only.** Creates that omit explicit IPs allocate a VIP and the two nginx backend IPs from the network's free pool — this is enabled for API-key callers (i.e. Terraform) but not for JWT/UI callers. If the network has fewer than three free IPs the create fails with server error 737.
 - **`getFreeNetIps` is a snapshot.** Two near-simultaneous LB creates against the same near-full network can both be told the same free IPs, racing for the same VIP. The platform's resolution path is being hardened; for now, serialize LB creates against tight networks (`depends_on` between resources, or `terraform apply -parallelism=1`) when free IP capacity is close to the minimum.
 - **Switching `node_pool_id` requires destroy+recreate.** The panel's configure endpoint has no `nodePoolId` parameter, so the provider gates pool swaps via `RequiresReplace`. Same-pool configures (rename, port edits) are applied in place as expected.
 - **`node_pool_id` is not surfaced on GET.** The panel does not return `nodePoolId` in the load-balancer read shape, so the resource preserves it from prior state. After `terraform import`, you must restate it in HCL — see the Import note. Track node-pool membership separately through your Kubernetes tooling.
 - **`description` is panel-controlled for CCM balancers.** The provider rejects a user-supplied `description` at plan time for CCM (node pool) balancers, on both create and update; the panel sets it to `"CCM: <name>"` and that value reads back into state. Frontend (VM-backed) LBs accept user-supplied descriptions normally.
 - **`date_created` is preserved across updates.** The panel's configure endpoint resets `dateCreated` to the current time, which would fail Terraform's "computed output must be consistent" check. The provider re-injects the prior `date_created` into state on update so plans stay stable.
 - **Legacy LBs may report empty `source`.** Load balancers created before source tracking landed will read `source = ""`. The provider treats empty source as `FRONTEND` for compatibility on `delete` and surfaces a clear error if you try to `update` such an LB — destroy and recreate to migrate it onto the new schema.
-- **Hidden HAProxy VMs.** Each LB creates two HAProxy VMs in `network_id`. They are managed by the platform and do not appear in `prodata_vms`, but they do consume VM quota — plan capacity accordingly. They are cleaned up on `terraform destroy`.
+- **Hidden nginx VMs.** Each LB creates two nginx VMs in `network_id`. They are managed by the platform and do not appear in `prodata_vms`, but they do consume VM quota — plan capacity accordingly. They are cleaned up on `terraform destroy`.
 - **No TLS termination.** This LB is L4 only. There is no HTTPS / SSL termination, no per-listener protocol override, no session stickiness, no health-check tuning, no tags, and no equivalent of `force_destroy`. These are not on the v0 roadmap.

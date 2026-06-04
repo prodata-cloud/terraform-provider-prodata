@@ -231,13 +231,15 @@ func LBErrorDetail(err error) string {
 		case apiErr.HasCode(736):
 			return "Load balancer not found."
 		case apiErr.HasCode(737):
-			return "The local network does not have enough free IPs. A load balancer needs at least three: one VIP plus two for the hidden HAProxy VMs."
+			return "The local network does not have enough free IPs. A load balancer needs at least three: one VIP plus two for the hidden nginx VMs."
 		case apiErr.HasCode(743):
 			return "No IP pool is available for load balancers in this region. This is usually transient capacity; retry shortly or contact support if it persists."
 		case apiErr.HasCode(744):
-			return "No compute capacity is available to provision the load balancer's HAProxy VMs. This is usually transient; retry shortly or contact support if it persists."
+			return "No compute capacity is available to provision the load balancer's nginx VMs. This is usually transient; retry shortly or contact support if it persists."
 		case apiErr.HasCode(747):
 			return "The load balancer could not be provisioned: the infrastructure (VM provisioning) service reported an error. Retry shortly, and contact support if it persists."
+		case apiErr.HasCode(748):
+			return "Backend VM not found. The vm_ids set must contain VM guids (the guid attribute of prodata_vm, e.g. prodata_vm.web[*].guid), not numeric ids."
 		}
 	}
 	return err.Error()
