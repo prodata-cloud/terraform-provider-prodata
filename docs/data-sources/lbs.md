@@ -9,7 +9,7 @@ description: |-
 
 List the load balancers visible to the project resolved from `project_tag` (or the provider default). Returns a summary view — port mappings and backend membership are intentionally omitted to keep list responses small. Use the [`prodata_lb`](./lb.md) data source for the full shape of a single LB.
 
-`DELETED` load balancers are filtered out by the server. Soft-deleted LBs awaiting scheduler cleanup will already be absent from this list, even if their hidden HAProxy VMs have not yet been physically destroyed.
+`DELETED` load balancers are filtered out by the server. Soft-deleted LBs awaiting scheduler cleanup will already be absent from this list, even if their hidden nginx VMs have not yet been physically destroyed.
 
 ~> **Note:** Like every data source, `prodata_lbs` is read at plan time. If you create a `prodata_lb` and reference `data.prodata_lbs` in the same apply, the data source reads **before** the new LB exists and the list will not include it. To capture same-apply resources in the list, add `depends_on = [prodata_lb.example]` to the data source — the read is then sequenced after the resource. Alternatively, run `terraform refresh` after the apply.
 

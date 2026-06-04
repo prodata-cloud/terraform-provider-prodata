@@ -96,7 +96,8 @@ func (r *LbResource) Metadata(_ context.Context, req resource.MetadataRequest, r
 func (r *LbResource) Schema(ctx context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
 		MarkdownDescription: "Manages a ProData load balancer (L4 TCP/UDP). " +
-			"Backed by two hidden HAProxy VMs provisioned in the target network. " +
+			"Backed by two hidden nginx VMs provisioned in the target network. " +
+			"Backends receive traffic in round-robin order. " +
 			"Backend group may be either a set of VM guids (`vm_ids`) or a Kubernetes " +
 			"node pool id (`node_pool_id`) — switching between modes forces a new resource.",
 		Attributes: map[string]schema.Attribute{
@@ -248,7 +249,7 @@ func (r *LbResource) Schema(ctx context.Context, _ resource.SchemaRequest, resp 
 				Required: true,
 				Attributes: map[string]schema.Attribute{
 					"vm_ids": schema.SetAttribute{
-						MarkdownDescription: "Set of VM guids (the `guid` attribute on `prodata_vm`). " +
+						MarkdownDescription: "Set of VM **guids** — the computed `guid` attribute on `prodata_vm` (NOT the numeric id). " +
 							"At least one entry required when this mode is used. Re-ordering produces no diff.",
 						Optional:    true,
 						ElementType: types.StringType,
@@ -447,7 +448,7 @@ func (r *LbResource) Create(ctx context.Context, req resource.CreateRequest, res
 		if client.IsInsufficientFreeIPs(err) {
 			resp.Diagnostics.AddError(
 				"Insufficient free IPs in the local network",
-				fmt.Sprintf("The network needs at least three free IPs (one VIP plus two for the hidden HAProxy VMs). %s", err.Error()),
+				fmt.Sprintf("The network needs at least three free IPs (one VIP plus two for the hidden nginx VMs). %s", err.Error()),
 			)
 			return
 		}
@@ -961,7 +962,7 @@ const (
 )
 
 // lbNameRegex enforces letters/digits/hyphens with no leading or trailing
-// hyphen. The panel itself does not validate the name, but the hidden HAProxy
+// hyphen. The panel itself does not validate the name, but the hidden nginx
 // VMs derive their hostnames from it, so we want a Linux-hostname-shaped value.
 var lbNameRegex = regexp.MustCompile(`^[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?$`)
 
