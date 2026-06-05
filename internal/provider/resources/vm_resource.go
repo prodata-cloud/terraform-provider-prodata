@@ -9,12 +9,15 @@ import (
 	"terraform-provider-prodata/internal/client"
 	"terraform-provider-prodata/internal/tfutil"
 
+	"github.com/hashicorp/terraform-plugin-framework-timeouts/resource/timeouts"
+	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-log/tflog"
 )
@@ -50,7 +53,12 @@ type VmResourceModel struct {
 	Password       types.String `tfsdk:"password"`
 	SSHPublicKey   types.String `tfsdk:"ssh_public_key"`
 	Description    types.String `tfsdk:"description"`
-	Status         types.String `tfsdk:"status"`
+	// UserData is write-only: it is read from config at create and never stored in
+	// state. UserDataHash is the stored, plan-visible trigger that drives replacement.
+	UserData     types.String   `tfsdk:"user_data"`
+	UserDataHash types.String   `tfsdk:"user_data_hash"`
+	Status       types.String   `tfsdk:"status"`
+	Timeouts     timeouts.Value `tfsdk:"timeouts"`
 }
 
 func NewVmResource() resource.Resource {
@@ -194,6 +202,33 @@ func (r *VmResource) Schema(ctx context.Context, req resource.SchemaRequest, res
 					stringplanmodifier.RequiresReplace(),
 				},
 			},
+			"user_data": schema.StringAttribute{
+				MarkdownDescription: "Cloud-init user data applied at first boot via a NoCloud ISO. " +
+					"Must begin with `#cloud-config` or a shebang (`#!`) and not exceed 64 KiB. " +
+					"**Write-only**: the raw value is never stored in Terraform state nor shown in a " +
+					"plan (this requires Terraform >= 1.11). To change it — and re-run cloud-init — " +
+					"change `user_data_hash`, which **replaces** the VM (cloud-init only runs on first " +
+					"boot, and the API accepts user_data only at create time). Note: a cloud-init " +
+					"failure inside the guest is not reported back by the API, so a successful apply " +
+					"does not by itself prove the script ran without errors.",
+				Optional:  true,
+				WriteOnly: true,
+				Validators: []validator.String{
+					stringvalidator.LengthAtMost(65536),
+					UserDataPrefix(),
+				},
+			},
+			"user_data_hash": schema.StringAttribute{
+				MarkdownDescription: "Hash of `user_data` (e.g. `sha256(file(\"cloud-init.yaml\"))`). " +
+					"Because `user_data` is write-only, this hash is the value shown in the plan and is " +
+					"what triggers VM replacement when the cloud-init payload changes; set it whenever " +
+					"`user_data` is set. It is world-readable in state and CI logs, so always use a " +
+					"one-way hash such as `sha256` — never the raw payload.",
+				Optional: true,
+				PlanModifiers: []planmodifier.String{
+					WriteOnceString(),
+				},
+			},
 			"status": schema.StringAttribute{
 				MarkdownDescription: "The current status of the virtual machine.",
 				Computed:            true,
@@ -201,19 +236,53 @@ func (r *VmResource) Schema(ctx context.Context, req resource.SchemaRequest, res
 					stringplanmodifier.UseStateForUnknown(),
 				},
 			},
+			"timeouts": timeouts.Attributes(ctx, timeouts.Opts{
+				Create: true,
+			}),
 		},
 	}
 }
 
 func (r *VmResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
-	// Skip if creating or destroying (not replacing)
-	if req.State.Raw.IsNull() || req.Plan.Raw.IsNull() {
+	// Destroying — nothing to plan.
+	if req.Plan.Raw.IsNull() {
 		return
 	}
 
-	var stateData, planData VmResourceModel
-	resp.Diagnostics.Append(req.State.Get(ctx, &stateData)...)
+	var planData VmResourceModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &planData)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	// Consistency check (runs on both create and update): user_data is write-only and
+	// is read from the config — it is null in the plan and state, so Terraform cannot
+	// diff it directly. user_data_hash is the visible trigger, so it must be set
+	// whenever a payload is provided; otherwise a later edit to the payload would be
+	// invisible and never re-applied. user_data lives only in the config object.
+	var configData VmResourceModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &configData)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	userDataSet := !configData.UserData.IsNull() && !configData.UserData.IsUnknown()
+	if userDataHashMissing(userDataSet, planData.UserDataHash) {
+		resp.Diagnostics.AddAttributeError(
+			path.Root("user_data_hash"),
+			"Missing user_data_hash",
+			"user_data is set but user_data_hash is empty. Set user_data_hash to a hash of the "+
+				"payload (for example sha256(file(\"cloud-init.yaml\"))) so that changes are "+
+				"detected — user_data is write-only and cannot be diffed directly.",
+		)
+	}
+
+	// Creating — no replacement analysis to do.
+	if req.State.Raw.IsNull() {
+		return
+	}
+
+	var stateData VmResourceModel
+	resp.Diagnostics.Append(req.State.Get(ctx, &stateData)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -223,15 +292,33 @@ func (r *VmResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequ
 	// runs before ModifyPlan and keeps the old value in the plan object.
 	// password and ssh_public_key are write-only: after import the state is null,
 	// so they always look "changed". Only check readable RequiresReplace attributes.
+	// user_data_hash carries the user_data replacement signal (user_data itself is
+	// write-only and absent from state). A null/unknown state hash (e.g. right after
+	// import-adopt) is treated as "no change" so we don't raise a spurious replace.
+	userDataReplace := userDataHashChanged(stateData.UserDataHash, planData.UserDataHash)
 	requiresReplace := !stateData.ImageID.Equal(planData.ImageID) ||
 		!stateData.LocalNetworkID.Equal(planData.LocalNetworkID) ||
 		!stateData.PrivateIP.Equal(planData.PrivateIP) ||
 		!stateData.Region.Equal(planData.Region) ||
 		!stateData.ProjectTag.Equal(planData.ProjectTag) ||
 		!stateData.Description.Equal(planData.Description) ||
+		userDataReplace ||
 		(!stateData.PublicIPID.IsNull() && !stateData.PublicIPID.Equal(planData.PublicIPID))
 	if !requiresReplace {
 		return
+	}
+
+	// Warn when a user_data change is what forces replacement: the raw value is hidden,
+	// so the user_data_hash diff is the only visible signal, and cloud-init success is
+	// not verified by the API.
+	if userDataReplace {
+		resp.Diagnostics.AddWarning(
+			"user_data change replaces the virtual machine",
+			"user_data_hash changed, so this VM will be destroyed and recreated to re-run "+
+				"cloud-init at first boot (cloud-init only runs once, and the API accepts user_data "+
+				"only at create). A cloud-init failure on the guest is not reported by the API, so a "+
+				"successful apply does not by itself prove the new script ran without errors.",
+		)
 	}
 
 	// Warn that create_before_destroy will fail due to VM name uniqueness constraint.
@@ -243,6 +330,23 @@ func (r *VmResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequ
 				"renamed to allow the new VM to be created with the original name.",
 		)
 	}
+}
+
+// userDataHashMissing reports whether user_data is set but user_data_hash is absent
+// or empty. Pure helper so ModifyPlan and its unit tests share one definition.
+func userDataHashMissing(userDataSet bool, hash types.String) bool {
+	return userDataSet && (hash.IsNull() ||
+		(!hash.IsUnknown() && hash.ValueString() == ""))
+}
+
+// userDataHashChanged reports whether the stored user_data_hash changed between state
+// and plan. A null/unknown state hash (e.g. just after import-adopt) returns false so
+// that an unchanged VM is not flagged for replacement. Pure helper, unit-tested.
+func userDataHashChanged(stateHash, planHash types.String) bool {
+	if stateHash.IsNull() || stateHash.IsUnknown() {
+		return false
+	}
+	return !stateHash.Equal(planHash)
 }
 
 func (r *VmResource) Configure(ctx context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
@@ -263,19 +367,33 @@ func (r *VmResource) Configure(ctx context.Context, req resource.ConfigureReques
 }
 
 const (
-	vmPollInterval  = 5 * time.Second
-	vmCreateTimeout = 5 * time.Minute
+	vmPollInterval = 5 * time.Second
+	// vmDefaultCreateTime is a CEILING, not a fixed wait: the provider polls and returns
+	// as soon as the VM is ready, so the common Linux path (~10-12m) is unaffected by a
+	// higher value. The 30m default covers the longer in-guest cloud-init wait on Windows
+	// guests (~1200s) plus the subsequent stop / detach-ISO / restart cycle and polling
+	// slack. Overridable via the timeouts{} block.
+	vmDefaultCreateTime = 30 * time.Minute
 )
 
 // waitForVmReady polls the VM until it reaches a terminal state (RUNNING, STOPPED, or ERROR).
-// Tolerates up to 3 consecutive transient polling errors.
+// Tolerates up to 3 consecutive transient polling errors. The overall deadline is carried by
+// ctx (the caller wraps it with context.WithTimeout using the timeouts{} create value), so a
+// VM whose first boot runs a long cloud-init is bounded by that single timeout.
+//
+// Note: the backend does not surface a cloud-init failure as VM status ERROR — a VM whose
+// cloud-init failed still reports RUNNING — so reaching RUNNING here does not prove the
+// user_data script succeeded.
 func (r *VmResource) waitForVmReady(ctx context.Context, vmID int64, opts *client.RequestOpts) (*client.Vm, error) {
 	const maxConsecutiveErrs = 3
 
-	deadline := time.Now().Add(vmCreateTimeout)
 	consecutiveErrs := 0
 
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("timed out waiting for VM %d to become ready: %w", vmID, err)
+		}
+
 		vm, err := r.client.GetVmStatus(ctx, vmID, opts)
 		if err != nil {
 			consecutiveErrs++
@@ -303,13 +421,9 @@ func (r *VmResource) waitForVmReady(ctx context.Context, vmID int64, opts *clien
 			}
 		}
 
-		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("timed out waiting for VM %d to become ready", vmID)
-		}
-
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return nil, fmt.Errorf("timed out waiting for VM %d to become ready: %w", vmID, ctx.Err())
 		case <-time.After(vmPollInterval):
 		}
 	}
@@ -331,6 +445,17 @@ func (r *VmResource) Create(ctx context.Context, req resource.CreateRequest, res
 		)
 		return
 	}
+
+	// Bound the entire create — the async create call plus the subsequent polling that
+	// waits out the backend's in-guest cloud-init wait — by the create timeout (default
+	// 30m, overridable via the timeouts{} block).
+	createTimeout, diags := data.Timeouts.Create(ctx, vmDefaultCreateTime)
+	resp.Diagnostics.Append(diags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, createTimeout)
+	defer cancel()
 
 	// Use provider defaults if not specified in resource
 	region := data.Region.ValueString()
@@ -373,6 +498,17 @@ func (r *VmResource) Create(ctx context.Context, req resource.CreateRequest, res
 	if !data.Description.IsNull() && !data.Description.IsUnknown() {
 		desc := data.Description.ValueString()
 		createReq.Description = &desc
+	}
+
+	// user_data is write-only: it is null in the plan, so read it from the config and
+	// forward it. It is never written back to state (enforced before State.Set below).
+	var configData VmResourceModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &configData)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	if !configData.UserData.IsNull() && !configData.UserData.IsUnknown() {
+		createReq.UserData = configData.UserData.ValueStringPointer()
 	}
 
 	tflog.Debug(ctx, "Creating virtual machine", map[string]any{
@@ -491,6 +627,10 @@ func (r *VmResource) Create(ctx context.Context, req resource.CreateRequest, res
 		data.Description = types.StringValue(resultVm.Description)
 	}
 
+	// user_data is write-only — guarantee the raw payload never reaches state, on the
+	// success path and the error path below.
+	data.UserData = types.StringNull()
+
 	// Save state BEFORE returning error — prevents desync on retry
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 
@@ -520,6 +660,7 @@ func (r *VmResource) Read(ctx context.Context, req resource.ReadRequest, resp *r
 	// Preserve write-only attributes before API call (never returned by API)
 	password := data.Password
 	sshPublicKey := data.SSHPublicKey
+	userDataHash := data.UserDataHash
 
 	opts := &client.RequestOpts{}
 	if !data.Region.IsNull() && !data.Region.IsUnknown() {
@@ -588,6 +729,10 @@ func (r *VmResource) Read(ctx context.Context, req resource.ReadRequest, resp *r
 	// Restore write-only attributes (never returned by API)
 	data.Password = password
 	data.SSHPublicKey = sshPublicKey
+	// user_data is write-only (kept null in state); user_data_hash is stored but not
+	// returned by the API, so preserve the prior value to avoid spurious drift.
+	data.UserDataHash = userDataHash
+	data.UserData = types.StringNull()
 
 	// public_ip_id: always reflect what the API reports so import works correctly.
 	// Computed+UseStateForUnknown ensures that if the user omits it from config,

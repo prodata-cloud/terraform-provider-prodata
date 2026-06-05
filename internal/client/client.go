@@ -653,6 +653,9 @@ type CreateVmRequest struct {
 	Password       string  `json:"password"`
 	SSHPublicKey   *string `json:"sshPublicKey,omitempty"`
 	Description    *string `json:"description,omitempty"`
+	// UserData is cloud-init user-data applied at first boot. Plain (not base64);
+	// the backend requires it to start with "#cloud-config" or "#!".
+	UserData *string `json:"userData,omitempty"`
 }
 
 func (c *Client) GetVms(ctx context.Context, opts *RequestOpts) ([]Vm, error) {

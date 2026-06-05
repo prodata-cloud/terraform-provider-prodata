@@ -4,6 +4,35 @@ All notable changes to this provider are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.0] - 2026-06-05
+
+### Added
+
+- `prodata_vm`: `user_data` — cloud-init user data applied at first boot via a
+  NoCloud ISO. It is **write-only** (the raw payload is never stored in state nor
+  shown in a plan; requires Terraform >= 1.11) and is validated client-side
+  (must start with `#cloud-config` or `#!`, max 64 KiB) so malformed payloads
+  fail at plan time instead of round-tripping to the API.
+- `prodata_vm`: `user_data_hash` — the plan-visible companion to the write-only
+  `user_data`. Set it to a hash of the payload (e.g.
+  `sha256(file("cloud-init.yaml"))`); changing it replaces the VM so cloud-init
+  re-runs at first boot.
+- `prodata_vm`: a `timeouts` block with a configurable `create` timeout.
+
+### Changed
+
+- `prodata_vm`: the create timeout now defaults to **30m** (was a hard-coded 5m).
+  The provider polls for VM readiness while the backend waits for the in-guest
+  cloud-init run (up to ~600s on Linux, ~1200s on Windows) plus a
+  stop/detach-ISO/restart cycle. The 30m default covers the Windows worst case,
+  which exceeded the old default.
+
+### Notes
+
+- A cloud-init failure inside the guest is not reported back by the API — a VM
+  whose cloud-init failed still reports `RUNNING` — so a successful `apply` does
+  not by itself prove the `user_data` script ran without errors.
+
 ## [0.17.1] - 2026-05-21
 
 ### Added

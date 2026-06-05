@@ -48,6 +48,59 @@ resource "prodata_vm" "web_server" {
 }
 ```
 
+### With cloud-init user data
+
+`user_data` is **write-only**: the raw payload is never stored in Terraform state nor
+shown in a plan (this requires Terraform >= 1.11). Because Terraform cannot diff a
+write-only value, you also set `user_data_hash` — a hash of the same payload — which is
+the value shown in the plan and the trigger that **replaces** the VM when the cloud-init
+script changes (cloud-init only runs on first boot).
+
+```terraform
+terraform {
+  required_version = ">= 1.11" # user_data is a write-only argument
+}
+
+locals {
+  user_data = <<-EOT
+    #cloud-config
+    package_update: true
+    packages:
+      - htop
+    runcmd:
+      - [ systemctl, enable, --now, qemu-guest-agent ]
+  EOT
+}
+
+resource "prodata_vm" "bootstrapped" {
+  name             = "bootstrapped"
+  image_id         = 123
+  cpu_cores        = 2
+  ram              = 4
+  disk_size        = 50
+  disk_type        = "SSD"
+  local_network_id = 456
+  password         = "SecurePassword123!"
+
+  user_data      = local.user_data
+  user_data_hash = sha256(local.user_data)
+
+  timeouts {
+    # 30m covers the in-guest cloud-init run, including slower Windows guests.
+    # Linux guests are faster and return as soon as the VM is reported ready.
+    create = "30m"
+  }
+}
+```
+
+~> **Note:** VM creation is asynchronous: the create call returns before the VM is ready,
+and Terraform waits by polling until the VM is reported ready — which includes the in-guest
+cloud-init run. The provider validates only the `user_data` prefix and the 64 KiB size limit
+client-side; the cloud-config structure is validated by the backend. A cloud-init failure
+inside the guest is **not** reported back — a VM whose cloud-init failed still reports
+`RUNNING`. A successful `apply` therefore does not by itself prove the `user_data` script ran
+without errors; verify on the guest if that matters.
+
 ## Schema
 
 ### Required
@@ -69,6 +122,10 @@ resource "prodata_vm" "web_server" {
 - `public_ip_id` (Number) The ID of a public IP to attach to the VM at creation time. If not specified, no public IP is attached. Changing this forces a new resource.
 - `ssh_public_key` (String) SSH public key for authentication. Changing this forces a new resource.
 - `description` (String) Description of the virtual machine. Changing this forces a new resource.
+- `user_data` (String, Write-only) Cloud-init user data applied at first boot via a NoCloud ISO. Must begin with `#cloud-config` or a shebang (`#!`) and not exceed 64 KiB (65536 bytes). Write-only: never stored in state nor shown in a plan (requires Terraform >= 1.11). Change `user_data_hash` to re-run cloud-init, which forces a new resource.
+- `user_data_hash` (String) Hash of `user_data` (e.g. `sha256(file("cloud-init.yaml"))`). Shown in the plan; changing it forces a new resource. Required whenever `user_data` is set. World-readable in state/CI — always use a one-way hash, never the raw payload.
+- `timeouts` (Block, Optional) Configurable operation timeouts.
+  - `create` (String) Time to wait for the VM (including the in-guest cloud-init run) to become ready. Defaults to `30m`.
 
 ### Attribute Reference
 
@@ -94,3 +151,5 @@ terraform import prodata_vm.example 123
 ```
 
 ~> **Note:** The `password` and `ssh_public_key` attributes are write-only and cannot be read back from the API. After import, these attributes will be empty in state. If your configuration specifies them, Terraform will show a diff but no replacement will be forced.
+
+~> **Note:** `user_data` is write-only and `user_data_hash` is not read back from the API, so both are empty in state after import. If your configuration sets them, the first apply records `user_data_hash` without replacing the VM; subsequent changes to `user_data_hash` force a replacement as usual.
