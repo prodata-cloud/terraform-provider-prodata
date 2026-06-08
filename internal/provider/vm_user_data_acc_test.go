@@ -55,7 +55,12 @@ func sshEnabled(t *testing.T) bool {
 	if os.Getenv("PRODATA_VM_TEST_SSH_REACHABLE") != "1" {
 		return false
 	}
-	for _, k := range []string{"PRODATA_VM_TEST_SSH_KEY", "PRODATA_VM_TEST_SSH_PRIVKEY", "PRODATA_VM_TEST_PUBLIC_IP_ID"} {
+	required := []string{"PRODATA_VM_TEST_SSH_KEY", "PRODATA_VM_TEST_SSH_PRIVKEY"}
+	if os.Getenv("PRODATA_VM_TEST_SSH_VIA_PRIVATE") != "1" {
+		// Public-IP mode reaches the guest through a prodata_public_ip resource.
+		required = append(required, "PRODATA_VM_TEST_PUBLIC_IP_ID")
+	}
+	for _, k := range required {
 		if os.Getenv(k) == "" {
 			t.Logf("PRODATA_VM_TEST_SSH_REACHABLE=1 but %s is unset — skipping in-guest marker verification", k)
 			return false
@@ -120,6 +125,8 @@ func TestAccVm_userData_lifecycle(t *testing.T) {
 				Config: testAccVmUserDataConfig(name, marker1),
 				ConfigStateChecks: []statecheck.StateCheck{
 					statecheck.ExpectKnownValue(resourceName, tfjsonpath.New("status"), knownvalue.StringExact("RUNNING")),
+					// Write-only: the raw payload must be null in saved state (design §3a).
+					statecheck.ExpectKnownValue(resourceName, tfjsonpath.New("user_data"), knownvalue.Null()),
 				},
 				Check: resource.ComposeAggregateTestCheckFunc(
 					// The write-only payload must never appear in state (security invariant).
@@ -153,6 +160,11 @@ func TestAccVm_userData_lifecycle(t *testing.T) {
 // verification is not wired (there would be nothing to prove).
 func TestAccVm_userData_knownBadWitness(t *testing.T) {
 	if !sshEnabled(t) {
+		// The require-witness contract (design §5 fix 1) also applies here: if the operator
+		// demanded proof, a misconfigured SSH must fail this meta-test, not skip it green.
+		if os.Getenv("PRODATA_VM_TEST_REQUIRE_WITNESS") == "1" {
+			t.Fatal("[CLOUD-INIT WITNESS REQUIRED] PRODATA_VM_TEST_REQUIRE_WITNESS=1 but SSH is not fully configured; cannot run the known-bad witness meta-test")
+		}
 		t.Skip("in-guest SSH verification not enabled (PRODATA_VM_TEST_SSH_REACHABLE=1 + key/privkey/public-ip) — nothing to witness")
 	}
 	name := accName()
@@ -356,62 +368,95 @@ func checkCanaryAbsentFromState(canary string) resource.TestCheckFunc {
 	}
 }
 
-// checkGuestMarker SSHes into the VM (when enabled) and asserts the marker is present
-// (mustSucceed) or absent (known-bad). It is a no-op when SSH verification is not wired.
+// guestHost returns the address the witness SSHes to: the VM's private_ip when running
+// in VPN/private mode (design §5 fix 2), else its public_ip. Empty ⇒ explicit error.
+func guestHost(s *terraform.State, resourceName string) (string, error) {
+	rs, ok := s.RootModule().Resources[resourceName]
+	if !ok {
+		return "", fmt.Errorf("resource %s not found in state", resourceName)
+	}
+	attr := "public_ip"
+	if os.Getenv("PRODATA_VM_TEST_SSH_VIA_PRIVATE") == "1" {
+		attr = "private_ip"
+	}
+	host := rs.Primary.Attributes[attr]
+	if host == "" {
+		return "", fmt.Errorf("VM has no %s; cannot reach the guest for the cloud-init witness", attr)
+	}
+	return host, nil
+}
+
+// checkGuestMarker SSHes into the VM and asserts the marker is present (mustSucceed) or
+// absent (known-bad). A connection/auth failure is INCONCLUSIVE and fails the check in
+// BOTH modes (design §5 fix 4) — a broken witness must never pass as "absent". When SSH
+// is not wired it is a no-op, UNLESS PRODATA_VM_TEST_REQUIRE_WITNESS=1, which forbids
+// silently passing without proof (design §5 fix 1 / criterion #1).
 func checkGuestMarker(t *testing.T, resourceName, marker string, mustSucceed bool) resource.TestCheckFunc {
 	return func(s *terraform.State) error {
 		if !sshEnabled(t) {
-			t.Logf("[CLOUD-INIT WITNESS SKIPPED] SSH not configured (set PRODATA_VM_TEST_SSH_REACHABLE=1 + key/privkey/public-ip); this run does NOT prove cloud-init executed — only that the VM reached RUNNING.")
+			if os.Getenv("PRODATA_VM_TEST_REQUIRE_WITNESS") == "1" {
+				return fmt.Errorf("[CLOUD-INIT WITNESS REQUIRED] PRODATA_VM_TEST_REQUIRE_WITNESS=1 but SSH is not fully configured; refusing to pass without proving cloud-init ran")
+			}
+			t.Logf("[CLOUD-INIT WITNESS SKIPPED] SSH not configured; this run does NOT prove cloud-init executed — only that the VM reached RUNNING.")
 			return nil
 		}
-		rs, ok := s.RootModule().Resources[resourceName]
-		if !ok {
-			return fmt.Errorf("resource %s not found in state", resourceName)
-		}
-		host := rs.Primary.Attributes["public_ip"]
-		if host == "" {
-			return fmt.Errorf("VM has no public_ip; set PRODATA_VM_TEST_PUBLIC_IP_ID so the guest is reachable")
-		}
-		err := sshMarkerPresent(host, marker)
-		if mustSucceed {
+		host, err := guestHost(s, resourceName)
+		if err != nil {
 			return err
 		}
-		if err == nil {
+		out, err := sshReadMarker(host)
+		if err != nil {
+			return fmt.Errorf("cloud-init witness inconclusive — could not reach guest %s: %w", host, err)
+		}
+		present := strings.Contains(out, marker)
+		if mustSucceed && !present {
+			return fmt.Errorf("marker %q absent on guest %s (cloud-init may have failed); got: %q", marker, host, strings.TrimSpace(out))
+		}
+		if !mustSucceed && present {
 			return fmt.Errorf("expected the marker to be ABSENT (known-bad cloud-init) but the witness found it on %s", host)
 		}
 		return nil
 	}
 }
 
-// sshMarkerPresent returns nil only if the marker file is present on the guest. It uses
-// the system ssh client (no x/crypto dependency), matching the team's playbook helpers.
-func sshMarkerPresent(host, marker string) error {
+// sshReadMarker reaches the guest and returns the marker-file contents. It distinguishes
+// a connection/auth failure (returned error — INCONCLUSIVE) from "SSH worked, file may be
+// empty/absent" (nil error, possibly-empty output) so callers can tell a broken witness
+// from a genuine marker-absence (design §5 fix 3+4). The read command ends in `|| true`
+// so a missing file is NOT a command failure. The provider returns at RUNNING, before
+// sshd is necessarily up, so we poll for readiness up to ~5 min.
+func sshReadMarker(host string) (string, error) {
 	user := os.Getenv("PRODATA_VM_TEST_SSH_USER")
 	if user == "" {
 		user = "root"
 	}
-	addr := net.JoinHostPort(host, "22")
-	if c, err := net.DialTimeout("tcp", addr, 10*time.Second); err != nil {
-		return fmt.Errorf("guest %s not reachable on 22: %w", host, err)
-	} else {
-		_ = c.Close()
+	deadline := time.Now().Add(5 * time.Minute)
+	var lastErr error
+	for {
+		addr := net.JoinHostPort(host, "22")
+		if c, derr := net.DialTimeout("tcp", addr, 10*time.Second); derr != nil {
+			lastErr = fmt.Errorf("guest %s not reachable on 22: %w", host, derr)
+		} else {
+			_ = c.Close()
+			out, rerr := exec.Command("ssh",
+				"-i", os.Getenv("PRODATA_VM_TEST_SSH_PRIVKEY"),
+				"-o", "StrictHostKeyChecking=no",
+				"-o", "UserKnownHostsFile=/dev/null",
+				"-o", "ConnectTimeout=15",
+				"-o", "BatchMode=yes",
+				fmt.Sprintf("%s@%s", user, host),
+				fmt.Sprintf("sudo cat %s 2>/dev/null || cat %s 2>/dev/null || true", guestMarkerPath, guestMarkerPath),
+			).CombinedOutput()
+			if rerr == nil {
+				return string(out), nil // SSH OK; marker present iff out contains it
+			}
+			lastErr = fmt.Errorf("ssh to %s: %w (output: %s)", host, rerr, strings.TrimSpace(string(out)))
+		}
+		if time.Now().After(deadline) {
+			return "", lastErr
+		}
+		time.Sleep(10 * time.Second)
 	}
-	out, err := exec.Command("ssh",
-		"-i", os.Getenv("PRODATA_VM_TEST_SSH_PRIVKEY"),
-		"-o", "StrictHostKeyChecking=no",
-		"-o", "UserKnownHostsFile=/dev/null",
-		"-o", "ConnectTimeout=15",
-		"-o", "BatchMode=yes",
-		fmt.Sprintf("%s@%s", user, host),
-		fmt.Sprintf("sudo cat %s 2>/dev/null || cat %s 2>/dev/null", guestMarkerPath, guestMarkerPath),
-	).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("ssh to %s: %w (output: %s)", host, err, strings.TrimSpace(string(out)))
-	}
-	if !strings.Contains(string(out), marker) {
-		return fmt.Errorf("marker %q not found on guest %s (cloud-init may have failed); got: %q", marker, host, strings.TrimSpace(string(out)))
-	}
-	return nil
 }
 
 // ---- destroy + sweep ----
