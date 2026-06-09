@@ -26,11 +26,10 @@ func vmSchema(t *testing.T) schema.Schema {
 	return resp.Schema
 }
 
-// TestVm_UserDataSchema locks the write-only/hash design (the whole point of the
-// feature's containment): user_data must be Optional + WriteOnly + not Computed so the
-// raw payload never lands in state or a plan, and user_data_hash must be the Optional,
-// plan-visible trigger (carrying a plan modifier) that drives replacement. A timeouts
-// block must exist because the cloud-init wait can exceed the old 5m default.
+// TestVm_UserDataSchema locks the write-only design: user_data must be Optional + WriteOnly
+// + not Computed so the raw payload never lands in state or a plan. The user_data_hash
+// attribute must be ABSENT — change detection moved to provider-computed sha256 in private
+// state. A timeouts block must exist because the cloud-init wait can exceed the old 5m default.
 func TestVm_UserDataSchema(t *testing.T) {
 	s := vmSchema(t)
 
@@ -66,26 +65,8 @@ func TestVm_UserDataSchema(t *testing.T) {
 		t.Error("user_data must carry the userDataPrefixValidator (leak-safe prefix check)")
 	}
 
-	hash, ok := s.Attributes["user_data_hash"].(schema.StringAttribute)
-	if !ok {
-		t.Fatal("prodata_vm must expose a string `user_data_hash` attribute")
-	}
-	if !hash.IsOptional() {
-		t.Error("user_data_hash must be Optional")
-	}
-	if hash.IsComputed() {
-		t.Error("user_data_hash must not be Computed (the user supplies the hash)")
-	}
-	if hash.IsWriteOnly() {
-		t.Error("user_data_hash must NOT be WriteOnly — it is the value shown in the plan")
-	}
-	if len(hash.PlanModifiers) == 0 {
-		t.Fatal("user_data_hash must carry a plan modifier (WriteOnceString) to drive replacement")
-	}
-	// Lock the concrete modifier type, not just its presence: the replacement /
-	// import-adopt semantics depend on it being WriteOnceString specifically.
-	if _, ok := hash.PlanModifiers[0].(writeOnceStringModifier); !ok {
-		t.Errorf("user_data_hash plan modifier must be WriteOnceString, got %T", hash.PlanModifiers[0])
+	if _, ok := s.Attributes["user_data_hash"]; ok {
+		t.Error("user_data_hash must be removed — the provider now computes the hash internally (private state)")
 	}
 
 	if _, ok := s.Attributes["timeouts"]; !ok {
@@ -174,58 +155,6 @@ func TestVm_UserDataPrefixValidatorNoLeak(t *testing.T) {
 	if strings.Contains(joined.String(), sentinel) {
 		t.Errorf("user_data validator leaked the raw payload into the diagnostic: %q", joined.String())
 	}
-}
-
-// TestVm_UserDataModifyPlanLogic exercises the two pure ModifyPlan helpers directly,
-// mirroring TestLb_DetectModeSwitch. These encode the write-only/hash contract:
-// userDataHashMissing forces the user to supply a hash when user_data is set, and
-// userDataHashChanged is the only visible replacement signal (with the deliberate
-// import-adopt carve-out: a null state hash must NOT trigger replacement).
-func TestVm_UserDataModifyPlanLogic(t *testing.T) {
-	t.Run("userDataHashMissing", func(t *testing.T) {
-		cases := []struct {
-			name string
-			set  bool
-			hash types.String
-			want bool
-		}{
-			{"set + null hash -> missing", true, types.StringNull(), true},
-			{"set + empty hash -> missing", true, types.StringValue(""), true},
-			{"set + real hash -> present", true, types.StringValue("abc"), false},
-			{"not set + null hash -> not missing", false, types.StringNull(), false},
-			{"set + unknown hash -> not missing (yet)", true, types.StringUnknown(), false},
-		}
-		for _, c := range cases {
-			t.Run(c.name, func(t *testing.T) {
-				if got := userDataHashMissing(c.set, c.hash); got != c.want {
-					t.Errorf("userDataHashMissing(set=%v, hash=%v) = %v, want %v",
-						c.set, c.hash, got, c.want)
-				}
-			})
-		}
-	})
-
-	t.Run("userDataHashChanged", func(t *testing.T) {
-		cases := []struct {
-			name        string
-			state, plan types.String
-			want        bool
-		}{
-			{"null state -> import-adopt, not a change", types.StringNull(), types.StringValue("abc"), false},
-			{"unknown state -> not a change", types.StringUnknown(), types.StringValue("abc"), false},
-			{"same value -> not a change", types.StringValue("abc"), types.StringValue("abc"), false},
-			{"different value -> changed", types.StringValue("abc"), types.StringValue("def"), true},
-			{"value cleared -> changed", types.StringValue("abc"), types.StringNull(), true},
-		}
-		for _, c := range cases {
-			t.Run(c.name, func(t *testing.T) {
-				if got := userDataHashChanged(c.state, c.plan); got != c.want {
-					t.Errorf("userDataHashChanged(state=%v, plan=%v) = %v, want %v",
-						c.state, c.plan, got, c.want)
-				}
-			})
-		}
-	})
 }
 
 // TestCreateVmRequest_marshalsUserData guards the wire contract: the backend reads the
