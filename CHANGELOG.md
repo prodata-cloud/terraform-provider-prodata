@@ -4,6 +4,22 @@ All notable changes to this provider are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.0] - 2026-06-09
+
+### Removed
+
+- **BREAKING:** `prodata_vm`: the `user_data_hash` argument is removed. The provider now
+  computes the cloud-init payload hash itself (sha256, kept in the resource's private state)
+  and detects changes automatically, so you no longer supply a hash. **Migration:** delete
+  the `user_data_hash = ...` line from your configuration; keep `user_data`. After upgrading,
+  the first `plan` is clean (the old hash is dropped from state); do not change `user_data`
+  in the same step as the upgrade, as the baseline re-establishes on the next create/replace.
+
+### Notes
+
+- Because the hash now lives in private state (seeded only when Terraform creates the VM),
+  an **imported** VM is not tracked for `user_data` changes until it is next replaced.
+
 ## [0.19.0] - 2026-06-05
 
 ### Added
@@ -173,7 +189,8 @@ for release-by-release commits. Notable in the 0.11 line: addition of
 `prodata_s3_bucket` resource and data sources, the `prodata_public_ip_attachment`
 restart note, plus VM and volume CRUD improvements.
 
-[Unreleased]: https://github.com/prodata-cloud/terraform-provider-prodata/compare/v0.15.0...HEAD
+[Unreleased]: https://github.com/prodata-cloud/terraform-provider-prodata/compare/v0.20.0...HEAD
+[0.20.0]: https://github.com/prodata-cloud/terraform-provider-prodata/compare/v0.19.0...v0.20.0
 [0.15.0]: https://github.com/prodata-cloud/terraform-provider-prodata/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/prodata-cloud/terraform-provider-prodata/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/prodata-cloud/terraform-provider-prodata/compare/v0.12.0...v0.13.0

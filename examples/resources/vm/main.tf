@@ -9,8 +9,8 @@ resource "prodata_vm" "example" {
   password         = "SecurePassword123"
 }
 
-# Cloud-init bootstrap. user_data is write-only (never stored in state); change
-# user_data_hash to re-run cloud-init, which replaces the VM. Requires Terraform >= 1.11.
+# Cloud-init bootstrap. user_data is write-only (never stored in state); the provider hashes
+# it (sha256) and replaces the VM when the payload changes. Requires Terraform >= 1.11.
 locals {
   user_data = <<-EOT
     #cloud-config
@@ -30,8 +30,7 @@ resource "prodata_vm" "bootstrapped" {
   local_network_id = 456
   password         = "SecurePassword123"
 
-  user_data      = local.user_data
-  user_data_hash = sha256(local.user_data)
+  user_data = local.user_data
 
   # The 30m create default covers the in-guest cloud-init run, including
   # slower Windows guests.

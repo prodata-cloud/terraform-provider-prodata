@@ -52,9 +52,9 @@ resource "prodata_vm" "web_server" {
 
 `user_data` is **write-only**: the raw payload is never stored in Terraform state nor
 shown in a plan (this requires Terraform >= 1.11). Because Terraform cannot diff a
-write-only value, you also set `user_data_hash` — a hash of the same payload — which is
-the value shown in the plan and the trigger that **replaces** the VM when the cloud-init
-script changes (cloud-init only runs on first boot).
+write-only value, the provider computes a `sha256` of the payload and keeps it in the
+resource's private state; when the payload changes it **replaces** the VM so cloud-init
+re-runs at first boot. You do not set or manage a hash yourself.
 
 ```terraform
 terraform {
@@ -82,8 +82,7 @@ resource "prodata_vm" "bootstrapped" {
   local_network_id = 456
   password         = "SecurePassword123!"
 
-  user_data      = local.user_data
-  user_data_hash = sha256(local.user_data)
+  user_data = local.user_data
 
   timeouts {
     # 30m covers the in-guest cloud-init run, including slower Windows guests.
@@ -122,8 +121,7 @@ without errors; verify on the guest if that matters.
 - `public_ip_id` (Number) The ID of a public IP to attach to the VM at creation time. If not specified, no public IP is attached. Changing this forces a new resource.
 - `ssh_public_key` (String) SSH public key for authentication. Changing this forces a new resource.
 - `description` (String) Description of the virtual machine. Changing this forces a new resource.
-- `user_data` (String, Write-only) Cloud-init user data applied at first boot via a NoCloud ISO. Must begin with `#cloud-config` or a shebang (`#!`) and not exceed 64 KiB (65536 bytes). Write-only: never stored in state nor shown in a plan (requires Terraform >= 1.11). Change `user_data_hash` to re-run cloud-init, which forces a new resource.
-- `user_data_hash` (String) Hash of `user_data` (e.g. `sha256(file("cloud-init.yaml"))`). Shown in the plan; changing it forces a new resource. Required whenever `user_data` is set. World-readable in state/CI — always use a one-way hash, never the raw payload.
+- `user_data` (String, Write-only) Cloud-init user data applied at first boot via a NoCloud ISO. Must begin with `#cloud-config` or a shebang (`#!`) and not exceed 64 KiB (65536 bytes). Write-only: never stored in state nor shown in a plan (requires Terraform >= 1.11). The provider hashes the payload (sha256) and forces a new resource when it changes, to re-run cloud-init.
 - `timeouts` (Block, Optional) Configurable operation timeouts.
   - `create` (String) Time to wait for the VM (including the in-guest cloud-init run) to become ready. Defaults to `30m`.
 
@@ -152,4 +150,4 @@ terraform import prodata_vm.example 123
 
 ~> **Note:** The `password` and `ssh_public_key` attributes are write-only and cannot be read back from the API. After import, these attributes will be empty in state. If your configuration specifies them, Terraform will show a diff but no replacement will be forced.
 
-~> **Note:** `user_data` is write-only and `user_data_hash` is not read back from the API, so both are empty in state after import. If your configuration sets them, the first apply records `user_data_hash` without replacing the VM; subsequent changes to `user_data_hash` force a replacement as usual.
+~> **Note:** `user_data` is write-only and is empty in state after import. Because the change-detection hash lives in private state (seeded only when the VM is created by Terraform), an **imported** VM is not tracked for `user_data` changes until it is next replaced — editing `user_data` on an imported VM will not, on its own, trigger a replacement.
