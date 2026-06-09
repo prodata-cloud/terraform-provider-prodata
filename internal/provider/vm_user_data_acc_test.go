@@ -88,23 +88,6 @@ func TestAccVm_userData_invalidRejectedAtPlan(t *testing.T) {
 	})
 }
 
-// TestAccVm_userData_missingHashRejected asserts the ModifyPlan consistency check: a
-// payload with no user_data_hash is rejected at plan, because a write-only value with no
-// hash trigger would make later edits invisible. No infrastructure is created.
-func TestAccVm_userData_missingHashRejected(t *testing.T) {
-	resource.Test(t, resource.TestCase{
-		PreCheck:                 func() { testAccPreCheck(t) },
-		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
-		Steps: []resource.TestStep{
-			{
-				Config:      testAccVmUserDataConfigNoHash(accName()),
-				PlanOnly:    true,
-				ExpectError: regexp.MustCompile(`(?i)user_data_hash`),
-			},
-		},
-	})
-}
-
 // TestAccVm_userData_lifecycle is the core test-stand witness: create a VM with a
 // #cloud-config that writes a per-run nonce marker, assert it reaches RUNNING with a
 // stable plan, prove the raw payload never landed in state (canary), and — when SSH is
@@ -185,10 +168,10 @@ func TestAccVm_userData_knownBadWitness(t *testing.T) {
 	})
 }
 
-// TestAccVm_userData_importNoReplace imports a user_data VM (write-only attrs are absent
-// from state after import) and asserts that re-applying with the payload set adopts it via
-// an in-place update (adopts the hash, no replacement) — the import-aware WriteOnceString
-// behavior. A stock RequiresReplace on user_data_hash would destroy the VM here.
+// TestAccVm_userData_importNoReplace imports a user_data VM (write-only attrs are absent from
+// state after import) and asserts that re-applying with the payload set does NOT replace the
+// VM. user_data has no private baseline after import, so it never forces replacement; the
+// in-place Update comes from adopting password/ssh_public_key (WriteOnceString import path).
 func TestAccVm_userData_importNoReplace(t *testing.T) {
 	name := accName()
 	resourceName := "prodata_vm.test"
@@ -202,16 +185,15 @@ func TestAccVm_userData_importNoReplace(t *testing.T) {
 			{
 				Config: testAccVmUserDataConfig(name, marker),
 			},
-			{ // Import: user_data (write-only) and user_data_hash are not read back.
+			{ // Import: user_data (write-only) is not read back.
 				ResourceName:            resourceName,
 				ImportState:             true,
 				ImportStateVerify:       true,
-				ImportStateVerifyIgnore: []string{"password", "ssh_public_key", "user_data", "user_data_hash", "timeouts"},
+				ImportStateVerifyIgnore: []string{"password", "ssh_public_key", "user_data", "timeouts"},
 				ImportStateIdFunc:       vmImportID(resourceName),
 			},
-			{ // Re-apply same config: an in-place update (adopts the hash, no replacement).
-				// After import, password + user_data_hash go null->value, so the real plan
-				// is an in-place UPDATE, never a no-op; Update IS the no-replace proof.
+			{ // Re-apply same config: an in-place update (password/ssh adopted), never a replace.
+				// user_data has no private-state baseline post-import, so it cannot force replacement.
 				Config: testAccVmUserDataConfig(name, marker),
 				ConfigPlanChecks: resource.ConfigPlanChecks{
 					PreApply: []plancheck.PlanCheck{
@@ -265,7 +247,6 @@ resource "prodata_vm" "test" {
   password         = "AccTestUserData123"
 %[6]s%[7]s
   user_data      = local.ud
-  user_data_hash = sha256(local.ud)
 
   timeouts {
     create = "15m"
@@ -304,7 +285,6 @@ resource "prodata_vm" "test" {
   password         = "AccTestUserData123"
 %[6]s%[7]s
   user_data      = local.ud
-  user_data_hash = sha256(local.ud)
 
   timeouts {
     create = "15m"
@@ -328,25 +308,6 @@ resource "prodata_vm" "test" {
   local_network_id = 1
   password         = "AccTestUserData123"
   user_data        = "this is not a cloud-config"
-  user_data_hash   = "deadbeef"
-}
-`, name)
-}
-
-// testAccVmUserDataConfigNoHash sets user_data without user_data_hash, which ModifyPlan
-// must reject. Dummy ids keep it infrastructure-free.
-func testAccVmUserDataConfigNoHash(name string) string {
-	return fmt.Sprintf(`
-resource "prodata_vm" "test" {
-  name             = %[1]q
-  image_id         = 1
-  cpu_cores        = 1
-  ram              = 2
-  disk_size        = 20
-  disk_type        = "SSD"
-  local_network_id = 1
-  password         = "AccTestUserData123"
-  user_data        = "#cloud-config\npackages: [htop]\n"
 }
 `, name)
 }
