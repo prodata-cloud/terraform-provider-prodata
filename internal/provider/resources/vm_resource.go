@@ -270,6 +270,9 @@ func (r *VmResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequ
 	}
 	storedBlob, diags := req.Private.GetKey(ctx, userDataHashPrivateKey)
 	resp.Diagnostics.Append(diags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
 	storedHash, storedOK := unmarshalUserDataHash(storedBlob)
 
 	userDataReplace := userDataReplaceNeeded(storedHash, storedOK, udState, hexNow)
@@ -599,14 +602,19 @@ func (r *VmResource) Create(ctx context.Context, req resource.CreateRequest, res
 
 	// Seed the user_data change-detection baseline (sha256 of the write-only payload) in
 	// private state, on the same save as state — including the error-but-created path below
-	// — so a created VM never persists without its baseline. This is the ONLY place the
+	// — so a created VM never persists without its baseline. ALWAYS write it: a VM created
+	// WITHOUT user_data gets sha256("") as a "no payload" sentinel (an empty payload is
+	// rejected by the validator, so the sentinel can never collide with a real one), so that
+	// later ADDING user_data is detected as a change and replaces the VM. Absent private
+	// state is thereby reserved for import/upgrade adoption. This is the ONLY place the
 	// baseline is written: user_data changes always force replacement (-> Create), and
 	// apply-time Update config can differ from plan for unknowns, so Update/Read never stamp it.
+	userDataPayload := ""
 	if !configData.UserData.IsNull() && !configData.UserData.IsUnknown() {
-		hashBlob, mErr := marshalUserDataHash(userDataHashHex(configData.UserData.ValueString()))
-		if mErr == nil {
-			resp.Diagnostics.Append(resp.Private.SetKey(ctx, userDataHashPrivateKey, hashBlob)...)
-		}
+		userDataPayload = configData.UserData.ValueString()
+	}
+	if hashBlob, mErr := marshalUserDataHash(userDataHashHex(userDataPayload)); mErr == nil {
+		resp.Diagnostics.Append(resp.Private.SetKey(ctx, userDataHashPrivateKey, hashBlob)...)
 	}
 
 	if waitErr != nil {

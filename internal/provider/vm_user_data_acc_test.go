@@ -121,7 +121,7 @@ func TestAccVm_userData_lifecycle(t *testing.T) {
 					PostApplyPostRefresh: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()},
 				},
 			},
-			{ // Change the payload+hash: the VM must be replaced (cloud-init only runs once).
+			{ // Change the payload: the VM must be replaced (cloud-init only runs once).
 				Config: testAccVmUserDataConfig(name, marker2),
 				ConfigPlanChecks: resource.ConfigPlanChecks{
 					PreApply: []plancheck.PlanCheck{
