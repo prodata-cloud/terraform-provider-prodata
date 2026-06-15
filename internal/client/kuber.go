@@ -62,11 +62,11 @@ type Cluster struct {
 
 // NodePool is the decoded, flattened form of panel-main's NodePoolDTO.
 type NodePool struct {
-	ID               int64
-	Name             string // poolName
-	NodeCount        int
-	NodeSubnet       int
-	CPU              int
+	ID         int64
+	Name       string // poolName
+	NodeCount  int
+	NodeSubnet int
+	CPU        int
 	// RAM is the raw wire value from k8s_node_pools.ram. The create path accepts
 	// workerRam in GB; whether the stored value reads back in GB or MB is not yet
 	// verified on the wire (the resource layer owns unit handling — see step 1.5).
