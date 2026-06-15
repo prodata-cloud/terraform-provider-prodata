@@ -77,6 +77,11 @@ type apiError struct {
 type RequestOpts struct {
 	Region     string
 	ProjectTag string
+	// Lang sets the X-Lang header (e.g. "en") so DB-backed error messages come
+	// back localized. Empty means no header is sent and the server falls back to
+	// its default ("ru"). The Kubernetes client sets "en" on every call (ADR-K1)
+	// so its error strings — which the provider matches on — are stable English.
+	Lang string
 }
 
 // doRequest performs an HTTP request with the standard auth + region/project headers
@@ -106,6 +111,10 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body any, o
 			projectTag = opts.ProjectTag
 		}
 	}
+	lang := ""
+	if opts != nil {
+		lang = opts.Lang
+	}
 
 	// Edge rate limiting (HTTP 429 — e.g. Cloudflare error 1015) rejects the
 	// request before it reaches the API, so retrying is safe even for POST/DELETE:
@@ -127,6 +136,9 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body any, o
 		req.Header.Set("X-API-SECRET", c.apiSecretKey)
 		req.Header.Set("X-Region", region)
 		req.Header.Set("X-Project-Tag", projectTag)
+		if lang != "" {
+			req.Header.Set("X-Lang", lang)
+		}
 
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
