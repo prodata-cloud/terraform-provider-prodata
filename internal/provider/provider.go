@@ -176,5 +176,9 @@ func (p *ProDataProvider) DataSources(ctx context.Context) []func() datasource.D
 		datasources.NewS3BucketsDataSource,
 		datasources.NewLbDataSource,
 		datasources.NewLbsDataSource,
+		datasources.NewK8sClusterDataSource,
+		datasources.NewK8sNodePoolDataSource,
+		datasources.NewK8sVersionsDataSource,
+		datasources.NewK8sFlavorsDataSource,
 	}
 }
