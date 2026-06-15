@@ -430,6 +430,8 @@ func KuberErrorDetail(err error) string {
 			return "A Kubernetes cluster with this name already exists in this region. Choose a different name."
 		case strings.Contains(apiErr.Message, "Node pool with this name already exists"):
 			return "A node pool with this name already exists in this cluster. Choose a different name."
+		case strings.Contains(apiErr.Message, "Cannot delete master node pool"):
+			return "This node pool is a control-plane (master) pool and cannot be deleted via this resource."
 		}
 	}
 	return err.Error()
