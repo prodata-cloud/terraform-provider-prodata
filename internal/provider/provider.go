@@ -156,6 +156,7 @@ func (p *ProDataProvider) Resources(ctx context.Context) []func() resource.Resou
 		resources.NewS3BucketResource,
 		resources.NewLbResource,
 		resources.NewK8sClusterResource,
+		resources.NewK8sNodePoolResource,
 	}
 }
 
