@@ -22,11 +22,11 @@ type K8sVersionsDataSource struct {
 }
 
 type K8sVersionsDataSourceModel struct {
-	Region       types.String        `tfsdk:"region"`
-	ProjectTag   types.String        `tfsdk:"project_tag"`
-	IncludeDebug types.Bool          `tfsdk:"include_debug"`
-	Latest       types.String        `tfsdk:"latest"`
-	Versions     []K8sVersionSummary `tfsdk:"versions"`
+	Region        types.String        `tfsdk:"region"`
+	ProjectTag    types.String        `tfsdk:"project_tag"`
+	IncludeDebug  types.Bool          `tfsdk:"include_debug"`
+	LatestVersion types.String        `tfsdk:"latest_version"`
+	Versions      []K8sVersionSummary `tfsdk:"versions"`
 }
 
 type K8sVersionSummary struct {
@@ -60,10 +60,10 @@ func (d *K8sVersionsDataSource) Schema(_ context.Context, _ datasource.SchemaReq
 			},
 			"include_debug": schema.BoolAttribute{
 				MarkdownDescription: "Include internal debug builds in `versions`. Defaults to false. " +
-					"`latest` never considers debug builds.",
+					"`latest_version` never considers debug builds.",
 				Optional: true,
 			},
-			"latest": schema.StringAttribute{
+			"latest_version": schema.StringAttribute{
 				MarkdownDescription: "The highest non-debug version, by numeric `major.minor.patch` order. " +
 					"Null if no stable version is available.",
 				Computed: true,
@@ -138,9 +138,9 @@ func (d *K8sVersionsDataSource) Read(ctx context.Context, req datasource.ReadReq
 		})
 	}
 	if latest != "" {
-		data.Latest = types.StringValue(latest)
+		data.LatestVersion = types.StringValue(latest)
 	} else {
-		data.Latest = types.StringNull()
+		data.LatestVersion = types.StringNull()
 	}
 
 	tflog.Debug(ctx, "Listed Kubernetes versions", map[string]any{"count": len(data.Versions), "latest": latest})

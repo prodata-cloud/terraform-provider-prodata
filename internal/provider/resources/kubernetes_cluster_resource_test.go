@@ -147,3 +147,24 @@ func TestK8sNameRegex(t *testing.T) {
 		}
 	}
 }
+
+func TestClusterUpgradeConverged(t *testing.T) {
+	const want = "v1.31.4"
+	cases := []struct {
+		name string
+		cl   *client.Cluster
+		ok   bool
+	}{
+		{"converged", &client.Cluster{Status: client.ClusterStatusSuccess, KubeVersion: want, Blocked: false}, true},
+		{"stale version", &client.Cluster{Status: client.ClusterStatusSuccess, KubeVersion: "v1.30.0", Blocked: false}, false},
+		{"still blocked", &client.Cluster{Status: client.ClusterStatusSuccess, KubeVersion: want, Blocked: true}, false},
+		{"not success yet", &client.Cluster{Status: client.ClusterStatusProcessing, KubeVersion: want, Blocked: false}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := clusterUpgradeConverged(tc.cl, want); got != tc.ok {
+				t.Errorf("clusterUpgradeConverged() = %v, want %v", got, tc.ok)
+			}
+		})
+	}
+}

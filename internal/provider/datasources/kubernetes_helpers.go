@@ -1,13 +1,63 @@
 package datasources
 
 import (
+	"context"
 	"strconv"
 	"strings"
 
 	"terraform-provider-prodata/internal/client"
+	"terraform-provider-prodata/internal/tfutil"
 
+	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
+
+// K8sKubeConfigModel is the typed source for the computed kube_config object of
+// the cluster data source: connection fields parsed from the kubeconfig for
+// wiring the kubernetes / helm providers. Mirrors the resource's block.
+type K8sKubeConfigModel struct {
+	Host                 types.String `tfsdk:"host"`
+	ClusterCACertificate types.String `tfsdk:"cluster_ca_certificate"`
+	ClientCertificate    types.String `tfsdk:"client_certificate"`
+	ClientKey            types.String `tfsdk:"client_key"`
+	Token                types.String `tfsdk:"token"`
+	RawConfig            types.String `tfsdk:"raw_config"`
+}
+
+// kubeConfigAttrTypes is the object type of the kube_config block. It must stay in
+// lockstep with K8sKubeConfigModel's tags and the schema (asserted by the
+// schema-consistency tests).
+func kubeConfigAttrTypes() map[string]attr.Type {
+	return map[string]attr.Type{
+		"host":                   types.StringType,
+		"cluster_ca_certificate": types.StringType,
+		"client_certificate":     types.StringType,
+		"client_key":             types.StringType,
+		"token":                  types.StringType,
+		"raw_config":             types.StringType,
+	}
+}
+
+// kubeConfigObject parses the base64 kubeconfig secret into the computed
+// kube_config object, or a null object when the cluster has no kubeconfig yet.
+func kubeConfigObject(ctx context.Context, secret string) types.Object {
+	kc := client.ParseKubeConfig(secret)
+	if kc == nil {
+		return types.ObjectNull(kubeConfigAttrTypes())
+	}
+	obj, diags := types.ObjectValueFrom(ctx, kubeConfigAttrTypes(), K8sKubeConfigModel{
+		Host:                 tfutil.StringOrNull(kc.Host),
+		ClusterCACertificate: tfutil.StringOrNull(kc.ClusterCACertificate),
+		ClientCertificate:    tfutil.StringOrNull(kc.ClientCertificate),
+		ClientKey:            tfutil.StringOrNull(kc.ClientKey),
+		Token:                tfutil.StringOrNull(kc.Token),
+		RawConfig:            tfutil.StringOrNull(kc.Raw),
+	})
+	if diags.HasError() {
+		return types.ObjectNull(kubeConfigAttrTypes())
+	}
+	return obj
+}
 
 // scopeOpts builds a RequestOpts carrying only the region / project_tag overrides
 // that are actually set; an empty field defers to the provider/client default.

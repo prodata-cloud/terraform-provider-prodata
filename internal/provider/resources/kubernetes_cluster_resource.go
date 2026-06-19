@@ -15,6 +15,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework-timeouts/resource/timeouts"
 	"github.com/hashicorp/terraform-plugin-framework-validators/int64validator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
+	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -48,25 +49,25 @@ type K8sClusterResource struct {
 // is a pointer so the framework keeps the block addressable for nested plan
 // modifiers.
 type K8sClusterModel struct {
-	ID                types.Int64          `tfsdk:"id"`
-	Region            types.String         `tfsdk:"region"`
-	ProjectTag        types.String         `tfsdk:"project_tag"`
-	Name              types.String         `tfsdk:"name"`
-	KubernetesVersion types.String         `tfsdk:"kubernetes_version"`
-	IsHA              types.Bool           `tfsdk:"is_ha"`
-	NetworkID         types.Int64          `tfsdk:"network_id"`
-	PodSubnet         types.String         `tfsdk:"pod_subnet"`
-	NodeSubnet        types.Int64          `tfsdk:"node_subnet"`
-	NodeIPRange       types.String         `tfsdk:"node_ip_range"`
-	PublicKey         types.String         `tfsdk:"public_key"`
-	AuthorizeSSH      types.Bool           `tfsdk:"authorize_ssh"`
-	NeedPublicIP      types.Bool           `tfsdk:"need_public_ip"`
-	MasterFlavorID    types.Int64          `tfsdk:"master_flavor_id"`
-	DefaultNodePool   *K8sDefaultPoolModel `tfsdk:"default_node_pool"`
+	ID                    types.Int64          `tfsdk:"id"`
+	Region                types.String         `tfsdk:"region"`
+	ProjectTag            types.String         `tfsdk:"project_tag"`
+	Name                  types.String         `tfsdk:"name"`
+	KubernetesVersion     types.String         `tfsdk:"kubernetes_version"`
+	HighAvailability      types.Bool           `tfsdk:"high_availability"`
+	NetworkID             types.Int64          `tfsdk:"network_id"`
+	PodCIDR               types.String         `tfsdk:"pod_cidr"`
+	NodeSubnet            types.Int64          `tfsdk:"node_subnet"`
+	NodeIPRange           types.String         `tfsdk:"node_ip_range"`
+	PublicKey             types.String         `tfsdk:"public_key"`
+	SSHAccessEnabled      types.Bool           `tfsdk:"ssh_access_enabled"`
+	PublicEndpointEnabled types.Bool           `tfsdk:"public_endpoint_enabled"`
+	MasterFlavorID        types.Int64          `tfsdk:"master_flavor_id"`
+	DefaultNodePool       *K8sDefaultPoolModel `tfsdk:"default_node_pool"`
 
 	// Computed, server-owned.
 	APIEndpoint       types.String   `tfsdk:"api_endpoint"`
-	Kubeconfig        types.String   `tfsdk:"kubeconfig"`
+	KubeConfig        types.Object   `tfsdk:"kube_config"`
 	SSHKeyEncoded     types.String   `tfsdk:"ssh_key_encoded"`
 	PrivateKeyEncoded types.String   `tfsdk:"private_key_encoded"`
 	Status            types.String   `tfsdk:"status"`
@@ -77,6 +78,59 @@ type K8sClusterModel struct {
 	IPAddressesCount  types.Int64    `tfsdk:"ip_addresses_count"`
 	DateCreated       types.String   `tfsdk:"date_created"`
 	Timeouts          timeouts.Value `tfsdk:"timeouts"`
+}
+
+// K8sKubeConfigModel is the structured kube_config block: the connection fields
+// parsed from the cluster's kubeconfig so the kubernetes/helm providers can be
+// wired directly. It is the typed source for the computed kube_config object (the
+// model field itself is a types.Object so it can hold the unknown value Terraform
+// plans for it before apply). The certificate fields are base64 as they appear in
+// the kubeconfig (wrap in base64decode()).
+type K8sKubeConfigModel struct {
+	Host                 types.String `tfsdk:"host"`
+	ClusterCACertificate types.String `tfsdk:"cluster_ca_certificate"`
+	ClientCertificate    types.String `tfsdk:"client_certificate"`
+	ClientKey            types.String `tfsdk:"client_key"`
+	Token                types.String `tfsdk:"token"`
+	RawConfig            types.String `tfsdk:"raw_config"`
+}
+
+// kubeConfigAttrTypes is the object type of the kube_config block, used to build
+// the value and to set it unknown in ModifyPlan when a version/master change may
+// rotate the credentials. It must stay in lockstep with K8sKubeConfigModel's tags
+// and the schema (asserted by the schema-consistency tests).
+func kubeConfigAttrTypes() map[string]attr.Type {
+	return map[string]attr.Type{
+		"host":                   types.StringType,
+		"cluster_ca_certificate": types.StringType,
+		"client_certificate":     types.StringType,
+		"client_key":             types.StringType,
+		"token":                  types.StringType,
+		"raw_config":             types.StringType,
+	}
+}
+
+// kubeConfigObject parses the base64 kubeconfig secret into the computed
+// kube_config object, or a null object when the cluster has no kubeconfig yet
+// (NEW/PROCESSING). A construction error can only mean a static drift between the
+// struct and kubeConfigAttrTypes (guarded by a unit test), so it fails safe to null.
+func kubeConfigObject(ctx context.Context, secret string) types.Object {
+	kc := client.ParseKubeConfig(secret)
+	if kc == nil {
+		return types.ObjectNull(kubeConfigAttrTypes())
+	}
+	obj, diags := types.ObjectValueFrom(ctx, kubeConfigAttrTypes(), K8sKubeConfigModel{
+		Host:                 tfutil.StringOrNull(kc.Host),
+		ClusterCACertificate: tfutil.StringOrNull(kc.ClusterCACertificate),
+		ClientCertificate:    tfutil.StringOrNull(kc.ClientCertificate),
+		ClientKey:            tfutil.StringOrNull(kc.ClientKey),
+		Token:                tfutil.StringOrNull(kc.Token),
+		RawConfig:            tfutil.StringOrNull(kc.Raw),
+	})
+	if diags.HasError() {
+		return types.ObjectNull(kubeConfigAttrTypes())
+	}
+	return obj
 }
 
 // K8sDefaultPoolModel is the inline default_node_pool block. vcpu/ram/disk_size
@@ -218,7 +272,7 @@ func (r *K8sClusterResource) Schema(ctx context.Context, _ resource.SchemaReques
 					"(asynchronous rollout).",
 				Required: true,
 			},
-			"is_ha": schema.BoolAttribute{
+			"high_availability": schema.BoolAttribute{
 				MarkdownDescription: "Highly-available control plane (multiple master nodes). Defaults to false. " +
 					"Changing it forces a new resource.",
 				Optional:      true,
@@ -227,12 +281,14 @@ func (r *K8sClusterResource) Schema(ctx context.Context, _ resource.SchemaReques
 				PlanModifiers: []planmodifier.Bool{boolplanmodifier.RequiresReplace()},
 			},
 			"network_id": schema.Int64Attribute{
-				MarkdownDescription: "Local network ID the cluster's nodes attach to. Changing it forces a new resource.",
-				Required:            true,
-				PlanModifiers:       []planmodifier.Int64{int64planmodifier.RequiresReplace()},
-				Validators:          []validator.Int64{int64validator.AtLeast(1)},
+				MarkdownDescription: "Local network ID the cluster's nodes attach to. Changing it forces a new " +
+					"resource. The API does not return this value, so it is write-once: preserved across reads " +
+					"and accepted from configuration without replacement after `terraform import`.",
+				Required:      true,
+				PlanModifiers: []planmodifier.Int64{WriteOnceInt64()},
+				Validators:    []validator.Int64{int64validator.AtLeast(1)},
 			},
-			"pod_subnet": schema.StringAttribute{
+			"pod_cidr": schema.StringAttribute{
 				MarkdownDescription: "Pod network CIDR. Must be a `/16` (e.g. `10.244.0.0/16`). " +
 					"Changing it forces a new resource.",
 				Required:      true,
@@ -246,7 +302,7 @@ func (r *K8sClusterResource) Schema(ctx context.Context, _ resource.SchemaReques
 				MarkdownDescription: "Node subnet prefix length used to carve node addressing out of the local " +
 					"network. Changing it forces a new resource.",
 				Required:      true,
-				PlanModifiers: []planmodifier.Int64{int64planmodifier.RequiresReplace()},
+				PlanModifiers: []planmodifier.Int64{WriteOnceInt64()},
 			},
 			"node_ip_range": schema.StringAttribute{
 				MarkdownDescription: "Control-plane IP range within the local network, as `start-end` " +
@@ -256,20 +312,20 @@ func (r *K8sClusterResource) Schema(ctx context.Context, _ resource.SchemaReques
 				PlanModifiers: []planmodifier.String{WriteOnceString()},
 			},
 			"public_key": schema.StringAttribute{
-				MarkdownDescription: "SSH public key authorized on the nodes (used when `authorize_ssh` is true). " +
+				MarkdownDescription: "SSH public key authorized on the nodes (used when `ssh_access_enabled` is true). " +
 					"Write-once: not read back from the API. Changing it forces a new resource.",
 				Optional:      true,
 				PlanModifiers: []planmodifier.String{WriteOnceString()},
 			},
-			"authorize_ssh": schema.BoolAttribute{
+			"ssh_access_enabled": schema.BoolAttribute{
 				MarkdownDescription: "Authorize the `public_key` for SSH access to the nodes. Defaults to false. " +
 					"Changing it forces a new resource.",
 				Optional:      true,
 				Computed:      true,
 				Default:       booldefault.StaticBool(false),
-				PlanModifiers: []planmodifier.Bool{boolplanmodifier.RequiresReplace()},
+				PlanModifiers: []planmodifier.Bool{WriteOnceBool()},
 			},
-			"need_public_ip": schema.BoolAttribute{
+			"public_endpoint_enabled": schema.BoolAttribute{
 				MarkdownDescription: "Provision a public IP for the cluster API endpoint. Defaults to false. " +
 					"Changing it forces a new resource.",
 				Optional:      true,
@@ -279,12 +335,10 @@ func (r *K8sClusterResource) Schema(ctx context.Context, _ resource.SchemaReques
 			},
 			"master_flavor_id": schema.Int64Attribute{
 				MarkdownDescription: "Master node configuration (flavor) ID, from the " +
-					"`prodata_kubernetes_flavors` data source. NOTE: in this provider version, changing the " +
-					"master flavor forces a new resource (a destructive replace of the whole cluster). " +
-					"In-place master resizing will become available in a later release.",
-				Required:      true,
-				PlanModifiers: []planmodifier.Int64{int64planmodifier.RequiresReplace()},
-				Validators:    []validator.Int64{int64validator.AtLeast(1)},
+					"`prodata_kubernetes_flavors` data source. Updated in place: changing it triggers a rolling " +
+					"replacement of the control-plane nodes (the cluster goes `PROCESSING` until it converges).",
+				Required:   true,
+				Validators: []validator.Int64{int64validator.AtLeast(1)},
 			},
 			"default_node_pool": schema.SingleNestedAttribute{
 				MarkdownDescription: "The cluster's default worker node pool, created with the cluster. " +
@@ -358,10 +412,39 @@ func (r *K8sClusterResource) Schema(ctx context.Context, _ resource.SchemaReques
 				MarkdownDescription: "Kubernetes API server endpoint.",
 				Computed:            true,
 			},
-			"kubeconfig": schema.StringAttribute{
-				MarkdownDescription: "Base64-encoded kubeconfig for cluster-admin access. Sensitive.",
-				Computed:            true,
-				Sensitive:           true,
+			"kube_config": schema.SingleNestedAttribute{
+				MarkdownDescription: "Structured cluster credentials parsed from the kubeconfig, for wiring the " +
+					"`kubernetes` and `helm` providers directly. Sensitive. Null until the cluster reaches `SUCCESS`. " +
+					"The certificate fields are base64-encoded exactly as they appear in the kubeconfig — wrap them in " +
+					"`base64decode()` when passing them to the kubernetes provider.",
+				Computed:  true,
+				Sensitive: true,
+				Attributes: map[string]schema.Attribute{
+					"host": schema.StringAttribute{
+						MarkdownDescription: "Kubernetes API server URL.",
+						Computed:            true,
+					},
+					"cluster_ca_certificate": schema.StringAttribute{
+						MarkdownDescription: "Base64-encoded cluster CA certificate.",
+						Computed:            true,
+					},
+					"client_certificate": schema.StringAttribute{
+						MarkdownDescription: "Base64-encoded client certificate for cluster-admin access.",
+						Computed:            true,
+					},
+					"client_key": schema.StringAttribute{
+						MarkdownDescription: "Base64-encoded client key for cluster-admin access.",
+						Computed:            true,
+					},
+					"token": schema.StringAttribute{
+						MarkdownDescription: "Bearer token, when the cluster uses token auth (empty otherwise).",
+						Computed:            true,
+					},
+					"raw_config": schema.StringAttribute{
+						MarkdownDescription: "The full kubeconfig as plain YAML.",
+						Computed:            true,
+					},
+				},
 			},
 			"ssh_key_encoded": schema.StringAttribute{
 				MarkdownDescription: "Base64-encoded SSH public key registered on the nodes.",
@@ -438,7 +521,7 @@ func (r *K8sClusterResource) ValidateConfig(ctx context.Context, req resource.Va
 				"Remove node_count (its live value is exported as a computed attribute).",
 		)
 	}
-	if p.Autoscaling == nil && !nodeCountSet {
+	if p.Autoscaling == nil && p.NodeCount.IsNull() {
 		resp.Diagnostics.AddAttributeError(
 			path.Root("default_node_pool").AtName("node_count"),
 			"node_count is required without autoscaling",
@@ -492,12 +575,15 @@ func (r *K8sClusterResource) ModifyPlan(ctx context.Context, req resource.Modify
 	}
 
 	versionChanged := !plan.KubernetesVersion.Equal(state.KubernetesVersion)
+	masterChanged := !plan.MasterFlavorID.Equal(state.MasterFlavorID)
 	poolChanged := defaultPoolChanged(state.DefaultNodePool, plan.DefaultNodePool)
 
-	// ADR-K3: a version upgrade rewrites the kubeconfig / api_endpoint and rolls the
-	// control plane, so those (and the credentials) become unknown in the plan.
-	if versionChanged {
-		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("kubeconfig"), types.StringUnknown())...)
+	// ADR-K3: a version upgrade or a master-flavor change rolls the control plane and
+	// can rewrite the kubeconfig / api_endpoint, so those (and the credentials) become
+	// unknown in the plan. The kube_config is a nested object, so it is blanked as a
+	// whole ObjectUnknown.
+	if versionChanged || masterChanged {
+		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("kube_config"), types.ObjectUnknown(kubeConfigAttrTypes()))...)
 		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("api_endpoint"), types.StringUnknown())...)
 		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("ssh_key_encoded"), types.StringUnknown())...)
 		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("private_key_encoded"), types.StringUnknown())...)
@@ -506,7 +592,7 @@ func (r *K8sClusterResource) ModifyPlan(ctx context.Context, req resource.Modify
 	// Any in-place mutation transits the cluster through PROCESSING / blocked and
 	// changes the pool/node counts, so the volatile status fields must be unknown
 	// to avoid a "provider produced inconsistent result after apply" error.
-	if versionChanged || poolChanged {
+	if versionChanged || poolChanged || masterChanged {
 		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("status"), types.StringUnknown())...)
 		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("blocked"), types.BoolUnknown())...)
 		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("node_pool_count"), types.Int64Unknown())...)
@@ -578,13 +664,13 @@ func (r *K8sClusterResource) Create(ctx context.Context, req resource.CreateRequ
 		Addresses:          []string{plan.NodeIPRange.ValueString()},
 		KuberVersion:       plan.KubernetesVersion.ValueString(),
 		NodePoolName:       pool.Name.ValueString(),
-		NeedPublicIP:       plan.NeedPublicIP.ValueBool(),
+		NeedPublicIP:       plan.PublicEndpointEnabled.ValueBool(),
 		PublicKey:          plan.PublicKey.ValueString(),
-		AuthorizeSSH:       plan.AuthorizeSSH.ValueBool(),
-		PodSubnet:          plan.PodSubnet.ValueString(),
+		AuthorizeSSH:       plan.SSHAccessEnabled.ValueBool(),
+		PodSubnet:          plan.PodCIDR.ValueString(),
 		NodeSubnet:         int(plan.NodeSubnet.ValueInt64()),
 		LocalNetID:         plan.NetworkID.ValueInt64(),
-		IsHA:               plan.IsHA.ValueBool(),
+		IsHA:               plan.HighAvailability.ValueBool(),
 		MasterNodeConfigID: plan.MasterFlavorID.ValueInt64(),
 		AutoScaleEnabled:   autoscale,
 	}
@@ -635,7 +721,7 @@ func (r *K8sClusterResource) Create(ctx context.Context, req resource.CreateRequ
 		return
 	}
 
-	final, waitErr := r.waitForClusterReady(ctx, created.ID, opts)
+	final, waitErr := r.waitForClusterReady(ctx, created.ID, "", opts)
 	result := final
 	if result == nil {
 		result = created
@@ -738,14 +824,32 @@ func (r *K8sClusterResource) Update(ctx context.Context, req resource.UpdateRequ
 			resp.Diagnostics.AddError("Unable to upgrade Kubernetes version", client.KuberErrorDetail(err))
 			return
 		}
-		if _, waitErr := r.waitForClusterReady(ctx, id, opts); waitErr != nil {
+		if _, waitErr := r.waitForClusterReady(ctx, id, plan.KubernetesVersion.ValueString(), opts); waitErr != nil {
 			resp.Diagnostics.AddError("Cluster did not stabilize after version upgrade",
 				fmt.Sprintf("cluster %d: %s", id, waitErr.Error()))
 			return
 		}
 	}
 
-	// 2) Default pool scale / autoscaling transitions (async — wait for the pool
+	// 2) Master node configuration (flavor) change (in-place, async). The backend
+	// rolls the control plane and sets the cluster PROCESSING/blocked; wait for it to
+	// converge on the requested flavor so a transient snapshot is not persisted.
+	if !plan.MasterFlavorID.Equal(state.MasterFlavorID) {
+		if err := r.c.UpdateMasterConfig(ctx, client.UpdateMasterConfigRequest{
+			ClusterID:          id,
+			MasterNodeConfigID: plan.MasterFlavorID.ValueInt64(),
+		}, opts); err != nil {
+			resp.Diagnostics.AddError("Unable to update master node configuration", client.KuberErrorDetail(err))
+			return
+		}
+		if _, waitErr := r.waitForMasterConfigReady(ctx, id, plan.MasterFlavorID.ValueInt64(), opts); waitErr != nil {
+			resp.Diagnostics.AddError("Cluster did not stabilize after master configuration change",
+				fmt.Sprintf("cluster %d: %s", id, waitErr.Error()))
+			return
+		}
+	}
+
+	// 3) Default pool scale / autoscaling transitions (async — wait for the pool
 	// to settle so we don't persist a transient PROCESSING snapshot).
 	if state.DefaultNodePool != nil && plan.DefaultNodePool != nil {
 		poolID := state.DefaultNodePool.ID.ValueInt64()
@@ -763,16 +867,27 @@ func (r *K8sClusterResource) Update(ctx context.Context, req resource.UpdateRequ
 		}
 	}
 
-	final, _ := r.c.GetCluster(ctx, id, opts)
-	if final != nil {
-		region := valueOrDefault(state.Region, r.c.Region)
-		projectTag := valueOrDefault(state.ProjectTag, r.c.ProjectTag)
-		poolID := int64(0)
-		if state.DefaultNodePool != nil {
-			poolID = state.DefaultNodePool.ID.ValueInt64()
-		}
-		r.applyServerState(ctx, &plan, final, poolID, region, projectTag, false, nil)
+	// Read the cluster back to capture server-owned fields. ModifyPlan marked the
+	// volatile computed fields unknown for this update, so they must be resolved from
+	// a fresh read before writing state — persisting an unknown trips Terraform's
+	// "inconsistent result after apply" check. If the read keeps failing, keep the
+	// prior state and ask for a refresh rather than corrupt it.
+	final, readErr := r.getClusterWithRetry(ctx, id, opts)
+	if readErr != nil {
+		resp.Diagnostics.AddError(
+			"Cluster updated but its new state could not be read back",
+			fmt.Sprintf("cluster %d was modified successfully but reading it back failed: %s. "+
+				"Run `terraform refresh` to reconcile Terraform state.", id, client.KuberErrorDetail(readErr)),
+		)
+		return
 	}
+	region := valueOrDefault(state.Region, r.c.Region)
+	projectTag := valueOrDefault(state.ProjectTag, r.c.ProjectTag)
+	poolID := int64(0)
+	if state.DefaultNodePool != nil {
+		poolID = state.DefaultNodePool.ID.ValueInt64()
+	}
+	r.applyServerState(ctx, &plan, final, poolID, region, projectTag, false, nil)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
@@ -967,26 +1082,79 @@ func (r *K8sClusterResource) findClusterIDByName(ctx context.Context, name strin
 // the one whose name equals the configured default pool name (lowercased). On any
 // ambiguity or failure it returns 0 — the caller still has valid cluster state.
 func (r *K8sClusterResource) discoverDefaultPoolID(ctx context.Context, clusterID int64, poolName string, opts *client.RequestOpts) int64 {
-	pools, err := r.c.ListNodePools(ctx, clusterID, opts)
-	if err != nil {
-		tflog.Warn(ctx, "Could not list node pools to resolve default pool id", map[string]any{
-			"cluster_id": clusterID, "error": err.Error(),
-		})
-		return 0
-	}
 	want := strings.ToLower(poolName)
-	for i := range pools {
-		if strings.ToLower(pools[i].Name) == want {
-			return pools[i].ID
+	for attempt := 0; ; attempt++ {
+		pools, err := r.c.ListNodePools(ctx, clusterID, opts)
+		if err == nil {
+			for i := range pools {
+				if strings.ToLower(pools[i].Name) == want {
+					return pools[i].ID
+				}
+			}
+		} else {
+			tflog.Warn(ctx, "Could not list node pools to resolve default pool id", map[string]any{
+				"cluster_id": clusterID, "error": err.Error(), "attempt": attempt,
+			})
+		}
+		if attempt >= k8sMaxConsecutiveErrs {
+			return 0
+		}
+		select {
+		case <-ctx.Done():
+			return 0
+		case <-time.After(k8sPollInterval):
 		}
 	}
-	return 0
 }
 
-// waitForClusterReady polls until the cluster reaches a terminal status. SUCCESS
-// with a non-empty kubeconfig is success (ADR-K3); FAIL or DELETED is a terminal
-// error. Tolerates up to k8sMaxConsecutiveErrs transient errors (ADR-K5).
-func (r *K8sClusterResource) waitForClusterReady(ctx context.Context, id int64, opts *client.RequestOpts) (*client.Cluster, error) {
+// clusterUpgradeConverged reports whether an in-place version upgrade has settled:
+// the cluster is SUCCESS, reports the requested version, and has no operation still
+// in flight. It guards waitForClusterReady's upgrade mode against returning on the
+// stale pre-upgrade SUCCESS snapshot before the control plane has rolled.
+func clusterUpgradeConverged(cl *client.Cluster, wantVersion string) bool {
+	return cl.Status == client.ClusterStatusSuccess && cl.KubeVersion == wantVersion && !cl.Blocked
+}
+
+// clusterMasterConverged reports whether an in-place master-flavor change has
+// settled: the cluster is SUCCESS, reports the requested master flavor, and has no
+// operation still in flight. The backend swaps the master configuration and flips
+// the cluster to PROCESSING/blocked synchronously, clearing blocked only once the
+// control-plane roll completes — so this is edge-correct even if polled before the
+// status has visibly flipped.
+func clusterMasterConverged(cl *client.Cluster, wantFlavorID int64) bool {
+	return cl.Status == client.ClusterStatusSuccess &&
+		cl.MasterNodeConfig != nil && cl.MasterNodeConfig.ID == wantFlavorID && !cl.Blocked
+}
+
+// getClusterWithRetry reads a cluster, tolerating up to k8sMaxConsecutiveErrs
+// transient errors so a post-mutation read-back is not derailed by a transient
+// blip. Returns the last error if every attempt fails.
+func (r *K8sClusterResource) getClusterWithRetry(ctx context.Context, id int64, opts *client.RequestOpts) (*client.Cluster, error) {
+	var lastErr error
+	for attempt := 0; ; attempt++ {
+		cl, err := r.c.GetCluster(ctx, id, opts)
+		if err == nil {
+			return cl, nil
+		}
+		lastErr = err
+		if attempt >= k8sMaxConsecutiveErrs {
+			return nil, lastErr
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(k8sPollInterval):
+		}
+	}
+}
+
+// waitForClusterReady polls until the cluster reaches the desired state. In create
+// mode (wantVersion == "") SUCCESS with a non-empty kubeconfig is success, with a
+// bounded grace for the lazily-fetched kubeconfig (G5). In upgrade mode
+// (wantVersion != "") it waits for the cluster to settle on the requested version
+// (clusterUpgradeConverged). FAIL or DELETED is a terminal error. Tolerates up to
+// k8sMaxConsecutiveErrs transient errors (ADR-K5).
+func (r *K8sClusterResource) waitForClusterReady(ctx context.Context, id int64, wantVersion string, opts *client.RequestOpts) (*client.Cluster, error) {
 	var consecutiveErrs int
 	var last *client.Cluster
 	var kubeconfigDeadline time.Time
@@ -1000,17 +1168,22 @@ func (r *K8sClusterResource) waitForClusterReady(ctx context.Context, id int64, 
 			tflog.Debug(ctx, "Polling cluster", map[string]any{"id": id, "status": cl.Status})
 			switch cl.Status {
 			case client.ClusterStatusSuccess:
-				if cl.Kubeconfig != "" {
-					return cl, nil
-				}
-				// SUCCESS but the kubeconfig is fetched lazily server-side (G5) and
-				// can lag. Give it a bounded grace, then accept SUCCESS rather than
-				// burn the whole create timeout tainting a usable cluster (ADR-K3).
-				// The caller warns when the kubeconfig is still empty.
-				if kubeconfigDeadline.IsZero() {
-					kubeconfigDeadline = time.Now().Add(k8sKubeconfigGrace)
-				} else if !time.Now().Before(kubeconfigDeadline) {
-					return cl, nil
+				// Converged means create mode -> SUCCESS, or upgrade mode -> SUCCESS on
+				// the requested version with no operation still in flight. Until then,
+				// keep polling rather than return a stale pre-upgrade snapshot.
+				if wantVersion == "" || clusterUpgradeConverged(cl, wantVersion) {
+					if cl.Kubeconfig != "" {
+						return cl, nil
+					}
+					// SUCCESS but the kubeconfig (and private key) are fetched lazily
+					// server-side (G5) and can lag — also right after an upgrade rewrites
+					// them. Give it a bounded grace, then accept SUCCESS rather than burn
+					// the timeout (ADR-K3). The caller warns when it is still empty.
+					if kubeconfigDeadline.IsZero() {
+						kubeconfigDeadline = time.Now().Add(k8sKubeconfigGrace)
+					} else if !time.Now().Before(kubeconfigDeadline) {
+						return cl, nil
+					}
 				}
 			case client.ClusterStatusFail, client.ClusterStatusDeleted:
 				return cl, fmt.Errorf("terminal status %s", cl.Status)
@@ -1020,6 +1193,59 @@ func (r *K8sClusterResource) waitForClusterReady(ctx context.Context, id int64, 
 		default:
 			consecutiveErrs++
 			tflog.Warn(ctx, "Transient error polling cluster", map[string]any{
+				"id": id, "error": err.Error(), "consecutive_errors": consecutiveErrs,
+			})
+			if consecutiveErrs > k8sMaxConsecutiveErrs {
+				return last, fmt.Errorf("polling failed after %d consecutive errors: %w", consecutiveErrs, err)
+			}
+		}
+
+		select {
+		case <-ctx.Done():
+			return last, ctx.Err()
+		case <-time.After(k8sPollInterval):
+		}
+	}
+}
+
+// waitForMasterConfigReady polls until an in-place master-flavor change has
+// converged (clusterMasterConverged): SUCCESS, on the requested flavor, no longer
+// blocked. FAIL or DELETED is a terminal error. Like the upgrade path it allows a
+// bounded grace for the lazily re-fetched kubeconfig (the master swap can rewrite
+// it), then accepts SUCCESS rather than burning the timeout. Tolerates up to
+// k8sMaxConsecutiveErrs transient errors (ADR-K5).
+func (r *K8sClusterResource) waitForMasterConfigReady(ctx context.Context, id, wantFlavorID int64, opts *client.RequestOpts) (*client.Cluster, error) {
+	var consecutiveErrs int
+	var last *client.Cluster
+	var kubeconfigDeadline time.Time
+
+	for {
+		cl, err := r.c.GetCluster(ctx, id, opts)
+		switch {
+		case err == nil:
+			consecutiveErrs = 0
+			last = cl
+			tflog.Debug(ctx, "Polling cluster (master config)", map[string]any{"id": id, "status": cl.Status})
+			switch cl.Status {
+			case client.ClusterStatusSuccess:
+				if clusterMasterConverged(cl, wantFlavorID) {
+					if cl.Kubeconfig != "" {
+						return cl, nil
+					}
+					if kubeconfigDeadline.IsZero() {
+						kubeconfigDeadline = time.Now().Add(k8sKubeconfigGrace)
+					} else if !time.Now().Before(kubeconfigDeadline) {
+						return cl, nil
+					}
+				}
+			case client.ClusterStatusFail, client.ClusterStatusDeleted:
+				return cl, fmt.Errorf("terminal status %s", cl.Status)
+			}
+		case client.IsKuberNotFound(err):
+			return last, fmt.Errorf("cluster %d disappeared while waiting", id)
+		default:
+			consecutiveErrs++
+			tflog.Warn(ctx, "Transient error polling cluster (master config)", map[string]any{
 				"id": id, "error": err.Error(), "consecutive_errors": consecutiveErrs,
 			})
 			if consecutiveErrs > k8sMaxConsecutiveErrs {
@@ -1105,12 +1331,12 @@ func (r *K8sClusterResource) applyServerState(ctx context.Context, m *K8sCluster
 	m.ProjectTag = types.StringValue(projectTag)
 	m.Name = types.StringValue(cl.Name)
 	m.KubernetesVersion = types.StringValue(cl.KubeVersion)
-	m.IsHA = types.BoolValue(cl.IsHA)
-	m.NeedPublicIP = types.BoolValue(cl.IsPublic)
-	m.PodSubnet = types.StringValue(cl.PodSubnet)
+	m.HighAvailability = types.BoolValue(cl.IsHA)
+	m.PublicEndpointEnabled = types.BoolValue(cl.IsPublic)
+	m.PodCIDR = types.StringValue(cl.PodSubnet)
 
 	m.APIEndpoint = tfutil.StringOrNull(cl.APIEndpoint)
-	m.Kubeconfig = tfutil.StringOrNull(cl.Kubeconfig)
+	m.KubeConfig = kubeConfigObject(ctx, cl.Kubeconfig)
 	m.SSHKeyEncoded = tfutil.StringOrNull(cl.SSHKeyEncoded)
 	m.PrivateKeyEncoded = tfutil.StringOrNull(cl.PrivateKeyEncoded)
 	m.Status = types.StringValue(cl.Status)
@@ -1178,8 +1404,19 @@ func (r *K8sClusterResource) applyDefaultPoolState(ctx context.Context, m *K8sCl
 				)
 			}
 			m.DefaultNodePool = nil
-		} else if defaultPoolID != 0 {
-			m.DefaultNodePool.ID = types.Int64Value(defaultPoolID)
+		} else {
+			// Create/Update: a transient discovery/fetch miss must not leave the
+			// block's computed fields unknown in state (that fails Terraform's
+			// consistency check). Pin them to concrete known values; a later refresh
+			// reconciles the real id/count.
+			if defaultPoolID != 0 {
+				m.DefaultNodePool.ID = types.Int64Value(defaultPoolID)
+			} else if m.DefaultNodePool.ID.IsUnknown() {
+				m.DefaultNodePool.ID = types.Int64Null()
+			}
+			if m.DefaultNodePool.NodeCount.IsUnknown() {
+				m.DefaultNodePool.NodeCount = types.Int64Null()
+			}
 		}
 		return
 	}
@@ -1217,10 +1454,28 @@ func (r *K8sClusterResource) discoverDefaultPool(ctx context.Context, clusterID 
 func (r *K8sClusterResource) fetchPool(ctx context.Context, poolID int64, poolName string, clusterID int64, region, projectTag string) *client.NodePool {
 	opts := &client.RequestOpts{Region: region, ProjectTag: projectTag}
 	if poolID != 0 {
-		if pool, err := r.c.GetNodePool(ctx, poolID, opts); err == nil {
+		pool, err := r.c.GetNodePool(ctx, poolID, opts)
+		if err == nil {
 			return pool
 		}
+		if client.IsKuberNotFound(err) {
+			// Definitive: this id is gone (deleted out of band). Do NOT fall back to a
+			// name match — it could adopt a different pool that shares the name.
+			return nil
+		}
+		// Transient error: recover the SAME pool by id from the cluster's list.
+		pools, lerr := r.c.ListNodePools(ctx, clusterID, opts)
+		if lerr != nil {
+			return nil
+		}
+		for i := range pools {
+			if pools[i].ID == poolID {
+				return &pools[i]
+			}
+		}
+		return nil
 	}
+	// id unknown (create-time discovery / post-import): resolve by name.
 	pools, err := r.c.ListNodePools(ctx, clusterID, opts)
 	if err != nil {
 		return nil
