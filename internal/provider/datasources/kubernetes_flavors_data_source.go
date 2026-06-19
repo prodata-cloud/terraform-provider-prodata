@@ -25,19 +25,19 @@ type K8sFlavorsDataSource struct {
 // endpoint is parameterized by HA, so when is_ha is omitted both sets are fetched
 // and merged; when set, only that set is returned.
 type K8sFlavorsDataSourceModel struct {
-	Region     types.String       `tfsdk:"region"`
-	ProjectTag types.String       `tfsdk:"project_tag"`
-	IsHA       types.Bool         `tfsdk:"is_ha"`
-	Flavors    []K8sFlavorSummary `tfsdk:"flavors"`
+	Region           types.String       `tfsdk:"region"`
+	ProjectTag       types.String       `tfsdk:"project_tag"`
+	HighAvailability types.Bool         `tfsdk:"high_availability"`
+	Flavors          []K8sFlavorSummary `tfsdk:"flavors"`
 }
 
 type K8sFlavorSummary struct {
-	ID       types.Int64 `tfsdk:"id"`
-	VCPU     types.Int64 `tfsdk:"vcpu"`
-	RAM      types.Int64 `tfsdk:"ram"`
-	DiskSize types.Int64 `tfsdk:"disk_size"`
-	IsHA     types.Bool  `tfsdk:"is_ha"`
-	RegionID types.Int64 `tfsdk:"region_id"`
+	ID               types.Int64 `tfsdk:"id"`
+	VCPU             types.Int64 `tfsdk:"vcpu"`
+	RAM              types.Int64 `tfsdk:"ram"`
+	DiskSize         types.Int64 `tfsdk:"disk_size"`
+	HighAvailability types.Bool  `tfsdk:"high_availability"`
+	RegionID         types.Int64 `tfsdk:"region_id"`
 }
 
 func NewK8sFlavorsDataSource() datasource.DataSource {
@@ -51,8 +51,8 @@ func (d *K8sFlavorsDataSource) Metadata(_ context.Context, req datasource.Metada
 func (d *K8sFlavorsDataSource) Schema(_ context.Context, _ datasource.SchemaRequest, resp *datasource.SchemaResponse) {
 	resp.Schema = schema.Schema{
 		MarkdownDescription: "List the master-node configurations (flavors) available for the resolved region, " +
-			"used for the `master_flavor_id` of a `prodata_kubernetes_cluster`. When `is_ha` is omitted, both " +
-			"HA and non-HA flavors are returned.",
+			"used for the `master_flavor_id` of a `prodata_kubernetes_cluster`. When `high_availability` is omitted, " +
+			"both HA and non-HA flavors are returned.",
 		Attributes: map[string]schema.Attribute{
 			"region": schema.StringAttribute{
 				MarkdownDescription: "Region ID override. If omitted, uses the provider default.",
@@ -62,7 +62,7 @@ func (d *K8sFlavorsDataSource) Schema(_ context.Context, _ datasource.SchemaRequ
 				MarkdownDescription: "Project tag override. If omitted, uses the provider default.",
 				Optional:            true,
 			},
-			"is_ha": schema.BoolAttribute{
+			"high_availability": schema.BoolAttribute{
 				MarkdownDescription: "Restrict the result to highly-available (`true`) or single-master (`false`) " +
 					"flavors. If omitted, both are returned.",
 				Optional: true,
@@ -88,7 +88,7 @@ func (d *K8sFlavorsDataSource) Schema(_ context.Context, _ datasource.SchemaRequ
 							MarkdownDescription: "Disk size per master node, in GB.",
 							Computed:            true,
 						},
-						"is_ha": schema.BoolAttribute{
+						"high_availability": schema.BoolAttribute{
 							MarkdownDescription: "Whether this flavor provisions a highly-available control plane.",
 							Computed:            true,
 						},
@@ -126,8 +126,8 @@ func (d *K8sFlavorsDataSource) Read(ctx context.Context, req datasource.ReadRequ
 	opts := scopeOpts(data.Region, data.ProjectTag)
 
 	var haValues []bool
-	if !data.IsHA.IsNull() && !data.IsHA.IsUnknown() {
-		haValues = []bool{data.IsHA.ValueBool()}
+	if !data.HighAvailability.IsNull() && !data.HighAvailability.IsUnknown() {
+		haValues = []bool{data.HighAvailability.ValueBool()}
 	} else {
 		// Endpoint is parameterized by HA; fetch both and merge.
 		haValues = []bool{false, true}
@@ -148,12 +148,12 @@ func (d *K8sFlavorsDataSource) Read(ctx context.Context, req datasource.ReadRequ
 	data.Flavors = make([]K8sFlavorSummary, 0, len(configs))
 	for _, c := range configs {
 		data.Flavors = append(data.Flavors, K8sFlavorSummary{
-			ID:       types.Int64Value(c.ID),
-			VCPU:     types.Int64Value(int64(c.CPU)),
-			RAM:      types.Int64Value(int64(c.RAM)),
-			DiskSize: types.Int64Value(int64(c.SSD)),
-			IsHA:     types.BoolValue(c.IsHA),
-			RegionID: types.Int64Value(c.RegionID),
+			ID:               types.Int64Value(c.ID),
+			VCPU:             types.Int64Value(int64(c.CPU)),
+			RAM:              types.Int64Value(int64(c.RAM)),
+			DiskSize:         types.Int64Value(int64(c.SSD)),
+			HighAvailability: types.BoolValue(c.IsHA),
+			RegionID:         types.Int64Value(c.RegionID),
 		})
 	}
 

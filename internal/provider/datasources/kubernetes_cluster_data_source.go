@@ -37,22 +37,22 @@ type K8sClusterDataSourceModel struct {
 	ProjectTag types.String `tfsdk:"project_tag"`
 
 	// Computed output.
-	KubernetesVersion types.String `tfsdk:"kubernetes_version"`
-	IsHA              types.Bool   `tfsdk:"is_ha"`
-	NeedPublicIP      types.Bool   `tfsdk:"need_public_ip"`
-	PodSubnet         types.String `tfsdk:"pod_subnet"`
-	MasterFlavorID    types.Int64  `tfsdk:"master_flavor_id"`
-	APIEndpoint       types.String `tfsdk:"api_endpoint"`
-	Kubeconfig        types.String `tfsdk:"kubeconfig"`
-	SSHKeyEncoded     types.String `tfsdk:"ssh_key_encoded"`
-	PrivateKeyEncoded types.String `tfsdk:"private_key_encoded"`
-	Status            types.String `tfsdk:"status"`
-	Blocked           types.Bool   `tfsdk:"blocked"`
-	NodePoolCount     types.Int64  `tfsdk:"node_pool_count"`
-	WorkerNodeCount   types.Int64  `tfsdk:"worker_node_count"`
-	MasterNodeCount   types.Int64  `tfsdk:"master_node_count"`
-	IPAddressesCount  types.Int64  `tfsdk:"ip_addresses_count"`
-	DateCreated       types.String `tfsdk:"date_created"`
+	KubernetesVersion     types.String `tfsdk:"kubernetes_version"`
+	HighAvailability      types.Bool   `tfsdk:"high_availability"`
+	PublicEndpointEnabled types.Bool   `tfsdk:"public_endpoint_enabled"`
+	PodCIDR               types.String `tfsdk:"pod_cidr"`
+	MasterFlavorID        types.Int64  `tfsdk:"master_flavor_id"`
+	APIEndpoint           types.String `tfsdk:"api_endpoint"`
+	KubeConfig            types.Object `tfsdk:"kube_config"`
+	SSHKeyEncoded         types.String `tfsdk:"ssh_key_encoded"`
+	PrivateKeyEncoded     types.String `tfsdk:"private_key_encoded"`
+	Status                types.String `tfsdk:"status"`
+	Blocked               types.Bool   `tfsdk:"blocked"`
+	NodePoolCount         types.Int64  `tfsdk:"node_pool_count"`
+	WorkerNodeCount       types.Int64  `tfsdk:"worker_node_count"`
+	MasterNodeCount       types.Int64  `tfsdk:"master_node_count"`
+	IPAddressesCount      types.Int64  `tfsdk:"ip_addresses_count"`
+	DateCreated           types.String `tfsdk:"date_created"`
 }
 
 func NewK8sClusterDataSource() datasource.DataSource {
@@ -92,15 +92,15 @@ func (d *K8sClusterDataSource) Schema(_ context.Context, _ datasource.SchemaRequ
 				MarkdownDescription: "Kubernetes version (e.g. `v1.31.4`).",
 				Computed:            true,
 			},
-			"is_ha": schema.BoolAttribute{
+			"high_availability": schema.BoolAttribute{
 				MarkdownDescription: "Whether the control plane is highly available.",
 				Computed:            true,
 			},
-			"need_public_ip": schema.BoolAttribute{
+			"public_endpoint_enabled": schema.BoolAttribute{
 				MarkdownDescription: "Whether the cluster API endpoint has a public IP.",
 				Computed:            true,
 			},
-			"pod_subnet": schema.StringAttribute{
+			"pod_cidr": schema.StringAttribute{
 				MarkdownDescription: "Pod network CIDR.",
 				Computed:            true,
 			},
@@ -112,11 +112,39 @@ func (d *K8sClusterDataSource) Schema(_ context.Context, _ datasource.SchemaRequ
 				MarkdownDescription: "Kubernetes API server endpoint. Null until the cluster reaches `SUCCESS`.",
 				Computed:            true,
 			},
-			"kubeconfig": schema.StringAttribute{
-				MarkdownDescription: "Base64-encoded kubeconfig for cluster-admin access. Sensitive. Null until the " +
-					"cluster reaches `SUCCESS` — gate any downstream consumer (e.g. a kubernetes provider) on `status`.",
+			"kube_config": schema.SingleNestedAttribute{
+				MarkdownDescription: "Structured cluster credentials parsed from the kubeconfig, for wiring the " +
+					"`kubernetes` and `helm` providers directly. Sensitive. Null until the cluster reaches `SUCCESS` " +
+					"— gate any downstream consumer on `status`. The certificate fields are base64-encoded exactly as " +
+					"they appear in the kubeconfig; wrap them in `base64decode()` when passing them to the kubernetes provider.",
 				Computed:  true,
 				Sensitive: true,
+				Attributes: map[string]schema.Attribute{
+					"host": schema.StringAttribute{
+						MarkdownDescription: "Kubernetes API server URL.",
+						Computed:            true,
+					},
+					"cluster_ca_certificate": schema.StringAttribute{
+						MarkdownDescription: "Base64-encoded cluster CA certificate.",
+						Computed:            true,
+					},
+					"client_certificate": schema.StringAttribute{
+						MarkdownDescription: "Base64-encoded client certificate for cluster-admin access.",
+						Computed:            true,
+					},
+					"client_key": schema.StringAttribute{
+						MarkdownDescription: "Base64-encoded client key for cluster-admin access.",
+						Computed:            true,
+					},
+					"token": schema.StringAttribute{
+						MarkdownDescription: "Bearer token, when the cluster uses token auth (empty otherwise).",
+						Computed:            true,
+					},
+					"raw_config": schema.StringAttribute{
+						MarkdownDescription: "The full kubeconfig as plain YAML.",
+						Computed:            true,
+					},
+				},
 			},
 			"ssh_key_encoded": schema.StringAttribute{
 				MarkdownDescription: "Base64-encoded SSH public key registered on the nodes.",
@@ -239,16 +267,16 @@ func (d *K8sClusterDataSource) Read(ctx context.Context, req datasource.ReadRequ
 	data.ID = types.Int64Value(cl.ID)
 	data.Name = types.StringValue(cl.Name)
 	data.KubernetesVersion = types.StringValue(cl.KubeVersion)
-	data.IsHA = types.BoolValue(cl.IsHA)
-	data.NeedPublicIP = types.BoolValue(cl.IsPublic)
-	data.PodSubnet = tfutil.StringOrNull(cl.PodSubnet)
+	data.HighAvailability = types.BoolValue(cl.IsHA)
+	data.PublicEndpointEnabled = types.BoolValue(cl.IsPublic)
+	data.PodCIDR = tfutil.StringOrNull(cl.PodSubnet)
 	if cl.MasterNodeConfig != nil {
 		data.MasterFlavorID = types.Int64Value(cl.MasterNodeConfig.ID)
 	} else {
 		data.MasterFlavorID = types.Int64Null()
 	}
 	data.APIEndpoint = tfutil.StringOrNull(cl.APIEndpoint)
-	data.Kubeconfig = tfutil.StringOrNull(cl.Kubeconfig)
+	data.KubeConfig = kubeConfigObject(ctx, cl.Kubeconfig)
 	data.SSHKeyEncoded = tfutil.StringOrNull(cl.SSHKeyEncoded)
 	data.PrivateKeyEncoded = tfutil.StringOrNull(cl.PrivateKeyEncoded)
 	data.Status = types.StringValue(cl.Status)
