@@ -335,10 +335,12 @@ func (r *K8sClusterResource) Schema(ctx context.Context, _ resource.SchemaReques
 			},
 			"master_flavor_id": schema.Int64Attribute{
 				MarkdownDescription: "Master node configuration (flavor) ID, from the " +
-					"`prodata_kubernetes_flavors` data source. Updated in place: changing it triggers a rolling " +
-					"replacement of the control-plane nodes (the cluster goes `PROCESSING` until it converges).",
-				Required:   true,
-				Validators: []validator.Int64{int64validator.AtLeast(1)},
+					"`prodata_kubernetes_flavors` data source. Changing it forces a new resource: " +
+					"resizing the control plane in place is not yet supported, so a different master " +
+					"flavor recreates the cluster.",
+				Required:      true,
+				Validators:    []validator.Int64{int64validator.AtLeast(1)},
+				PlanModifiers: []planmodifier.Int64{int64planmodifier.RequiresReplace()},
 			},
 			"default_node_pool": schema.SingleNestedAttribute{
 				MarkdownDescription: "The cluster's default worker node pool, created with the cluster. " +
@@ -575,14 +577,13 @@ func (r *K8sClusterResource) ModifyPlan(ctx context.Context, req resource.Modify
 	}
 
 	versionChanged := !plan.KubernetesVersion.Equal(state.KubernetesVersion)
-	masterChanged := !plan.MasterFlavorID.Equal(state.MasterFlavorID)
 	poolChanged := defaultPoolChanged(state.DefaultNodePool, plan.DefaultNodePool)
 
-	// ADR-K3: a version upgrade or a master-flavor change rolls the control plane and
-	// can rewrite the kubeconfig / api_endpoint, so those (and the credentials) become
-	// unknown in the plan. The kube_config is a nested object, so it is blanked as a
-	// whole ObjectUnknown.
-	if versionChanged || masterChanged {
+	// ADR-K3: a version upgrade rolls the control plane and can rewrite the kubeconfig /
+	// api_endpoint, so those (and the credentials) become unknown in the plan. The
+	// kube_config is a nested object, so it is blanked as a whole ObjectUnknown. (A
+	// master-flavor change forces replacement, so the framework handles it, not here.)
+	if versionChanged {
 		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("kube_config"), types.ObjectUnknown(kubeConfigAttrTypes()))...)
 		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("api_endpoint"), types.StringUnknown())...)
 		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("ssh_key_encoded"), types.StringUnknown())...)
@@ -592,7 +593,7 @@ func (r *K8sClusterResource) ModifyPlan(ctx context.Context, req resource.Modify
 	// Any in-place mutation transits the cluster through PROCESSING / blocked and
 	// changes the pool/node counts, so the volatile status fields must be unknown
 	// to avoid a "provider produced inconsistent result after apply" error.
-	if versionChanged || poolChanged || masterChanged {
+	if versionChanged || poolChanged {
 		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("status"), types.StringUnknown())...)
 		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("blocked"), types.BoolUnknown())...)
 		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("node_pool_count"), types.Int64Unknown())...)
@@ -831,25 +832,7 @@ func (r *K8sClusterResource) Update(ctx context.Context, req resource.UpdateRequ
 		}
 	}
 
-	// 2) Master node configuration (flavor) change (in-place, async). The backend
-	// rolls the control plane and sets the cluster PROCESSING/blocked; wait for it to
-	// converge on the requested flavor so a transient snapshot is not persisted.
-	if !plan.MasterFlavorID.Equal(state.MasterFlavorID) {
-		if err := r.c.UpdateMasterConfig(ctx, client.UpdateMasterConfigRequest{
-			ClusterID:          id,
-			MasterNodeConfigID: plan.MasterFlavorID.ValueInt64(),
-		}, opts); err != nil {
-			resp.Diagnostics.AddError("Unable to update master node configuration", client.KuberErrorDetail(err))
-			return
-		}
-		if _, waitErr := r.waitForMasterConfigReady(ctx, id, plan.MasterFlavorID.ValueInt64(), opts); waitErr != nil {
-			resp.Diagnostics.AddError("Cluster did not stabilize after master configuration change",
-				fmt.Sprintf("cluster %d: %s", id, waitErr.Error()))
-			return
-		}
-	}
-
-	// 3) Default pool scale / autoscaling transitions (async — wait for the pool
+	// 2) Default pool scale / autoscaling transitions (async — wait for the pool
 	// to settle so we don't persist a transient PROCESSING snapshot).
 	if state.DefaultNodePool != nil && plan.DefaultNodePool != nil {
 		poolID := state.DefaultNodePool.ID.ValueInt64()
@@ -1115,17 +1098,6 @@ func clusterUpgradeConverged(cl *client.Cluster, wantVersion string) bool {
 	return cl.Status == client.ClusterStatusSuccess && cl.KubeVersion == wantVersion && !cl.Blocked
 }
 
-// clusterMasterConverged reports whether an in-place master-flavor change has
-// settled: the cluster is SUCCESS, reports the requested master flavor, and has no
-// operation still in flight. The backend swaps the master configuration and flips
-// the cluster to PROCESSING/blocked synchronously, clearing blocked only once the
-// control-plane roll completes — so this is edge-correct even if polled before the
-// status has visibly flipped.
-func clusterMasterConverged(cl *client.Cluster, wantFlavorID int64) bool {
-	return cl.Status == client.ClusterStatusSuccess &&
-		cl.MasterNodeConfig != nil && cl.MasterNodeConfig.ID == wantFlavorID && !cl.Blocked
-}
-
 // getClusterWithRetry reads a cluster, tolerating up to k8sMaxConsecutiveErrs
 // transient errors so a post-mutation read-back is not derailed by a transient
 // blip. Returns the last error if every attempt fails.
@@ -1193,59 +1165,6 @@ func (r *K8sClusterResource) waitForClusterReady(ctx context.Context, id int64, 
 		default:
 			consecutiveErrs++
 			tflog.Warn(ctx, "Transient error polling cluster", map[string]any{
-				"id": id, "error": err.Error(), "consecutive_errors": consecutiveErrs,
-			})
-			if consecutiveErrs > k8sMaxConsecutiveErrs {
-				return last, fmt.Errorf("polling failed after %d consecutive errors: %w", consecutiveErrs, err)
-			}
-		}
-
-		select {
-		case <-ctx.Done():
-			return last, ctx.Err()
-		case <-time.After(k8sPollInterval):
-		}
-	}
-}
-
-// waitForMasterConfigReady polls until an in-place master-flavor change has
-// converged (clusterMasterConverged): SUCCESS, on the requested flavor, no longer
-// blocked. FAIL or DELETED is a terminal error. Like the upgrade path it allows a
-// bounded grace for the lazily re-fetched kubeconfig (the master swap can rewrite
-// it), then accepts SUCCESS rather than burning the timeout. Tolerates up to
-// k8sMaxConsecutiveErrs transient errors (ADR-K5).
-func (r *K8sClusterResource) waitForMasterConfigReady(ctx context.Context, id, wantFlavorID int64, opts *client.RequestOpts) (*client.Cluster, error) {
-	var consecutiveErrs int
-	var last *client.Cluster
-	var kubeconfigDeadline time.Time
-
-	for {
-		cl, err := r.c.GetCluster(ctx, id, opts)
-		switch {
-		case err == nil:
-			consecutiveErrs = 0
-			last = cl
-			tflog.Debug(ctx, "Polling cluster (master config)", map[string]any{"id": id, "status": cl.Status})
-			switch cl.Status {
-			case client.ClusterStatusSuccess:
-				if clusterMasterConverged(cl, wantFlavorID) {
-					if cl.Kubeconfig != "" {
-						return cl, nil
-					}
-					if kubeconfigDeadline.IsZero() {
-						kubeconfigDeadline = time.Now().Add(k8sKubeconfigGrace)
-					} else if !time.Now().Before(kubeconfigDeadline) {
-						return cl, nil
-					}
-				}
-			case client.ClusterStatusFail, client.ClusterStatusDeleted:
-				return cl, fmt.Errorf("terminal status %s", cl.Status)
-			}
-		case client.IsKuberNotFound(err):
-			return last, fmt.Errorf("cluster %d disappeared while waiting", id)
-		default:
-			consecutiveErrs++
-			tflog.Warn(ctx, "Transient error polling cluster (master config)", map[string]any{
 				"id": id, "error": err.Error(), "consecutive_errors": consecutiveErrs,
 			})
 			if consecutiveErrs > k8sMaxConsecutiveErrs {

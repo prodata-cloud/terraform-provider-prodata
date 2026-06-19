@@ -101,7 +101,7 @@ provider "kubernetes" {
 - `pod_cidr` (String) Pod network CIDR. Must be a `/16` (e.g. `10.244.0.0/16`). Changing it forces a new resource.
 - `node_subnet` (Number) Node subnet prefix length used to carve node addressing out of the local network (e.g. `24`). Write-once; changing it forces a new resource.
 - `node_ip_range` (String) Control-plane IP range within the local network, as `start-end` (e.g. `10.0.0.10-10.0.0.20`). Write-once; changing it forces a new resource.
-- `master_flavor_id` (Number) Master node configuration (flavor) ID, from the [`prodata_kubernetes_flavors`](../data-sources/kubernetes_flavors.md) data source. Minimum `1`. Updated in place: changing it triggers a rolling replacement of the control-plane nodes (the cluster goes `PROCESSING` until it converges).
+- `master_flavor_id` (Number) Master node configuration (flavor) ID, from the [`prodata_kubernetes_flavors`](../data-sources/kubernetes_flavors.md) data source. Minimum `1`. Changing it forces a new resource: resizing the control plane in place is not yet supported, so a different master flavor recreates the cluster.
 - `default_node_pool` (Object) The cluster's default worker node pool, created with the cluster. Sizing (`vcpu`, `ram`, `disk_size`) and `name` are immutable (changing them forces a new resource); `node_count` and `autoscaling` are updated in place. Attributes:
   - `name` (String, required) Pool name. 3-24 characters, lowercase letters / digits / hyphens, not starting or ending with a hyphen.
   - `vcpu` (Number, required) vCPUs per worker node. Minimum `1`.

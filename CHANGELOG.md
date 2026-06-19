@@ -10,8 +10,7 @@ All notable changes to this provider are documented here. The format is based on
 
 - **Managed Kubernetes.** New resources and data sources for ProData Managed Kubernetes:
   - `prodata_kubernetes_cluster` — manages a cluster and its inline `default_node_pool`.
-    Supports in-place Kubernetes version upgrades and in-place master-flavor changes
-    (a rolling control-plane replacement), fixed-size or autoscaling worker pools, and a
+    Supports in-place Kubernetes version upgrades, fixed-size or autoscaling worker pools, and a
     structured, sensitive `kube_config` block (`host`, `cluster_ca_certificate`,
     `client_certificate`, `client_key`, `token`, `raw_config`) for wiring the `kubernetes`
     and `helm` providers directly.
