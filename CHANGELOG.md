@@ -4,6 +4,26 @@ All notable changes to this provider are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.0] - 2026-06-20
+
+### Added
+
+- **Managed Kubernetes.** New resources and data sources for ProData Managed Kubernetes:
+  - `prodata_kubernetes_cluster` — manages a cluster and its inline `default_node_pool`.
+    Supports in-place Kubernetes version upgrades and in-place master-flavor changes
+    (a rolling control-plane replacement), fixed-size or autoscaling worker pools, and a
+    structured, sensitive `kube_config` block (`host`, `cluster_ca_certificate`,
+    `client_certificate`, `client_key`, `token`, `raw_config`) for wiring the `kubernetes`
+    and `helm` providers directly.
+  - `prodata_kubernetes_node_pool` — manages additional worker pools on a cluster, with
+    in-place scaling and autoscaling on/off/bounds transitions.
+  - `prodata_kubernetes_cluster` and `prodata_kubernetes_node_pool` data sources — look up
+    a cluster or pool by `id` or `name`.
+  - `prodata_kubernetes_versions` data source — the selectable Kubernetes versions and the
+    latest stable one (`latest_version`).
+  - `prodata_kubernetes_flavors` data source — the master-node flavors available for a
+    cluster's `master_flavor_id`.
+
 ## [0.20.0] - 2026-06-09
 
 ### Removed
