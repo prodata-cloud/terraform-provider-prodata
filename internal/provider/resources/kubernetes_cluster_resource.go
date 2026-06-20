@@ -182,7 +182,11 @@ var clusterLocks sync.Map // map[int64]*sync.Mutex
 // lockCluster acquires the per-cluster mutex and returns the unlock function.
 func lockCluster(id int64) func() {
 	m, _ := clusterLocks.LoadOrStore(id, &sync.Mutex{})
-	mu := m.(*sync.Mutex)
+	mu, ok := m.(*sync.Mutex)
+	if !ok {
+		// Unreachable: clusterLocks only ever stores *sync.Mutex.
+		panic("clusterLocks held a non-*sync.Mutex value")
+	}
 	mu.Lock()
 	return mu.Unlock
 }
@@ -531,8 +535,8 @@ func (r *K8sClusterResource) ValidateConfig(ctx context.Context, req resource.Va
 		)
 	}
 	if p.Autoscaling != nil {
-		min, max := p.Autoscaling.MinNodes, p.Autoscaling.MaxNodes
-		if !min.IsUnknown() && !max.IsUnknown() && min.ValueInt64() > max.ValueInt64() {
+		minNodes, maxNodes := p.Autoscaling.MinNodes, p.Autoscaling.MaxNodes
+		if !minNodes.IsUnknown() && !maxNodes.IsUnknown() && minNodes.ValueInt64() > maxNodes.ValueInt64() {
 			resp.Diagnostics.AddAttributeError(
 				path.Root("default_node_pool").AtName("autoscaling").AtName("max_nodes"),
 				"Invalid autoscaling bounds",
@@ -1312,9 +1316,22 @@ func (r *K8sClusterResource) applyDefaultPoolState(ctx context.Context, m *K8sCl
 	if defaultPoolID == 0 {
 		defaultPoolID = m.DefaultNodePool.ID.ValueInt64()
 	}
-	pool := r.fetchPool(ctx, defaultPoolID, m.DefaultNodePool.Name.ValueString(), clusterID, region, projectTag)
+	pool, gone := r.fetchPool(ctx, defaultPoolID, m.DefaultNodePool.Name.ValueString(), clusterID, region, projectTag)
 	if pool == nil {
 		if fromRead {
+			if !gone {
+				// Inconclusive refresh (transient API error): keep the last-known
+				// node-pool values instead of nulling the block. Nulling it would make
+				// ModifyPlan propose REPLACING the whole cluster over a momentary blip.
+				if diags != nil {
+					diags.AddWarning(
+						"Default node pool refresh incomplete",
+						fmt.Sprintf("Could not refresh the default node pool of cluster %d due to a transient API error; "+
+							"keeping the last-known values. Re-run to refresh.", clusterID),
+					)
+				}
+				return
+			}
 			if diags != nil {
 				diags.AddWarning(
 					"Default node pool not found",
@@ -1369,43 +1386,52 @@ func (r *K8sClusterResource) discoverDefaultPool(ctx context.Context, clusterID 
 }
 
 // fetchPool returns the default pool by id, falling back to a name match if the id
-// is unknown. Returns nil if it cannot be resolved (drift handled by ModifyPlan).
-func (r *K8sClusterResource) fetchPool(ctx context.Context, poolID int64, poolName string, clusterID int64, region, projectTag string) *client.NodePool {
+// is unknown. The second return value, gone, distinguishes a CONFIRMED absence (the
+// server affirmatively reported the pool does not exist) from an INCONCLUSIVE result
+// (a transient API error left it undetermined). It matters because the caller turns
+// a confirmed absence into a cluster replacement: a transient blip must NOT trigger
+// that. When the returned pool is non-nil, gone is meaningless (false).
+func (r *K8sClusterResource) fetchPool(ctx context.Context, poolID int64, poolName string, clusterID int64, region, projectTag string) (pool *client.NodePool, gone bool) {
 	opts := &client.RequestOpts{Region: region, ProjectTag: projectTag}
 	if poolID != 0 {
-		pool, err := r.c.GetNodePool(ctx, poolID, opts)
+		p, err := r.c.GetNodePool(ctx, poolID, opts)
 		if err == nil {
-			return pool
+			return p, false
 		}
 		if client.IsKuberNotFound(err) {
 			// Definitive: this id is gone (deleted out of band). Do NOT fall back to a
 			// name match — it could adopt a different pool that shares the name.
-			return nil
+			return nil, true
 		}
-		// Transient error: recover the SAME pool by id from the cluster's list.
+		// Transient error on the by-id read: recover the SAME pool by id from the
+		// cluster's list. If the list itself fails we cannot tell present from absent,
+		// so report inconclusive (gone=false) rather than confirmed-gone.
 		pools, lerr := r.c.ListNodePools(ctx, clusterID, opts)
 		if lerr != nil {
-			return nil
+			return nil, false
 		}
 		for i := range pools {
 			if pools[i].ID == poolID {
-				return &pools[i]
+				return &pools[i], false
 			}
 		}
-		return nil
+		// The list succeeded and the id is not in it → confirmed gone.
+		return nil, true
 	}
 	// id unknown (create-time discovery / post-import): resolve by name.
 	pools, err := r.c.ListNodePools(ctx, clusterID, opts)
 	if err != nil {
-		return nil
+		// Could not determine — inconclusive, not confirmed-gone.
+		return nil, false
 	}
 	want := strings.ToLower(poolName)
 	for i := range pools {
 		if strings.ToLower(pools[i].Name) == want {
-			return &pools[i]
+			return &pools[i], false
 		}
 	}
-	return nil
+	// The list succeeded and no pool matches the name → confirmed absent.
+	return nil, true
 }
 
 // parseK8sImportID accepts a bare integer id or the composite
