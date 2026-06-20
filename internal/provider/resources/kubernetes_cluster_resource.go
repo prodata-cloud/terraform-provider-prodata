@@ -687,6 +687,37 @@ func (r *K8sClusterResource) Create(ctx context.Context, req resource.CreateRequ
 		wire.WorkerReplicas = int(pool.NodeCount.ValueInt64())
 	}
 
+	// Preflight the master flavor against the resolved region: an invalid or
+	// cross-region master_flavor_id otherwise fails as an opaque backend HTTP 500 from
+	// the create POST. This read-only check turns that into a precise plan-time-style
+	// diagnostic. Best-effort — if the lookup itself fails we fall through and let the
+	// POST validate server-side rather than blocking create on a transient read.
+	if flavors, ferr := r.c.GetMasterNodeConfigs(ctx, plan.HighAvailability.ValueBool(), opts); ferr == nil {
+		wantID := plan.MasterFlavorID.ValueInt64()
+		found := false
+		ids := make([]string, 0, len(flavors))
+		for i := range flavors {
+			ids = append(ids, strconv.FormatInt(flavors[i].ID, 10))
+			if flavors[i].ID == wantID {
+				found = true
+			}
+		}
+		if !found {
+			haDesc := "standard"
+			if plan.HighAvailability.ValueBool() {
+				haDesc = "high-availability"
+			}
+			resp.Diagnostics.AddError(
+				"Invalid master_flavor_id for this region",
+				fmt.Sprintf("master_flavor_id %d is not an available %s master flavor in region %q. "+
+					"Available ids: [%s]. Use the prodata_kubernetes_flavors data source (with the same "+
+					"high_availability value) to select a valid flavor.",
+					wantID, haDesc, region, strings.Join(ids, ", ")),
+			)
+			return
+		}
+	}
+
 	// ADR-K6: adopt-or-error. If a cluster with this name already exists in the
 	// scope, a lost create response (e.g. a 429 on read-back) must not orphan it.
 	existingID, adoptErr := r.findClusterIDByName(ctx, plan.Name.ValueString(), opts)
@@ -714,7 +745,19 @@ func (r *K8sClusterResource) Create(ctx context.Context, req resource.CreateRequ
 		return r.c.CreateCluster(ctx, wire, opts)
 	})
 	if err != nil {
-		resp.Diagnostics.AddError("Unable to create Kubernetes cluster", client.KuberErrorDetail(err))
+		detail := client.KuberErrorDetail(err)
+		// The backend returns a generic HTTP 500 ("Could not create kubernetes cluster")
+		// when it cannot provision the control plane. With the master flavor preflighted
+		// and the version/network/addresses validated above, this is a server-side
+		// provisioning failure (typically the region lacks Managed-Kubernetes capacity),
+		// not a configuration error — say so, so it isn't read as a provider bug.
+		if client.IsAPIError(err, 500) {
+			detail += "\n\nThis is a server-side failure to provision the cluster, not a configuration problem " +
+				"(the master flavor, version, network and node IP range were validated before this call). " +
+				"The target region may not currently have Managed Kubernetes capacity/availability — retry " +
+				"later or contact ProData support if it persists."
+		}
+		resp.Diagnostics.AddError("Unable to create Kubernetes cluster", detail)
 		return
 	}
 
