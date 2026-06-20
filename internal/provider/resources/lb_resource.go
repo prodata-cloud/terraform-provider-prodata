@@ -552,7 +552,10 @@ func (r *LbResource) Update(ctx context.Context, req resource.UpdateRequest, res
 	}
 
 	switch source {
-	case client.LbSourceFrontend:
+	// Empty source = a legacy LB imported before source dispatch existed; route it
+	// through the frontend configure path (mirroring Delete), so an imported pre-source
+	// LB stays updatable instead of hard-failing into destroy/recreate.
+	case client.LbSourceFrontend, "":
 		backends, berr := vmIDsToWire(ctx, plan.BackendGroup.VMIDs)
 		if berr != nil {
 			resp.Diagnostics.AddError("Invalid backend_group.vm_ids", berr.Error())

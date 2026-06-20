@@ -188,6 +188,15 @@ func (d *LbDataSource) Read(ctx context.Context, req datasource.ReadRequest, res
 		resp.Diagnostics.AddError("Unable to read load balancer", client.LBErrorDetail(err))
 		return
 	}
+	// The by-id endpoint returns soft-deleted load balancers; don't hand back a
+	// phantom (the resource Read already removes DELETED from state).
+	if lb.Status == client.LbStatusDeleted {
+		resp.Diagnostics.AddError(
+			"Load balancer not found",
+			fmt.Sprintf("Load balancer %d has been deleted.", id),
+		)
+		return
+	}
 
 	data.Name = types.StringValue(lb.Name)
 	data.Description = tfutil.StringOrNull(lb.Description)
