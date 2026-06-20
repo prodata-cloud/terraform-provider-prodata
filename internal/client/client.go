@@ -25,7 +25,19 @@ const (
 	rateLimitBaseDelay = 2 * time.Second
 	// rateLimitMaxDelay caps a single backoff wait.
 	rateLimitMaxDelay = 60 * time.Second
+	// transportMaxRetries bounds retries of an idempotent (GET/HEAD) request after a
+	// transient transport error (connection reset/refused, EOF, DNS blip) so a
+	// momentary network hiccup during a refresh does not abort the whole plan.
+	transportMaxRetries = 3
+	// transportRetryBase is the first transport-retry backoff; it doubles each attempt.
+	transportRetryBase = 500 * time.Millisecond
 )
+
+// isIdempotentMethod reports whether a request can be safely retried after a transport
+// error without risk of double-applying a mutation.
+func isIdempotentMethod(method string) bool {
+	return method == http.MethodGet || method == http.MethodHead
+}
 
 type Client struct {
 	baseURL      string
@@ -125,6 +137,7 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body any, o
 	// request before it reaches the API, so retrying is safe even for POST/DELETE:
 	// no work was performed. Bulk applies (many parallel resources) trip per-IP
 	// rate limits; retry transparently with backoff instead of failing the apply.
+	transportRetries := 0
 	for attempt := 0; ; attempt++ {
 		var reqBody io.Reader
 		if bodyBytes != nil {
@@ -147,6 +160,27 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body any, o
 
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
+			// Retry idempotent (GET/HEAD) requests on a transient transport error so a
+			// momentary network blip during a refresh doesn't abort the whole plan.
+			// Non-idempotent methods are never retried here: the request may already have
+			// reached the server, and re-sending could double-apply. ctx is honored.
+			if isIdempotentMethod(method) && transportRetries < transportMaxRetries && ctx.Err() == nil {
+				wait := transportRetryBase << transportRetries
+				transportRetries++
+				tflog.Warn(ctx, "transient transport error — retrying idempotent request", map[string]any{
+					"method":      method,
+					"path":        path,
+					"attempt":     transportRetries,
+					"max_retries": transportMaxRetries,
+					"error":       err.Error(),
+				})
+				select {
+				case <-ctx.Done():
+					return 0, nil, ctx.Err()
+				case <-time.After(wait):
+				}
+				continue
+			}
 			return 0, nil, fmt.Errorf("request failed: %w", err)
 		}
 
