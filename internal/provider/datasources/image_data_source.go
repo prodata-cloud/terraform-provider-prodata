@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"terraform-provider-prodata/internal/client"
+	"terraform-provider-prodata/internal/tfutil"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/datasourcevalidator"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
@@ -51,12 +52,16 @@ func (d *ImageDataSource) Schema(ctx context.Context, req datasource.SchemaReque
 		Attributes: map[string]schema.Attribute{
 			// Lookup criteria
 			"name": schema.StringAttribute{
-				MarkdownDescription: "The name of the image. Used for custom images lookup. Conflicts with `slug`.",
-				Optional:            true,
+				MarkdownDescription: "The name of the image. Used for custom-image lookup. Conflicts with `slug`. " +
+					"If you look the image up by `slug`, this is populated from the API.",
+				Optional: true,
+				Computed: true,
 			},
 			"slug": schema.StringAttribute{
-				MarkdownDescription: "The slug of the image. Used for OS template lookup (e.g., `ubuntu-22.04`, `debian-11`). Conflicts with `name`.",
-				Optional:            true,
+				MarkdownDescription: "The slug of the image. Used for OS-template lookup (e.g., `ubuntu-22.04`, `debian-11`). " +
+					"Conflicts with `name`. If you look the image up by `name`, this is populated from the API.",
+				Optional: true,
+				Computed: true,
 			},
 			"region": schema.StringAttribute{
 				MarkdownDescription: "Region ID override. If not specified, uses the provider's default region.",
@@ -141,6 +146,10 @@ func (d *ImageDataSource) Read(ctx context.Context, req datasource.ReadRequest, 
 
 	data.ID = types.Int64Value(image.ID)
 	data.IsCustom = types.BoolValue(image.IsCustom)
+	// Populate both lookup keys from the API so the one the caller did not supply is no
+	// longer null in state (name/slug are Optional+Computed).
+	data.Name = tfutil.StringOrNull(image.Name)
+	data.Slug = tfutil.StringOrNull(image.Slug)
 
 	tflog.Debug(ctx, "Successfully read image", map[string]any{
 		"id":        data.ID.ValueInt64(),
