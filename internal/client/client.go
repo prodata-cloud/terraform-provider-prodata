@@ -58,7 +58,12 @@ func New(cfg Config) (*Client, error) {
 		userAgent:    cfg.UserAgent,
 		Region:       cfg.Region,
 		ProjectTag:   cfg.ProjectTag,
-		httpClient:   &http.Client{Timeout: 60 * time.Second},
+		// No client-level timeout on purpose: every request is issued with the caller's
+		// context (http.NewRequestWithContext in doRequest), which already carries the
+		// resource's configurable Create/Update/Delete timeout. A fixed 60s cap here would
+		// override those and abort slow synchronous creates (VM, LB, Kubernetes) regardless
+		// of the `timeouts` block, surfacing as a confusing transport error.
+		httpClient: &http.Client{},
 	}, nil
 }
 
