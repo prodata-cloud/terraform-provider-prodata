@@ -4,6 +4,49 @@ All notable changes to this provider are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.0] - 2026-06-21
+
+### Added
+
+- Plan-time validators: `prodata_vm` (`cpu_cores` >= 1, `ram` >= 1, `disk_size` >= 10, and
+  `name` 3-63 chars / letters-digits-hyphens / at least one letter) and
+  `prodata_kubernetes_cluster` (`node_subnet` 1-32, `node_ip_range` as an IPv4 `start-end`
+  range). Invalid input now fails at plan; the bounds match what the backend enforces.
+- `prodata_image` data source now populates both `name` and `slug` from the API (the
+  lookup key you did not supply is no longer null); both are Optional+Computed.
+- Optional client-side request pacing via the `PRODATA_MAX_RPS` environment variable
+  (off by default) to pre-empt server-side 429s on large applies.
+- CI workflow (build, vet, gofmt, golangci-lint, unit tests) on PRs and the default
+  branch, plus Dependabot for Go modules and GitHub Actions.
+
+### Fixed
+
+- `prodata_volume`: detect out-of-band deletion (the by-id endpoint returns soft-deleted
+  volumes; Read now confirms via the list).
+- `prodata_volume_attachment`: resolve the attachment by its VmDisk id (was using a volume
+  id), fixing spurious state removal and re-attach.
+- `prodata_local_network`: refuse to adopt a name-conflicting network with a mismatched
+  cidr/gateway (was a destroy/recreate loop); serialize create/delete to remove the
+  parallel-create 627 race (no more `-parallelism=1` workaround).
+- `prodata_s3_bucket`: reconcile acl/versioning (and error on an `object_lock_enabled`
+  mismatch) when adopting an existing bucket; clearer "bucket not empty" message on destroy.
+- `prodata_lb`: keep imported pre-source load balancers updatable; the `prodata_lb` and
+  `prodata_lbs` data sources no longer return soft-deleted balancers.
+- `prodata_public_ip_attachment`: confirm the managed IP is still attached before the
+  VM-scoped detach.
+- `prodata_vm`: read back via the status endpoint on update (covers ERROR-status VMs),
+  keep the planned name on rename, settle cpu/ram/disk before create returns (removes a
+  spurious post-create diff), and surface an orphaned VM on a name-conflict recovery failure.
+- `prodata_kubernetes_cluster`: preflight `master_flavor_id` and give an actionable message
+  on a backend provisioning failure.
+- Client: redact raw response bodies from error diagnostics (avoid leaking secrets); retry
+  idempotent (GET) requests on transient transport errors; remove the 60s client-level
+  timeout so per-resource `timeouts` apply.
+
+### Changed
+
+- Bump `terraform-plugin-framework` to v1.19.0.
+
 ## [0.21.0] - 2026-06-20
 
 ### Added
@@ -233,7 +276,8 @@ for release-by-release commits. Notable in the 0.11 line: addition of
 `prodata_s3_bucket` resource and data sources, the `prodata_public_ip_attachment`
 restart note, plus VM and volume CRUD improvements.
 
-[Unreleased]: https://github.com/prodata-cloud/terraform-provider-prodata/compare/v0.21.0...HEAD
+[Unreleased]: https://github.com/prodata-cloud/terraform-provider-prodata/compare/v0.22.0...HEAD
+[0.22.0]: https://github.com/prodata-cloud/terraform-provider-prodata/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/prodata-cloud/terraform-provider-prodata/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/prodata-cloud/terraform-provider-prodata/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/prodata-cloud/terraform-provider-prodata/compare/v0.18.2...v0.19.0

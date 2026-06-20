@@ -20,6 +20,7 @@ func TestAccVm_invalidValuesRejectedAtPlan(t *testing.T) {
 	}{
 		{"disk below minimum", vmValidatorConfig("web1", 1, 1, 5), `(?i)at least 10`},
 		{"cpu below minimum", vmValidatorConfig("web1", 0, 1, 10), `(?i)at least 1`},
+		{"ram below minimum", vmValidatorConfig("web1", 1, 0, 10), `(?i)at least 1`},
 		{"name with invalid char", vmValidatorConfig("web_server", 1, 1, 10), `(?i)letters, digits and hyphens`},
 		{"name too short", vmValidatorConfig("ab", 1, 1, 10), `(?i)between 3 and 63`},
 		{"name without a letter", vmValidatorConfig("123-456", 1, 1, 10), `(?i)at least\s+one letter`},
