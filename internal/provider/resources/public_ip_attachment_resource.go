@@ -226,12 +226,34 @@ func (r *PublicIPAttachmentResource) Delete(ctx context.Context, req resource.De
 
 	opts := r.buildOpts(&data)
 	vmID := data.VmID.ValueInt64()
+	expectedPublicIPID := data.PublicIPID.ValueInt64()
+
+	// The detach endpoint is VM-scoped — it removes whatever public IP is currently on
+	// the VM. Confirm the VM still carries the IP we manage before detaching, so under
+	// stale state (e.g. -refresh=false) we never strip a different IP that was attached
+	// out-of-band. No-op if the VM is gone or now carries a different / no IP.
+	vm, err := r.client.GetVm(ctx, vmID, opts)
+	if err != nil {
+		if client.IsNotFound(err) {
+			return
+		}
+		resp.Diagnostics.AddError("Unable to Read VM for Public IP detach", err.Error())
+		return
+	}
+	if vm.PublicIPID != expectedPublicIPID {
+		tflog.Warn(ctx, "VM no longer carries the managed public IP; skipping detach", map[string]any{
+			"vm_id":                 vmID,
+			"expected_public_ip_id": expectedPublicIPID,
+			"actual_public_ip_id":   vm.PublicIPID,
+		})
+		return
+	}
 
 	tflog.Debug(ctx, "Detaching public IP from VM", map[string]any{
 		"vm_id": vmID,
 	})
 
-	err := r.client.DetachPublicIP(ctx, vmID, opts)
+	err = r.client.DetachPublicIP(ctx, vmID, opts)
 	if err != nil {
 		if client.IsNotFound(err) {
 			return

@@ -422,6 +422,15 @@ func (r *S3BucketResource) Delete(ctx context.Context, req resource.DeleteReques
 		if client.IsNotFound(err) {
 			return
 		}
+		if client.IsAPIError(err, 738) {
+			resp.Diagnostics.AddError(
+				"Bucket Not Empty",
+				fmt.Sprintf("Bucket %q still contains objects and cannot be deleted. Empty it first — "+
+					"including every object version and delete marker if versioning was ever enabled — "+
+					"then run destroy again.", name),
+			)
+			return
+		}
 		resp.Diagnostics.AddError("Unable to Delete Bucket", err.Error())
 		return
 	}
