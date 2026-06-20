@@ -25,6 +25,40 @@ func init() {
 	})
 }
 
+// TestAccLocalNetwork_parallelCreate is the regression witness for the create
+// serialization: creating several local networks in one apply (Terraform's default
+// parallelism) used to race the backend's non-blocking lock and fail the second+ create
+// with error 627. With in-process serialization, all of them create successfully.
+func TestAccLocalNetwork_parallelCreate(t *testing.T) {
+	prefix := accName()
+
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testAccPreCheck(t); testAccProdMutationGuard(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		CheckDestroy:             testAccCheckLocalNetworkDestroy,
+		Steps: []resource.TestStep{
+			{
+				Config: testAccLocalNetworkConfigParallel(prefix, 3),
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue("prodata_local_network.test[0]", tfjsonpath.New("id"), knownvalue.NotNull()),
+					statecheck.ExpectKnownValue("prodata_local_network.test[2]", tfjsonpath.New("id"), knownvalue.NotNull()),
+				},
+			},
+		},
+	})
+}
+
+func testAccLocalNetworkConfigParallel(prefix string, n int) string {
+	return fmt.Sprintf(`
+resource "prodata_local_network" "test" {
+  count   = %[2]d
+  name    = "%[1]s-${count.index}"
+  cidr    = "10.50.${count.index}.0/24"
+  gateway = "10.50.${count.index}.1"
+}
+`, prefix, n)
+}
+
 // TestAccLocalNetwork_basic exercises the create+read, an in-place rename, plan
 // stability, and an import round-trip of prodata_local_network.
 func TestAccLocalNetwork_basic(t *testing.T) {
