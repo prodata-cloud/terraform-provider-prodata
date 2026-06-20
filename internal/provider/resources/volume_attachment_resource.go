@@ -169,7 +169,8 @@ func (r *VolumeAttachmentResource) Read(ctx context.Context, req resource.ReadRe
 	}
 
 	opts := r.buildOpts(&data)
-	attachedVolumeID := data.AttachedVolumeID.ValueInt64()
+	attachedVolumeID := data.AttachedVolumeID.ValueInt64() // VmDisk id (the disk as attached to the VM)
+	volumeID := data.VolumeID.ValueInt64()                 // underlying volume (UserDisk) id
 	vmID := data.VmID.ValueInt64()
 
 	tflog.Debug(ctx, "Reading volume attachment", map[string]any{
@@ -177,26 +178,68 @@ func (r *VolumeAttachmentResource) Read(ctx context.Context, req resource.ReadRe
 		"attached_volume_id": attachedVolumeID,
 	})
 
-	volume, err := r.client.GetVolume(ctx, attachedVolumeID, opts)
+	// attached_volume_id is a VmDisk id, NOT a volume/UserDisk id, so it must be
+	// resolved through the VM's disk list rather than GetVolume (which keys on
+	// volume ids and would query the wrong object). Membership in the VM's disk
+	// list is itself the proof that the attachment still exists on this VM.
+	disks, err := r.client.GetVmVolumes(ctx, vmID, opts)
 	if err != nil {
-		tflog.Warn(ctx, "Volume not found, removing volume attachment from state", map[string]any{
+		// Only a genuinely-gone VM means the attachment is gone; a transient error
+		// must not silently drop the resource from state (it would be recreated and
+		// could double-attach on the next apply).
+		if client.IsNotFound(err) {
+			tflog.Warn(ctx, "VM not found, removing volume attachment from state", map[string]any{
+				"vm_id": vmID,
+			})
+			resp.State.RemoveResource(ctx)
+			return
+		}
+		resp.Diagnostics.AddError("Unable to Read Volume Attachment", err.Error())
+		return
+	}
+
+	// Resolve the attached disk in the VM's disk list. Normally we match on the stored
+	// VmDisk id (attached_volume_id). Right after import that computed id is absent (0),
+	// so fall back to matching the underlying volume id (UserDiskID) and repopulate it.
+	var attached *client.VmDisk
+	for i := range disks {
+		d := &disks[i]
+		if attachedVolumeID != 0 {
+			if d.ID == attachedVolumeID {
+				attached = d
+				break
+			}
+			continue
+		}
+		if d.UserDiskID != nil && *d.UserDiskID == volumeID {
+			attached = d
+			break
+		}
+	}
+	if attached == nil {
+		tflog.Warn(ctx, "Volume no longer attached to the expected VM, removing from state", map[string]any{
+			"vm_id":              vmID,
 			"attached_volume_id": attachedVolumeID,
-			"error":              err.Error(),
+			"volume_id":          volumeID,
 		})
 		resp.State.RemoveResource(ctx)
 		return
 	}
 
-	// Verify the volume is still attached to the expected VM
-	if !volume.InUse || volume.AttachedID == nil || *volume.AttachedID != vmID {
-		tflog.Warn(ctx, "Volume is not attached to the expected VM, removing from state", map[string]any{
+	// Defense in depth: the attached disk should map back to the configured volume.
+	if attached.UserDiskID != nil && *attached.UserDiskID != volumeID {
+		tflog.Warn(ctx, "Attached disk maps to a different volume than recorded, removing from state", map[string]any{
 			"vm_id":              vmID,
-			"attached_volume_id": attachedVolumeID,
-			"in_use":             volume.InUse,
+			"attached_volume_id": attached.ID,
+			"expected_volume_id": volumeID,
+			"actual_volume_id":   *attached.UserDiskID,
 		})
 		resp.State.RemoveResource(ctx)
 		return
 	}
+
+	// Refresh/repopulate the computed VmDisk id (covers the post-import case).
+	data.AttachedVolumeID = types.Int64Value(attached.ID)
 
 	tflog.Debug(ctx, "Read volume attachment", map[string]any{
 		"vm_id":              vmID,
@@ -234,10 +277,7 @@ func (r *VolumeAttachmentResource) Delete(ctx context.Context, req resource.Dele
 	// when Terraform destroys multiple volume_attachment resources in parallel,
 	// the first detach stops the VM and leaves it stopped so subsequent detaches
 	// find it already stopped and complete immediately without stop/start cycles.
-	const (
-		pollInterval   = 5 * time.Second
-		overallTimeout = 10 * time.Minute
-	)
+	const overallTimeout = 10 * time.Minute
 	deadline := time.Now().Add(overallTimeout)
 
 	for {
@@ -273,7 +313,7 @@ func (r *VolumeAttachmentResource) Delete(ctx context.Context, req resource.Dele
 					tflog.Info(ctx, "Detach blocked by concurrent operation, retrying", map[string]any{
 						"vm_id": vmID, "error": err.Error(),
 					})
-					sleepWithContext(ctx, pollInterval)
+					sleepWithContext(ctx)
 					continue
 				}
 				resp.Diagnostics.AddError("Unable to Detach Volume", err.Error())
@@ -287,21 +327,21 @@ func (r *VolumeAttachmentResource) Delete(ctx context.Context, req resource.Dele
 				// 627 = VM already being stopped/operated on by concurrent detach
 				if client.IsAPIError(err, 627) {
 					tflog.Info(ctx, "VM is busy (stop rejected), will re-check status", map[string]any{"vm_id": vmID})
-					sleepWithContext(ctx, pollInterval)
+					sleepWithContext(ctx)
 					continue
 				}
 				resp.Diagnostics.AddError("Unable to Stop VM for volume detach", err.Error())
 				return
 			}
-			sleepWithContext(ctx, pollInterval)
+			sleepWithContext(ctx)
 
 		case "STOPPING":
 			tflog.Debug(ctx, "VM is stopping, waiting", map[string]any{"vm_id": vmID})
-			sleepWithContext(ctx, pollInterval)
+			sleepWithContext(ctx)
 
 		case "STARTING":
 			tflog.Debug(ctx, "VM is starting, waiting for it to finish", map[string]any{"vm_id": vmID})
-			sleepWithContext(ctx, pollInterval)
+			sleepWithContext(ctx)
 
 		default:
 			tflog.Warn(ctx, "VM in unexpected status, attempting detach", map[string]any{"vm_id": vmID, "status": vm.Status})
@@ -323,11 +363,14 @@ detached:
 	})
 }
 
-// sleepWithContext sleeps for the given duration, but returns early if ctx is cancelled.
-func sleepWithContext(ctx context.Context, d time.Duration) {
+// detachPollInterval is how long the detach loop waits between VM-status polls.
+const detachPollInterval = 5 * time.Second
+
+// sleepWithContext waits one detach poll interval, returning early if ctx is cancelled.
+func sleepWithContext(ctx context.Context) {
 	select {
 	case <-ctx.Done():
-	case <-time.After(d):
+	case <-time.After(detachPollInterval):
 	}
 }
 
