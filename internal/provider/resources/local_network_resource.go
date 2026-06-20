@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"sync"
 
 	"terraform-provider-prodata/internal/client"
 
@@ -22,6 +23,15 @@ var (
 	_ resource.ResourceWithConfigure   = &LocalNetworkResource{}
 	_ resource.ResourceWithImportState = &LocalNetworkResource{}
 )
+
+// localNetworkWriteMu serializes local-network create/delete API calls within this
+// provider process. The backend guards these with a non-blocking try-lock, so two
+// concurrent create/delete calls make the second fail with error 627 — which a default
+// `terraform apply` (parallelism 10) reliably trips on a config with several local
+// networks. Serializing the calls here removes the in-process race (the documented
+// `-parallelism=1` workaround is then unnecessary). The lock wraps only the single API
+// call, not the retry/backoff waits, so it never holds across a sleep.
+var localNetworkWriteMu sync.Mutex
 
 type LocalNetworkResource struct {
 	client *client.Client
@@ -147,6 +157,8 @@ func (r *LocalNetworkResource) Create(ctx context.Context, req resource.CreateRe
 	})
 
 	network, err := client.RetryOnBusy(ctx, client.RetryTimeoutShort, func() (*client.LocalNetwork, error) {
+		localNetworkWriteMu.Lock()
+		defer localNetworkWriteMu.Unlock()
 		return r.client.CreateLocalNetwork(ctx, createReq)
 	})
 	if err != nil {
@@ -339,6 +351,8 @@ func (r *LocalNetworkResource) Delete(ctx context.Context, req resource.DeleteRe
 	})
 
 	err := client.RetryVoidOnBusy(ctx, client.RetryTimeoutShort, func() error {
+		localNetworkWriteMu.Lock()
+		defer localNetworkWriteMu.Unlock()
 		return r.client.DeleteLocalNetwork(ctx, networkID, opts)
 	})
 	if err != nil {
