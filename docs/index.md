@@ -65,6 +65,23 @@ Obtain API credentials from the ProData Cloud console:
 3. Click **Generate Key**
 4. Save the API Key ID and Secret Key (shown only once)
 
+## Sensitive data and Terraform state
+
+Several attributes are marked `Sensitive`, which redacts them from `terraform plan`/`apply`
+console output — but **`Sensitive` does not encrypt Terraform state**. These values are
+written to the state file (and any plan file) in plaintext:
+
+- `api_secret_key` (provider configuration)
+- `prodata_vm`: `password`
+- `prodata_kubernetes_cluster`: the entire `kube_config` block (client certificate, client
+  key, bearer `token`, `raw_config`), plus `ssh_key_encoded` and `private_key_encoded`
+
+Treat the state file as a secret. Use a remote backend with **encryption at rest and access
+controls** (for example an encrypted object-storage backend), restrict who can read it, and
+avoid committing `terraform.tfstate` to source control. Write-only attributes that are never
+read back (`prodata_vm` `password`, `ssh_public_key`, and `user_data`) are not stored in
+state at all.
+
 ## Schema
 
 ### Optional
