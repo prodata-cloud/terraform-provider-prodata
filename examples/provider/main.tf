@@ -1,7 +1,7 @@
 terraform {
   required_providers {
     prodata = {
-      source = "pro-data/prodata"
+      source = "prodata-cloud/prodata"
     }
   }
 }
