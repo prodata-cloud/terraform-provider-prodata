@@ -248,7 +248,7 @@ resource "prodata_vm" "test" {
 %[6]s%[7]s
   user_data      = local.ud
 
-  timeouts {
+  timeouts = {
     create = "15m"
   }
 }
@@ -286,7 +286,7 @@ resource "prodata_vm" "test" {
 %[6]s%[7]s
   user_data      = local.ud
 
-  timeouts {
+  timeouts = {
     create = "15m"
   }
 }
