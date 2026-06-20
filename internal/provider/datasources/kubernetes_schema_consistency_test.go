@@ -63,7 +63,7 @@ func assertTagsMatch(t *testing.T, level string, modelType reflect.Type, attrs m
 
 func TestK8sClusterDataSourceSchemaConsistency(t *testing.T) {
 	var resp datasource.SchemaResponse
-	NewK8sClusterDataSource().(*K8sClusterDataSource).Schema(context.Background(), datasource.SchemaRequest{}, &resp)
+	NewK8sClusterDataSource().Schema(context.Background(), datasource.SchemaRequest{}, &resp)
 	if resp.Diagnostics.HasError() {
 		t.Fatalf("schema build errors: %v", resp.Diagnostics)
 	}
@@ -79,7 +79,7 @@ func TestK8sClusterDataSourceSchemaConsistency(t *testing.T) {
 
 func TestK8sNodePoolDataSourceSchemaConsistency(t *testing.T) {
 	var resp datasource.SchemaResponse
-	NewK8sNodePoolDataSource().(*K8sNodePoolDataSource).Schema(context.Background(), datasource.SchemaRequest{}, &resp)
+	NewK8sNodePoolDataSource().Schema(context.Background(), datasource.SchemaRequest{}, &resp)
 	if resp.Diagnostics.HasError() {
 		t.Fatalf("schema build errors: %v", resp.Diagnostics)
 	}
@@ -88,7 +88,7 @@ func TestK8sNodePoolDataSourceSchemaConsistency(t *testing.T) {
 
 func TestK8sFlavorsDataSourceSchemaConsistency(t *testing.T) {
 	var resp datasource.SchemaResponse
-	NewK8sFlavorsDataSource().(*K8sFlavorsDataSource).Schema(context.Background(), datasource.SchemaRequest{}, &resp)
+	NewK8sFlavorsDataSource().Schema(context.Background(), datasource.SchemaRequest{}, &resp)
 	if resp.Diagnostics.HasError() {
 		t.Fatalf("schema build errors: %v", resp.Diagnostics)
 	}
@@ -103,7 +103,7 @@ func TestK8sFlavorsDataSourceSchemaConsistency(t *testing.T) {
 
 func TestK8sVersionsDataSourceSchemaConsistency(t *testing.T) {
 	var resp datasource.SchemaResponse
-	NewK8sVersionsDataSource().(*K8sVersionsDataSource).Schema(context.Background(), datasource.SchemaRequest{}, &resp)
+	NewK8sVersionsDataSource().Schema(context.Background(), datasource.SchemaRequest{}, &resp)
 	if resp.Diagnostics.HasError() {
 		t.Fatalf("schema build errors: %v", resp.Diagnostics)
 	}

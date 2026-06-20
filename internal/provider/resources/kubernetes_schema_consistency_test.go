@@ -65,7 +65,7 @@ func assertTagsMatch(t *testing.T, level string, modelType reflect.Type, attrs m
 
 func TestK8sClusterSchemaModelConsistency(t *testing.T) {
 	var resp resource.SchemaResponse
-	NewK8sClusterResource().(*K8sClusterResource).Schema(context.Background(), resource.SchemaRequest{}, &resp)
+	NewK8sClusterResource().Schema(context.Background(), resource.SchemaRequest{}, &resp)
 	if resp.Diagnostics.HasError() {
 		t.Fatalf("schema build errors: %v", resp.Diagnostics)
 	}
@@ -94,7 +94,7 @@ func TestK8sClusterSchemaModelConsistency(t *testing.T) {
 
 func TestK8sNodePoolSchemaModelConsistency(t *testing.T) {
 	var resp resource.SchemaResponse
-	NewK8sNodePoolResource().(*K8sNodePoolResource).Schema(context.Background(), resource.SchemaRequest{}, &resp)
+	NewK8sNodePoolResource().Schema(context.Background(), resource.SchemaRequest{}, &resp)
 	if resp.Diagnostics.HasError() {
 		t.Fatalf("schema build errors: %v", resp.Diagnostics)
 	}

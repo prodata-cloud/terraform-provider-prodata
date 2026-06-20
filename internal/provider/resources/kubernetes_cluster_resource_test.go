@@ -49,10 +49,10 @@ func TestDefaultPoolChanged(t *testing.T) {
 	fixed := func(n int64) *K8sDefaultPoolModel {
 		return &K8sDefaultPoolModel{NodeCount: types.Int64Value(n)}
 	}
-	auto := func(min, max int64) *K8sDefaultPoolModel {
+	auto := func(minNodes, maxNodes int64) *K8sDefaultPoolModel {
 		return &K8sDefaultPoolModel{
 			NodeCount:   types.Int64Null(),
-			Autoscaling: &K8sAutoscalingModel{MinNodes: types.Int64Value(min), MaxNodes: types.Int64Value(max)},
+			Autoscaling: &K8sAutoscalingModel{MinNodes: types.Int64Value(minNodes), MaxNodes: types.Int64Value(maxNodes)},
 		}
 	}
 
@@ -83,10 +83,10 @@ func TestPoolMatchesDesired(t *testing.T) {
 	fixed := func(n int64) *K8sDefaultPoolModel {
 		return &K8sDefaultPoolModel{NodeCount: types.Int64Value(n)}
 	}
-	auto := func(min, max int64) *K8sDefaultPoolModel {
+	auto := func(minNodes, maxNodes int64) *K8sDefaultPoolModel {
 		return &K8sDefaultPoolModel{
 			NodeCount:   types.Int64Null(),
-			Autoscaling: &K8sAutoscalingModel{MinNodes: types.Int64Value(min), MaxNodes: types.Int64Value(max)},
+			Autoscaling: &K8sAutoscalingModel{MinNodes: types.Int64Value(minNodes), MaxNodes: types.Int64Value(maxNodes)},
 		}
 	}
 	cases := []struct {

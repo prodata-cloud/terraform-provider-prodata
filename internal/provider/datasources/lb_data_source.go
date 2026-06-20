@@ -28,21 +28,21 @@ type LbDataSource struct {
 // node_pool_id is NOT exposed because the panel does not return it on GET — see
 // the M6 "known limitations" entry on the resource.
 type LbDataSourceModel struct {
-	ID           types.Int64           `tfsdk:"id"`
-	Region       types.String          `tfsdk:"region"`
-	ProjectTag   types.String          `tfsdk:"project_tag"`
-	Name         types.String          `tfsdk:"name"`
-	Description  types.String          `tfsdk:"description"`
-	Type         types.String          `tfsdk:"type"`
-	Protocol     types.String          `tfsdk:"protocol"`
-	NetworkID    types.Int64           `tfsdk:"network_id"`
-	Source       types.String          `tfsdk:"source"`
-	Status       types.String          `tfsdk:"status"`
-	PublicIP     types.String          `tfsdk:"public_ip"`
-	PrivateIP    types.String          `tfsdk:"private_ip"`
-	DateCreated  types.String          `tfsdk:"date_created"`
-	Port         []LbDataSourcePort    `tfsdk:"port"`
-	VMIDs        types.Set             `tfsdk:"vm_ids"`
+	ID          types.Int64        `tfsdk:"id"`
+	Region      types.String       `tfsdk:"region"`
+	ProjectTag  types.String       `tfsdk:"project_tag"`
+	Name        types.String       `tfsdk:"name"`
+	Description types.String       `tfsdk:"description"`
+	Type        types.String       `tfsdk:"type"`
+	Protocol    types.String       `tfsdk:"protocol"`
+	NetworkID   types.Int64        `tfsdk:"network_id"`
+	Source      types.String       `tfsdk:"source"`
+	Status      types.String       `tfsdk:"status"`
+	PublicIP    types.String       `tfsdk:"public_ip"`
+	PrivateIP   types.String       `tfsdk:"private_ip"`
+	DateCreated types.String       `tfsdk:"date_created"`
+	Port        []LbDataSourcePort `tfsdk:"port"`
+	VMIDs       types.Set          `tfsdk:"vm_ids"`
 }
 
 type LbDataSourcePort struct {
