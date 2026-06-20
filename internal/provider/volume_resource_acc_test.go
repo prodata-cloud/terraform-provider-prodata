@@ -25,6 +25,54 @@ func init() {
 	})
 }
 
+// TestAccVolume_outOfBandDeleteDetected is the regression witness for the volume
+// soft-delete drift fix: GET /volumes/{id} keeps returning a deleted volume
+// (success:true) while the list endpoint drops it, so Read must confirm liveness via
+// the list. After deleting the volume out-of-band, the refresh plan must be non-empty
+// (Terraform plans to recreate it). Without the fix, by-id Read keeps stale state and
+// the plan would be empty.
+func TestAccVolume_outOfBandDeleteDetected(t *testing.T) {
+	name := accName()
+	resourceName := "prodata_volume.test"
+
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testAccPreCheck(t); testAccProdMutationGuard(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		CheckDestroy:             testAccCheckVolumeDestroy,
+		Steps: []resource.TestStep{
+			{
+				Config:             testAccVolumeConfig(name, "HDD", 10),
+				Check:              testAccVolumeDisappears(resourceName),
+				ExpectNonEmptyPlan: true,
+			},
+		},
+	})
+}
+
+// testAccVolumeDisappears deletes the volume out-of-band (directly via the API),
+// simulating a deletion made outside Terraform.
+func testAccVolumeDisappears(resourceName string) resource.TestCheckFunc {
+	return func(s *terraform.State) error {
+		rs, ok := s.RootModule().Resources[resourceName]
+		if !ok {
+			return fmt.Errorf("resource %s not found in state", resourceName)
+		}
+		c, err := accClient()
+		if err != nil {
+			return err
+		}
+		id, err := strconv.ParseInt(rs.Primary.Attributes["id"], 10, 64)
+		if err != nil {
+			return fmt.Errorf("parse volume id %q: %w", rs.Primary.Attributes["id"], err)
+		}
+		opts := &client.RequestOpts{
+			Region:     rs.Primary.Attributes["region"],
+			ProjectTag: rs.Primary.Attributes["project_tag"],
+		}
+		return c.DeleteVolume(context.Background(), id, opts)
+	}
+}
+
 // TestAccVolume_basic exercises create+read, an in-place rename, plan stability, and
 // an import round-trip of prodata_volume.
 func TestAccVolume_basic(t *testing.T) {

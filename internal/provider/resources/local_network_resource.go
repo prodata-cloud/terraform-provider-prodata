@@ -160,6 +160,21 @@ func (r *LocalNetworkResource) Create(ctx context.Context, req resource.CreateRe
 					fmt.Sprintf("network %q already exists but failed to look it up: %s (original error: %s)", createReq.Name, adoptErr, err))
 				return
 			}
+			// cidr and gateway are Required + RequiresReplace. Adopting a network whose
+			// CIDR/gateway differ from config would write the server's values into state,
+			// so every subsequent plan would force a destroy/recreate (which hits 614
+			// again) — a permanent diff / adoption loop. Refuse to adopt a mismatch.
+			if existing.CIDR != createReq.CIDR || existing.Gateway != createReq.Gateway {
+				resp.Diagnostics.AddError(
+					"Conflicting Local Network",
+					fmt.Sprintf("a local network named %q already exists with cidr %q and gateway %q, "+
+						"which differ from the configured cidr %q and gateway %q. Import the existing "+
+						"network (terraform import) or choose a different name — refusing to adopt a "+
+						"mismatched network, which would force a destroy/recreate on every apply.",
+						createReq.Name, existing.CIDR, existing.Gateway, createReq.CIDR, createReq.Gateway),
+				)
+				return
+			}
 			tflog.Info(ctx, "Local network already exists, adopting into state", map[string]any{
 				"id":   existing.ID,
 				"name": existing.Name,

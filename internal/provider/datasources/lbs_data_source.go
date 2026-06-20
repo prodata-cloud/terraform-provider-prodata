@@ -152,6 +152,10 @@ func (d *LbsDataSource) Read(ctx context.Context, req datasource.ReadRequest, re
 
 	data.LoadBalancers = make([]LbSummary, 0, len(lbs))
 	for _, lb := range lbs {
+		// Skip soft-deleted load balancers so the list matches the live set.
+		if lb.Status == client.LbStatusDeleted {
+			continue
+		}
 		data.LoadBalancers = append(data.LoadBalancers, LbSummary{
 			ID:          types.Int64Value(lb.ID),
 			Name:        types.StringValue(lb.Name),

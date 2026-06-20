@@ -227,10 +227,55 @@ func (r *S3BucketResource) Create(ctx context.Context, req resource.CreateReques
 			return
 		}
 		tflog.Info(ctx, "Adopting pre-existing bucket in same project", map[string]any{"name": name})
+
+		// Capture the configured (desired) settings before refreshFromServer overwrites
+		// the versioning/object-lock fields with the adopted bucket's actual values.
+		desiredVersioning := plan.Versioning.ValueBool()
+		desiredObjectLock := plan.ObjectLockEnabled.ValueBool()
+		desiredACL := plan.Acl.ValueString()
+
 		if rfErr := r.refreshFromServer(ctx, &plan, existing, opts); rfErr != nil {
 			resp.Diagnostics.AddError("Unable to read adopted Bucket configuration", rfErr.Error())
 			return
 		}
+
+		// object_lock_enabled is create-only (RequiresReplace). If the existing bucket's
+		// value differs from config, adoption cannot reconcile it without a destroy/recreate
+		// that would delete bucket data — refuse rather than silently adopting a mismatch
+		// (which would otherwise force a replace on the next plan).
+		if plan.ObjectLockEnabled.ValueBool() != desiredObjectLock {
+			resp.Diagnostics.AddError(
+				"Cannot adopt bucket with mismatched object_lock_enabled",
+				fmt.Sprintf("A bucket named %q already exists with object_lock_enabled=%t, but the configuration requests %t. "+
+					"Object lock can only be set at creation, so adoption cannot change it. Use a different name or align the configuration.",
+					name, plan.ObjectLockEnabled.ValueBool(), desiredObjectLock),
+			)
+			return
+		}
+
+		// Reconcile the mutable settings to the configured values so the adopted bucket
+		// actually matches the plan. acl is trust-state-only (never read back), so without
+		// this the state would claim an acl the bucket may not have; versioning is applied
+		// directly instead of being deferred to a follow-up apply.
+		if aclEnum := aclToEnum(desiredACL); aclEnum != "" {
+			if err := r.c.PutBucketAcl(ctx, existing.Name, client.PutBucketAclRequest{Acl: aclEnum}, opts); err != nil {
+				resp.Diagnostics.AddError("Unable to apply ACL to adopted Bucket", err.Error())
+				return
+			}
+		}
+		if plan.Versioning.ValueBool() != desiredVersioning {
+			status := "SUSPENDED"
+			if desiredVersioning {
+				status = "ENABLED"
+			}
+			if err := r.c.PutBucketVersioning(ctx, existing.Name,
+				client.PutBucketVersioningRequest{VersioningConfiguration: &client.VersioningConfiguration{Status: status}}, opts); err != nil {
+				resp.Diagnostics.AddError("Unable to apply versioning to adopted Bucket", err.Error())
+				return
+			}
+			plan.Versioning = types.BoolValue(desiredVersioning)
+		}
+
 		plan.ID = types.StringValue(existing.Name)
 		plan.Name = types.StringValue(existing.Name)
 		plan.Region = types.StringValue(region)
