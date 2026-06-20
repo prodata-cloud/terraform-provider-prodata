@@ -206,17 +206,29 @@ func parseResponse(statusCode int, respBody []byte, result any) error {
 			}
 			apiErr.Message = strings.Join(msgs, "; ")
 		} else {
-			apiErr.Message = string(respBody)
+			// Do not surface the raw response body in the user-facing message: a
+			// non-enveloped error body (an infra error page, or a partial/unexpected
+			// payload) can carry secrets — kube_config credentials, VM passwords —
+			// that would then be printed verbatim in Terraform diagnostics and CI
+			// logs, defeating the schema's Sensitive markings. The full body is kept
+			// in RawBody (never rendered) for programmatic inspection.
+			apiErr.Message = fmt.Sprintf("unexpected response (HTTP %d %s)", statusCode, http.StatusText(statusCode))
 		}
 		return apiErr
 	}
 
 	if result != nil {
 		if !parsed {
-			return fmt.Errorf("unexpected response format (status %d): %s", statusCode, string(respBody))
+			// Same redaction rationale as above: never echo an unparsed body.
+			return fmt.Errorf("unexpected response format (HTTP %d %s)", statusCode, http.StatusText(statusCode))
 		}
-		if err := json.Unmarshal(apiResp.Data, result); err != nil {
-			return fmt.Errorf("parse data: %w", err)
+		// A success envelope may legitimately omit "data" (or send null); unmarshalling
+		// a zero-length json.RawMessage would otherwise fail with "unexpected end of
+		// JSON input". Guard it, mirroring parseV1Response.
+		if len(apiResp.Data) > 0 && string(apiResp.Data) != "null" {
+			if err := json.Unmarshal(apiResp.Data, result); err != nil {
+				return fmt.Errorf("parse data: %w", err)
+			}
 		}
 	}
 
