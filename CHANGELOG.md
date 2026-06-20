@@ -68,6 +68,31 @@ All notable changes to this provider are documented here. The format is based on
   whose cloud-init failed still reports `RUNNING` — so a successful `apply` does
   not by itself prove the `user_data` script ran without errors.
 
+## [0.18.2] - 2026-06-04
+
+### Documentation
+
+- `prodata_lb`: document the round-robin balancing behavior and clarify that
+  `backend_group.vm_ids` takes VM **guids** (the `prodata_vm.guid` attribute),
+  not numeric ids.
+
+## [0.18.1] - 2026-06-02
+
+### Fixed
+
+- Client: stop retrying API error **627** (the panel's generic "unhandled error"
+  HTTP 500 catch-all). 627 is not a transient/busy condition, so retrying it only
+  hung `terraform apply` for the full timeout and masked the real cause; it now
+  surfaces immediately.
+
+## [0.18.0] - 2026-05-21
+
+### Added
+
+- `prodata_vm`: a computed **`guid`** attribute — the VM's stable global
+  identifier. Use it wherever another resource references a VM by guid (for
+  example a load balancer's `backend_group.vm_ids`).
+
 ## [0.17.1] - 2026-05-21
 
 ### Added
@@ -208,8 +233,16 @@ for release-by-release commits. Notable in the 0.11 line: addition of
 `prodata_s3_bucket` resource and data sources, the `prodata_public_ip_attachment`
 restart note, plus VM and volume CRUD improvements.
 
-[Unreleased]: https://github.com/prodata-cloud/terraform-provider-prodata/compare/v0.20.0...HEAD
+[Unreleased]: https://github.com/prodata-cloud/terraform-provider-prodata/compare/v0.21.0...HEAD
+[0.21.0]: https://github.com/prodata-cloud/terraform-provider-prodata/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/prodata-cloud/terraform-provider-prodata/compare/v0.19.0...v0.20.0
+[0.19.0]: https://github.com/prodata-cloud/terraform-provider-prodata/compare/v0.18.2...v0.19.0
+[0.18.2]: https://github.com/prodata-cloud/terraform-provider-prodata/compare/v0.18.1...v0.18.2
+[0.18.1]: https://github.com/prodata-cloud/terraform-provider-prodata/compare/v0.18.0...v0.18.1
+[0.18.0]: https://github.com/prodata-cloud/terraform-provider-prodata/compare/v0.17.1...v0.18.0
+[0.17.1]: https://github.com/prodata-cloud/terraform-provider-prodata/compare/v0.17.0...v0.17.1
+[0.17.0]: https://github.com/prodata-cloud/terraform-provider-prodata/compare/v0.16.0...v0.17.0
+[0.16.0]: https://github.com/prodata-cloud/terraform-provider-prodata/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/prodata-cloud/terraform-provider-prodata/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/prodata-cloud/terraform-provider-prodata/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/prodata-cloud/terraform-provider-prodata/compare/v0.12.0...v0.13.0
