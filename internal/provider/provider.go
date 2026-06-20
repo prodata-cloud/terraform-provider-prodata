@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"os"
+	"strconv"
 
 	"terraform-provider-prodata/internal/client"
 	"terraform-provider-prodata/internal/provider/datasources"
@@ -134,6 +135,15 @@ func (p *ProDataProvider) Configure(ctx context.Context, req provider.ConfigureR
 	}
 
 	cfg.UserAgent = "terraform-provider-prodata/" + p.version
+
+	// Optional client-side request pacing. PRODATA_MAX_RPS > 0 caps outbound requests
+	// per second to pre-empt server-side 429s on bulk applies; unset/0/invalid leaves it
+	// off (the reactive 429 backoff still applies). Env-only knob — no schema surface.
+	if v := os.Getenv("PRODATA_MAX_RPS"); v != "" {
+		if rps, perr := strconv.ParseFloat(v, 64); perr == nil && rps > 0 {
+			cfg.MaxRPS = rps
+		}
+	}
 
 	c, err := client.New(cfg)
 	if err != nil {
