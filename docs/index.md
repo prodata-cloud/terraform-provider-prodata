@@ -99,6 +99,13 @@ state at all.
 | Uzbekistan | `https://my.pro-data.tech`   |
 | Kazakhstan | `https://kz-1.pro-data.tech` |
 
+## Performance tuning
+
+The provider already retries HTTP 429 (rate-limited) responses with backoff. On very large
+applies you can additionally cap the outbound request rate to pre-empt rate limiting by
+setting the `PRODATA_MAX_RPS` environment variable to the maximum requests per second
+(e.g. `export PRODATA_MAX_RPS=5`). Unset or `0` (the default) disables client-side pacing.
+
 ## Support
 
 - **Help Desk**: [helpdesk.pro-data.tech](https://helpdesk.pro-data.tech)

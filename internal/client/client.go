@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hashicorp/terraform-plugin-log/tflog"
@@ -47,6 +48,7 @@ type Client struct {
 	Region       string
 	ProjectTag   string
 	httpClient   *http.Client
+	limiter      *rateLimiter // nil = no client-side rate limiting
 }
 
 type Config struct {
@@ -56,11 +58,20 @@ type Config struct {
 	UserAgent    string
 	Region       string
 	ProjectTag   string
+	// MaxRPS, when > 0, paces outbound requests to at most this many per second to
+	// pre-empt server-side 429s on bulk applies. 0 (the default) disables pacing and
+	// relies solely on the reactive 429 backoff. Sourced from PRODATA_MAX_RPS.
+	MaxRPS float64
 }
 
 func New(cfg Config) (*Client, error) {
 	if cfg.APIBaseURL == "" || cfg.APIKeyID == "" || cfg.APISecretKey == "" {
 		return nil, fmt.Errorf("api_base_url, api_key_id, and api_secret_key are required")
+	}
+
+	var limiter *rateLimiter
+	if cfg.MaxRPS > 0 {
+		limiter = &rateLimiter{interval: time.Duration(float64(time.Second) / cfg.MaxRPS)}
 	}
 
 	return &Client{
@@ -76,7 +87,40 @@ func New(cfg Config) (*Client, error) {
 		// override those and abort slow synchronous creates (VM, LB, Kubernetes) regardless
 		// of the `timeouts` block, surfacing as a confusing transport error.
 		httpClient: &http.Client{},
+		limiter:    limiter,
 	}, nil
+}
+
+// rateLimiter paces requests to roughly one per `interval`, serialized across goroutines.
+// It is intentionally minimal (strict pacing, no burst) — a conservative cap that smooths
+// bulk-apply bursts to avoid self-inflicted 429s, without adding a dependency.
+type rateLimiter struct {
+	mu       sync.Mutex
+	interval time.Duration
+	next     time.Time
+}
+
+// wait blocks until this request's pacing slot, or until ctx is cancelled.
+func (l *rateLimiter) wait(ctx context.Context) error {
+	l.mu.Lock()
+	now := time.Now()
+	if l.next.Before(now) {
+		l.next = now
+	}
+	slot := l.next
+	l.next = l.next.Add(l.interval)
+	l.mu.Unlock()
+
+	d := time.Until(slot)
+	if d <= 0 {
+		return nil
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(d):
+		return nil
+	}
 }
 
 type apiResponse[T any] struct {
@@ -156,6 +200,12 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body any, o
 		req.Header.Set("X-Project-Tag", projectTag)
 		if lang != "" {
 			req.Header.Set("X-Lang", lang)
+		}
+
+		if c.limiter != nil {
+			if werr := c.limiter.wait(ctx); werr != nil {
+				return 0, nil, werr
+			}
 		}
 
 		resp, err := c.httpClient.Do(req)
