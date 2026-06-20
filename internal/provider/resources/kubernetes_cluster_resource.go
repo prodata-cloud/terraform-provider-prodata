@@ -307,6 +307,9 @@ func (r *K8sClusterResource) Schema(ctx context.Context, _ resource.SchemaReques
 					"network. Changing it forces a new resource.",
 				Required:      true,
 				PlanModifiers: []planmodifier.Int64{WriteOnceInt64()},
+				Validators: []validator.Int64{
+					int64validator.Between(1, 32),
+				},
 			},
 			"node_ip_range": schema.StringAttribute{
 				MarkdownDescription: "Control-plane IP range within the local network, as `start-end` " +
@@ -314,6 +317,12 @@ func (r *K8sClusterResource) Schema(ctx context.Context, _ resource.SchemaReques
 					"back from the API. Changing it forces a new resource.",
 				Required:      true,
 				PlanModifiers: []planmodifier.String{WriteOnceString()},
+				Validators: []validator.String{
+					stringvalidator.RegexMatches(
+						regexp.MustCompile(`^(\d{1,3}\.){3}\d{1,3}-(\d{1,3}\.){3}\d{1,3}$`),
+						"must be an IPv4 range as start-end, e.g. 10.0.0.10-10.0.0.20",
+					),
+				},
 			},
 			"public_key": schema.StringAttribute{
 				MarkdownDescription: "SSH public key authorized on the nodes (used when `ssh_access_enabled` is true). " +

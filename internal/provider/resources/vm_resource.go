@@ -3,6 +3,7 @@ package resources
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strconv"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 	"terraform-provider-prodata/internal/tfutil"
 
 	"github.com/hashicorp/terraform-plugin-framework-timeouts/resource/timeouts"
+	"github.com/hashicorp/terraform-plugin-framework-validators/int64validator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -109,6 +111,13 @@ func (r *VmResource) Schema(ctx context.Context, req resource.SchemaRequest, res
 			"name": schema.StringAttribute{
 				MarkdownDescription: "The name of the virtual machine. Must be 3-63 characters, contain at least one letter, only letters, numbers, and hyphens.",
 				Required:            true,
+				Validators: []validator.String{
+					stringvalidator.LengthBetween(3, 63),
+					stringvalidator.RegexMatches(
+						regexp.MustCompile(`^[0-9-]*[A-Za-z][A-Za-z0-9-]*$`),
+						"must contain only letters, digits and hyphens, and at least one letter",
+					),
+				},
 			},
 			"image_id": schema.Int64Attribute{
 				MarkdownDescription: "The ID of the image to use for the virtual machine.",
@@ -134,14 +143,23 @@ func (r *VmResource) Schema(ctx context.Context, req resource.SchemaRequest, res
 			"cpu_cores": schema.Int64Attribute{
 				MarkdownDescription: "The number of CPU cores for the virtual machine. Minimum 1. Changing this forces a VM reboot.",
 				Required:            true,
+				Validators: []validator.Int64{
+					int64validator.AtLeast(1),
+				},
 			},
 			"ram": schema.Int64Attribute{
 				MarkdownDescription: "The amount of RAM in GB for the virtual machine. Minimum 1. Changing this forces a VM reboot.",
 				Required:            true,
+				Validators: []validator.Int64{
+					int64validator.AtLeast(1),
+				},
 			},
 			"disk_size": schema.Int64Attribute{
 				MarkdownDescription: "The size of the disk in GB. Minimum 10. Can only be increased. Changing this forces a VM reboot.",
 				Required:            true,
+				Validators: []validator.Int64{
+					int64validator.AtLeast(10),
+				},
 			},
 			"disk_type": schema.StringAttribute{
 				MarkdownDescription: "The type of disk (HDD, SSD, or NVME). Can only be upgraded (e.g. HDD -> SSD). Changing this forces a VM reboot.",
