@@ -1,0 +1,53 @@
+# Continuous-integration checks for pull requests and the default branch.
+# Acceptance tests (TF_ACC) are intentionally NOT run here: they create real
+# cloud resources and require PRODATA_* credentials. CI runs build, format, vet,
+# lint, and the unit tests (which skip when TF_ACC is unset).
+name: Tests
+
+on:
+  pull_request: {}
+  push:
+    branches:
+      - main
+
+# Checks only need to read the repository.
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build & unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+      - uses: actions/setup-go@4dc6199c7b1a012772edbd06daecab0f50c9053c # v6.1.0
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+      - run: go mod download
+      - name: Build
+        run: go build -v ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Unit tests
+        run: go test -cover -timeout 120s ./...
+
+  lint:
+    name: gofmt & golangci-lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+      - uses: actions/setup-go@4dc6199c7b1a012772edbd06daecab0f50c9053c # v6.1.0
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::These files are not gofmt-clean:"
+            echo "$unformatted"
+            exit 1
+          fi
+      - name: golangci-lint
+        run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.6.0 run ./...
