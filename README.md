@@ -3,6 +3,33 @@
 Terraform provider for [ProData Cloud](https://registry.terraform.io/providers/prodata-cloud/prodata),
 built on the [Terraform Plugin Framework](https://developer.hashicorp.com/terraform/plugin/framework).
 
+Full documentation and examples for every resource and data source are published on
+the [Terraform Registry](https://registry.terraform.io/providers/prodata-cloud/prodata/latest/docs).
+
+## Supported resources and data sources
+
+**Resources**
+
+- `prodata_vm` — virtual machine (with optional cloud-init `user_data`)
+- `prodata_volume` / `prodata_volume_attachment` — block volumes and their attachment to a VM
+- `prodata_public_ip` / `prodata_public_ip_attachment` — public IPs and their attachment to a VM
+- `prodata_local_network` — local (private) network
+- `prodata_s3_bucket` — S3-compatible object-storage bucket
+- `prodata_lb` — L4 (TCP/UDP) load balancer
+- `prodata_kubernetes_cluster` / `prodata_kubernetes_node_pool` — Managed Kubernetes
+
+**Data sources**
+
+- `prodata_image` / `prodata_images`
+- `prodata_vm` / `prodata_vms`
+- `prodata_volume` / `prodata_volumes`
+- `prodata_public_ip` / `prodata_public_ips`
+- `prodata_local_network` / `prodata_local_networks`
+- `prodata_s3_bucket` / `prodata_s3_buckets`
+- `prodata_lb` / `prodata_lbs`
+- `prodata_kubernetes_cluster` / `prodata_kubernetes_node_pool`
+- `prodata_kubernetes_versions` / `prodata_kubernetes_flavors`
+
 ## Requirements
 
 - [Go](https://go.dev/dl/) >= 1.25
