@@ -19,12 +19,15 @@ import (
 func TestK8sClusterKubeConfigUnknownDecodes(t *testing.T) {
 	ctx := context.Background()
 	var resp resource.SchemaResponse
-	NewK8sClusterResource().(*K8sClusterResource).Schema(ctx, resource.SchemaRequest{}, &resp)
+	NewK8sClusterResource().Schema(ctx, resource.SchemaRequest{}, &resp)
 	if resp.Diagnostics.HasError() {
 		t.Fatalf("schema: %v", resp.Diagnostics)
 	}
 
-	objType := resp.Schema.Type().TerraformType(ctx).(tftypes.Object)
+	objType, ok := resp.Schema.Type().TerraformType(ctx).(tftypes.Object)
+	if !ok {
+		t.Fatalf("expected an object type, got %T", resp.Schema.Type().TerraformType(ctx))
+	}
 	attrs := map[string]tftypes.Value{}
 	for name, aTyp := range objType.AttributeTypes {
 		if name == "kube_config" {

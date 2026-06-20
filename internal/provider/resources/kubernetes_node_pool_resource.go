@@ -240,8 +240,8 @@ func (r *K8sNodePoolResource) ValidateConfig(ctx context.Context, req resource.V
 		)
 	}
 	if cfg.Autoscaling != nil {
-		min, max := cfg.Autoscaling.MinNodes, cfg.Autoscaling.MaxNodes
-		if !min.IsUnknown() && !max.IsUnknown() && min.ValueInt64() > max.ValueInt64() {
+		minNodes, maxNodes := cfg.Autoscaling.MinNodes, cfg.Autoscaling.MaxNodes
+		if !minNodes.IsUnknown() && !maxNodes.IsUnknown() && minNodes.ValueInt64() > maxNodes.ValueInt64() {
 			resp.Diagnostics.AddAttributeError(
 				path.Root("autoscaling").AtName("max_nodes"),
 				"Invalid autoscaling bounds",

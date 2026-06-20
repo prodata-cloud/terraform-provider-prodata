@@ -7,7 +7,7 @@ import (
 )
 
 // Known-answer vector: sha256 of the 14-byte string "#cloud-config\n".
-// Computed with: printf '#cloud-config\n' | shasum -a 256
+// Computed with: printf '#cloud-config\n' | shasum -a 256.
 const knownCloudConfigHash = "88c95955b024402aa9572b663f7eeb134f01343bb92af27b50e97e72b22c565f"
 
 func TestUserDataHashHex_knownVector(t *testing.T) {

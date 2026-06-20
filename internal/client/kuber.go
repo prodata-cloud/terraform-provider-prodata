@@ -570,7 +570,7 @@ func (c *Client) ListKuberVersions(ctx context.Context, opts *RequestOpts) ([]Ku
 	}
 	out := make([]KuberVersion, 0, len(dtos))
 	for _, d := range dtos {
-		out = append(out, KuberVersion{ID: d.ID, Version: d.Version, IsDebug: d.IsDebug})
+		out = append(out, KuberVersion(d))
 	}
 	return out, nil
 }
