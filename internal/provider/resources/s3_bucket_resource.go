@@ -115,7 +115,7 @@ func (r *S3BucketResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 				Default:  booldefault.StaticBool(false),
 			},
 			"object_lock_enabled": schema.BoolAttribute{
-				MarkdownDescription: "Whether S3 object lock is enabled. Requires `versioning = \"enabled\"`. " +
+				MarkdownDescription: "Whether S3 object lock is enabled. Requires `versioning = true`. " +
 					"Cannot be changed after creation.",
 				Optional: true,
 				Computed: true,
