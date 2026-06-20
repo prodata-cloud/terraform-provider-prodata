@@ -204,6 +204,26 @@ func (r *VolumeResource) Read(ctx context.Context, req resource.ReadRequest, res
 		return
 	}
 
+	// The by-id GET /volumes/{id} endpoint keeps returning soft-deleted volumes
+	// (success:true) after deletion, while the list endpoint drops them — so an
+	// out-of-band deletion would otherwise never be detected as drift. Confirm the
+	// volume is still live via the authoritative list. A transient list failure is
+	// NOT treated as deletion (keep prior state; a later refresh reconciles).
+	if volumes, lerr := r.client.GetVolumes(ctx, opts); lerr == nil {
+		stillPresent := false
+		for i := range volumes {
+			if volumes[i].ID == volumeID {
+				stillPresent = true
+				break
+			}
+		}
+		if !stillPresent {
+			tflog.Warn(ctx, "Volume absent from list (deleted out-of-band), removing from state", map[string]any{"id": volumeID})
+			resp.State.RemoveResource(ctx)
+			return
+		}
+	}
+
 	data.Name = types.StringValue(volume.Name)
 	data.Type = types.StringValue(volume.Type)
 	data.Size = types.Int64Value(volume.Size)
