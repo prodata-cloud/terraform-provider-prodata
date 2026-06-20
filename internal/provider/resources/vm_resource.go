@@ -350,10 +350,19 @@ const (
 // Note: the backend does not surface a cloud-init failure as VM status ERROR — a VM whose
 // cloud-init failed still reports RUNNING — so reaching RUNNING here does not prove the
 // user_data script succeeded.
-func (r *VmResource) waitForVmReady(ctx context.Context, vmID int64, opts *client.RequestOpts) (*client.Vm, error) {
-	const maxConsecutiveErrs = 3
+func (r *VmResource) waitForVmReady(ctx context.Context, vmID int64, opts *client.RequestOpts, expectCPU, expectRAM, expectDisk int64) (*client.Vm, error) {
+	const (
+		maxConsecutiveErrs = 3
+		// maxSettleAttempts bounds how long we wait, after the VM is already RUNNING/
+		// STOPPED, for the readback cpu/ram/disk to match the request before returning.
+		// It eliminates the brief post-create transient where the endpoint reports an
+		// intermediate value (which a racing refresh would surface as a spurious diff).
+		// Non-convergence is never fatal — we proceed once this budget is spent.
+		maxSettleAttempts = 6
+	)
 
 	consecutiveErrs := 0
+	settleAttempts := 0
 
 	for {
 		if err := ctx.Err(); err != nil {
@@ -381,7 +390,23 @@ func (r *VmResource) waitForVmReady(ctx context.Context, vmID int64, opts *clien
 
 			switch vm.Status {
 			case "RUNNING", "STOPPED":
-				return vm, nil
+				// Settle: wait (bounded) for the readback to match the requested sizing so
+				// the first refresh doesn't catch a transient intermediate value. Skip the
+				// check when no expectation was given; never fail on non-convergence.
+				if (expectCPU == 0 && expectRAM == 0 && expectDisk == 0) ||
+					(vm.CPUCores == expectCPU && vm.RAM == expectRAM && vm.DiskSize >= expectDisk) {
+					return vm, nil
+				}
+				settleAttempts++
+				if settleAttempts >= maxSettleAttempts {
+					tflog.Warn(ctx, "VM reached terminal status but cpu/ram/disk did not settle to the requested values within the settle window; proceeding", map[string]any{
+						"id":       vmID,
+						"want_cpu": expectCPU, "got_cpu": vm.CPUCores,
+						"want_ram": expectRAM, "got_ram": vm.RAM,
+						"want_disk": expectDisk, "got_disk": vm.DiskSize,
+					})
+					return vm, nil
+				}
 			case "ERROR":
 				return vm, fmt.Errorf("VM creation failed (id=%d, status=ERROR)", vmID)
 			}
@@ -566,7 +591,7 @@ func (r *VmResource) Create(ctx context.Context, req resource.CreateRequest, res
 
 	// Poll until the VM reaches a ready state (RUNNING/STOPPED) or fails (ERROR).
 	opts := &client.RequestOpts{Region: region, ProjectTag: projectTag}
-	readyVm, waitErr := r.waitForVmReady(ctx, vm.ID, opts)
+	readyVm, waitErr := r.waitForVmReady(ctx, vm.ID, opts, createReq.CPUCores, createReq.RAM, createReq.DiskSize)
 
 	// Save state even if VM ended up in ERROR — prevents desync on retry.
 	resultVm := readyVm
