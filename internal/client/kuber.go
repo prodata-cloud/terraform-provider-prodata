@@ -42,6 +42,7 @@ type Cluster struct {
 	IsPublic          bool
 	IsHA              bool
 	PodSubnet         string
+	NodeIPRange       string // nodeIpRange — start-end; echoed by the API since the backend may auto-allocate it
 	Kubeconfig        string // clusterConfigSecret — may be empty while NEW/PROCESSING
 	SSHKeyEncoded     string
 	PrivateKeyEncoded string
@@ -106,24 +107,27 @@ type KuberVersion struct {
 
 // CreateClusterRequest is the body for POST /createCluster (NewClusterCreateDTO).
 // Dead fields gateway/prefix are intentionally omitted (gateway is taken from the
-// local network server-side; serviceSubnet is not a DTO field). The region and
-// project are NOT in the body: createCluster hardcodes the user's current region
-// (K8SCluster ctor), so the cluster lands in whatever region the caller's headers
-// resolve to.
+// local network server-side; serviceSubnet is not a DTO field). nodeSubnet is also
+// omitted: panel-main derives the node subnet prefix from the local network's own
+// mask, so the inbound value was never authoritative for addressing. Addresses
+// (node_ip_range) is omitempty: when the caller omits it, panel-main auto-allocates a
+// free contiguous range from the local network and echoes it back on the cluster
+// (nodeIpRange). The region and project are NOT in the body: createCluster hardcodes
+// the user's current region (K8SCluster ctor), so the cluster lands in whatever region
+// the caller's headers resolve to.
 type CreateClusterRequest struct {
 	ClusterName        string   `json:"clusterName"`
 	WorkerDiskSize     int      `json:"workerDiskSize"`
 	WorkerCPU          int      `json:"workerCpu"`
 	WorkerRAM          int      `json:"workerRam"`
 	WorkerReplicas     int      `json:"workerReplicas"`
-	Addresses          []string `json:"addresses"`
+	Addresses          []string `json:"addresses,omitempty"`
 	KuberVersion       string   `json:"kuberVersion"`
 	NodePoolName       string   `json:"nodePoolName"`
 	NeedPublicIP       bool     `json:"needPublicIp"`
 	PublicKey          string   `json:"publicKey,omitempty"`
 	AuthorizeSSH       bool     `json:"authorizeSsh"`
 	PodSubnet          string   `json:"podSubnet"`
-	NodeSubnet         int      `json:"nodeSubnet"`
 	LocalNetID         int64    `json:"localNetId"`
 	IsHA               bool     `json:"isHa"`
 	MasterNodeConfigID int64    `json:"masterNodeConfigId"`
@@ -215,6 +219,7 @@ type clusterDTO struct {
 	NodePoolCount       *int                 `json:"nodePoolCount"`
 	MasterNodeConfig    *masterNodeConfigDTO `json:"masterNodeConfiguration"`
 	PodSubnet           string               `json:"podSubnet"`
+	NodeIPRange         string               `json:"nodeIpRange"`
 	Blocked             bool                 `json:"blocked"`
 	IPAddressesCount    int64                `json:"ipAddressesCount"`
 	ProjectID           int64                `json:"projectId"`
@@ -269,6 +274,7 @@ func (d *clusterDTO) toCluster() *Cluster {
 		IsPublic:          d.IsPublic,
 		IsHA:              d.IsHA,
 		PodSubnet:         d.PodSubnet,
+		NodeIPRange:       d.NodeIPRange,
 		Kubeconfig:        d.ClusterConfigSecret,
 		SSHKeyEncoded:     d.SSHKeyEncoded,
 		PrivateKeyEncoded: d.PrivateKeyEncoded,

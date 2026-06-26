@@ -15,7 +15,6 @@ resource "prodata_kubernetes_cluster" "main" {
   kubernetes_version = data.prodata_kubernetes_versions.stable.latest_version
   network_id         = prodata_local_network.k8s.id
   pod_cidr           = "10.244.0.0/16"
-  node_subnet        = 24
   node_ip_range      = "10.0.0.10-10.0.0.20"
   high_availability  = true
   master_flavor_id   = data.prodata_kubernetes_flavors.ha.flavors[0].id
@@ -35,7 +34,6 @@ resource "prodata_kubernetes_cluster" "edge" {
   kubernetes_version = data.prodata_kubernetes_versions.stable.latest_version
   network_id         = prodata_local_network.k8s.id
   pod_cidr           = "10.245.0.0/16"
-  node_subnet        = 24
   node_ip_range      = "10.0.1.10-10.0.1.20"
   master_flavor_id   = data.prodata_kubernetes_flavors.standard.flavors[0].id
 

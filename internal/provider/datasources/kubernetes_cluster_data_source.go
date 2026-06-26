@@ -41,6 +41,7 @@ type K8sClusterDataSourceModel struct {
 	HighAvailability      types.Bool   `tfsdk:"high_availability"`
 	PublicEndpointEnabled types.Bool   `tfsdk:"public_endpoint_enabled"`
 	PodCIDR               types.String `tfsdk:"pod_cidr"`
+	NodeIPRange           types.String `tfsdk:"node_ip_range"`
 	MasterFlavorID        types.Int64  `tfsdk:"master_flavor_id"`
 	APIEndpoint           types.String `tfsdk:"api_endpoint"`
 	KubeConfig            types.Object `tfsdk:"kube_config"`
@@ -103,6 +104,11 @@ func (d *K8sClusterDataSource) Schema(_ context.Context, _ datasource.SchemaRequ
 			"pod_cidr": schema.StringAttribute{
 				MarkdownDescription: "Pod network CIDR.",
 				Computed:            true,
+			},
+			"node_ip_range": schema.StringAttribute{
+				MarkdownDescription: "Control-plane IP range within the local network, as `start-end`. " +
+					"Either supplied at creation or auto-allocated by the platform.",
+				Computed: true,
 			},
 			"master_flavor_id": schema.Int64Attribute{
 				MarkdownDescription: "Master node configuration (flavor) ID.",
@@ -270,6 +276,7 @@ func (d *K8sClusterDataSource) Read(ctx context.Context, req datasource.ReadRequ
 	data.HighAvailability = types.BoolValue(cl.IsHA)
 	data.PublicEndpointEnabled = types.BoolValue(cl.IsPublic)
 	data.PodCIDR = tfutil.StringOrNull(cl.PodSubnet)
+	data.NodeIPRange = tfutil.StringOrNull(cl.NodeIPRange)
 	if cl.MasterNodeConfig != nil {
 		data.MasterFlavorID = types.Int64Value(cl.MasterNodeConfig.ID)
 	} else {

@@ -4,6 +4,29 @@ All notable changes to this provider are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.23.0] - 2026-06-24
+
+### Changed
+
+- `prodata_kubernetes_cluster`: `node_ip_range` is now **Optional+Computed**. When omitted,
+  the platform auto-allocates a free contiguous range from `network_id` (sized for the
+  cluster's master and worker capacity) and reports it back in state; when set, the value is
+  used as-is. It is no longer write-once — the API now echoes it, so it is read back on Read
+  and `terraform import` (no need to re-supply it after import). An explicit change still
+  forces a new resource. Range validation is retained for user-supplied values.
+- `prodata_kubernetes_cluster` data source now exports `node_ip_range`.
+
+### Removed
+
+- **Breaking:** `prodata_kubernetes_cluster.node_subnet` has been removed. The node subnet
+  prefix is derived server-side from the local network's own mask, so the input was never
+  authoritative for addressing. Remove `node_subnet` from your configurations; existing
+  state drops it automatically on the next refresh.
+
+> **Deploy ordering:** this release depends on the matching `panel-main` change (server-side
+> node-IP-range allocation + `nodeIpRange` exposed on the cluster API). Deploy the backend
+> first; otherwise omitting `node_ip_range` has nothing to allocate the range.
+
 ## [0.22.0] - 2026-06-21
 
 ### Added
