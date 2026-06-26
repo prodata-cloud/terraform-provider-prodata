@@ -49,9 +49,9 @@ func (m writeOnceStringModifier) PlanModifyString(_ context.Context, req planmod
 
 // writeOnceInt64Modifier is the Int64 analogue of writeOnceStringModifier, for a
 // create-time, immutable attribute the API does not echo back (e.g. network_id,
-// node_subnet — neither is present on the cluster wire response). It forces
-// replacement when changed on a Terraform-managed resource, but accepts the
-// configured value without replacement after an import left it null in state.
+// which is not present on the cluster wire response). It forces replacement when
+// changed on a Terraform-managed resource, but accepts the configured value
+// without replacement after an import left it null in state.
 type writeOnceInt64Modifier struct{}
 
 func WriteOnceInt64() planmodifier.Int64 {

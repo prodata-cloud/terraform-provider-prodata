@@ -45,7 +45,6 @@ func TestCreateCluster_SendsExactFieldNames(t *testing.T) {
 		KuberVersion:       "v1.31.4",
 		NodePoolName:       "default",
 		PodSubnet:          "10.244.0.0/16",
-		NodeSubnet:         24,
 		LocalNetID:         115107,
 		MasterNodeConfigID: 7,
 	}, nil)
@@ -62,7 +61,7 @@ func TestCreateCluster_SendsExactFieldNames(t *testing.T) {
 	// Pin the make-or-break wire keys.
 	for _, key := range []string{"clusterName", "workerCpu", "workerRam", "workerDiskSize",
 		"workerReplicas", "addresses", "kuberVersion", "nodePoolName", "podSubnet",
-		"nodeSubnet", "localNetId", "masterNodeConfigId"} {
+		"localNetId", "masterNodeConfigId"} {
 		if _, ok := capture.body[key]; !ok {
 			t.Errorf("request body missing key %q; got keys %v", key, keysOf(capture.body))
 		}
@@ -76,6 +75,11 @@ func TestCreateCluster_SendsExactFieldNames(t *testing.T) {
 	}
 	if _, ok := capture.body["prefix"]; ok {
 		t.Error("request body must not contain dead field prefix")
+	}
+	// nodeSubnet is no longer sent: the backend derives the node subnet from the
+	// local network's mask, so the provider must not carry it on the wire.
+	if _, ok := capture.body["nodeSubnet"]; ok {
+		t.Error("request body must not contain removed field nodeSubnet")
 	}
 
 	if cluster.ID != 500 {

@@ -57,7 +57,6 @@ type K8sClusterModel struct {
 	HighAvailability      types.Bool           `tfsdk:"high_availability"`
 	NetworkID             types.Int64          `tfsdk:"network_id"`
 	PodCIDR               types.String         `tfsdk:"pod_cidr"`
-	NodeSubnet            types.Int64          `tfsdk:"node_subnet"`
 	NodeIPRange           types.String         `tfsdk:"node_ip_range"`
 	PublicKey             types.String         `tfsdk:"public_key"`
 	SSHAccessEnabled      types.Bool           `tfsdk:"ssh_access_enabled"`
@@ -302,21 +301,18 @@ func (r *K8sClusterResource) Schema(ctx context.Context, _ resource.SchemaReques
 						"must be a CIDR with a /16 prefix, e.g. 10.244.0.0/16"),
 				},
 			},
-			"node_subnet": schema.Int64Attribute{
-				MarkdownDescription: "Node subnet prefix length used to carve node addressing out of the local " +
-					"network. Changing it forces a new resource.",
-				Required:      true,
-				PlanModifiers: []planmodifier.Int64{WriteOnceInt64()},
-				Validators: []validator.Int64{
-					int64validator.Between(1, 32),
-				},
-			},
 			"node_ip_range": schema.StringAttribute{
 				MarkdownDescription: "Control-plane IP range within the local network, as `start-end` " +
-					"(e.g. `10.0.0.10-10.0.0.20`). Write-once: required at creation, set once, and not read " +
-					"back from the API. Changing it forces a new resource.",
-				Required:      true,
-				PlanModifiers: []planmodifier.String{WriteOnceString()},
+					"(e.g. `10.0.0.10-10.0.0.20`). Optional: when omitted, the platform auto-allocates a free " +
+					"contiguous range from `network_id` (sized for the master and worker node capacity) and " +
+					"reports it back here. When set explicitly, the value is used as-is. Changing it forces a " +
+					"new resource.",
+				Optional: true,
+				Computed: true,
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.RequiresReplace(),
+					stringplanmodifier.UseStateForUnknown(),
+				},
 				Validators: []validator.String{
 					stringvalidator.RegexMatches(
 						regexp.MustCompile(`^(\d{1,3}\.){3}\d{1,3}-(\d{1,3}\.){3}\d{1,3}$`),
@@ -675,14 +671,12 @@ func (r *K8sClusterResource) Create(ctx context.Context, req resource.CreateRequ
 		WorkerDiskSize:     int(pool.DiskSize.ValueInt64()),
 		WorkerCPU:          int(pool.VCPU.ValueInt64()),
 		WorkerRAM:          int(pool.RAM.ValueInt64()),
-		Addresses:          []string{plan.NodeIPRange.ValueString()},
 		KuberVersion:       plan.KubernetesVersion.ValueString(),
 		NodePoolName:       pool.Name.ValueString(),
 		NeedPublicIP:       plan.PublicEndpointEnabled.ValueBool(),
 		PublicKey:          plan.PublicKey.ValueString(),
 		AuthorizeSSH:       plan.SSHAccessEnabled.ValueBool(),
 		PodSubnet:          plan.PodCIDR.ValueString(),
-		NodeSubnet:         int(plan.NodeSubnet.ValueInt64()),
 		LocalNetID:         plan.NetworkID.ValueInt64(),
 		IsHA:               plan.HighAvailability.ValueBool(),
 		MasterNodeConfigID: plan.MasterFlavorID.ValueInt64(),
@@ -694,6 +688,12 @@ func (r *K8sClusterResource) Create(ctx context.Context, req resource.CreateRequ
 		wire.WorkerReplicas = wire.MinNodes // backend forces replicas=minNodes for autoscale
 	} else {
 		wire.WorkerReplicas = int(pool.NodeCount.ValueInt64())
+	}
+	// node_ip_range is Optional+Computed: only pin it on the wire when the user set it.
+	// When omitted (unknown/null in the plan) the backend auto-allocates a free range
+	// and echoes it back, which Read reflects into state.
+	if !plan.NodeIPRange.IsNull() && !plan.NodeIPRange.IsUnknown() {
+		wire.Addresses = []string{plan.NodeIPRange.ValueString()}
 	}
 
 	// Preflight the master flavor against the resolved region: an invalid or
@@ -1294,8 +1294,9 @@ func poolMatchesDesired(pool *client.NodePool, want *K8sDefaultPoolModel) bool {
 
 // applyServerState writes server-owned fields from a Cluster onto the model.
 // Write-once / RequiresReplace inputs that the API does not echo back
-// (node_ip_range, public_key, authorize_ssh, node_subnet, and the default pool's
-// sizing) are preserved from the existing model rather than overwritten.
+// (public_key, authorize_ssh, and the default pool's sizing) are preserved from the
+// existing model rather than overwritten. node_ip_range IS echoed (the backend may
+// auto-allocate it), so it is read back here like any server-known value.
 //
 // fromRead selects the default-pool reconciliation mode: on Read (true) it
 // reconstructs the block after import and nulls it on out-of-band deletion; on
@@ -1309,6 +1310,9 @@ func (r *K8sClusterResource) applyServerState(ctx context.Context, m *K8sCluster
 	m.HighAvailability = types.BoolValue(cl.IsHA)
 	m.PublicEndpointEnabled = types.BoolValue(cl.IsPublic)
 	m.PodCIDR = types.StringValue(cl.PodSubnet)
+	// node_ip_range is now echoed by the API (the backend may auto-allocate it), so it
+	// is read back like any server-known value rather than preserved write-once.
+	m.NodeIPRange = types.StringValue(cl.NodeIPRange)
 
 	m.APIEndpoint = tfutil.StringOrNull(cl.APIEndpoint)
 	m.KubeConfig = kubeConfigObject(ctx, cl.Kubeconfig)

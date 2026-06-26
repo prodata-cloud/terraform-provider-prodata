@@ -51,6 +51,7 @@ Exactly one of `id` or `name` selects the cluster; both are also computed, so th
 - `high_availability` (Boolean) Whether the control plane is highly available.
 - `public_endpoint_enabled` (Boolean) Whether the cluster API endpoint has a public IP.
 - `pod_cidr` (String) Pod network CIDR.
+- `node_ip_range` (String) Control-plane IP range within the local network, as `start-end`. Either supplied at creation or auto-allocated by the platform.
 - `master_flavor_id` (Number) Master node configuration (flavor) ID.
 - `api_endpoint` (String) Kubernetes API server endpoint. Null until the cluster reaches `SUCCESS`.
 - `kube_config` (Object, Sensitive) Structured cluster credentials parsed from the kubeconfig. Null until the kubeconfig is available (usually at or shortly after `SUCCESS`). The certificate fields are base64 as they appear in the kubeconfig — wrap them in `base64decode()`. Attributes: `host`, `cluster_ca_certificate`, `client_certificate`, `client_key`, `token`, `raw_config`.

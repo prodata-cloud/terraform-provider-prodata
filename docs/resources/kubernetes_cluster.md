@@ -13,7 +13,7 @@ Cluster creation is asynchronous; `terraform apply` blocks until the cluster rea
 
 ~> **Note:** The cluster is created in the region the API resolves for the request. If your account spans multiple regions, set the region through the provider configuration (or `PRODATA_REGION`) to be sure the cluster lands where you intend. `region` and `project_tag` are fixed at create time — changing either forces a new resource.
 
-~> **Note:** The networking inputs are immutable — changing `network_id`, `pod_cidr`, `node_subnet`, or `node_ip_range` forces a new resource. `network_id`, `node_subnet`, and `node_ip_range` are additionally **write-once**: the API does not return them, so they are preserved in state and accepted from configuration after `terraform import` without forcing a replacement (`pod_cidr` is read back normally).
+~> **Note:** The networking inputs are immutable — changing `network_id`, `pod_cidr`, or `node_ip_range` forces a new resource. `network_id` is additionally **write-once**: the API does not return it, so it is preserved in state and accepted from configuration after `terraform import` without forcing a replacement. `pod_cidr` and `node_ip_range` are read back normally — `node_ip_range` is `Optional`/`Computed`, so when you omit it the platform auto-allocates a free range from `network_id` and records it in state.
 
 ## Example Usage
 
@@ -35,8 +35,7 @@ resource "prodata_kubernetes_cluster" "main" {
   kubernetes_version = data.prodata_kubernetes_versions.stable.latest_version
   network_id         = prodata_local_network.k8s.id
   pod_cidr           = "10.244.0.0/16"
-  node_subnet        = 24
-  node_ip_range      = "10.0.0.10-10.0.0.20"
+  # node_ip_range omitted — auto-allocated from network_id and reported back in state.
   high_availability  = true
   master_flavor_id   = data.prodata_kubernetes_flavors.ha.flavors[0].id
 
@@ -58,8 +57,7 @@ resource "prodata_kubernetes_cluster" "edge" {
   kubernetes_version = "v1.31.4"
   network_id         = prodata_local_network.k8s.id
   pod_cidr           = "10.245.0.0/16"
-  node_subnet        = 24
-  node_ip_range      = "10.0.1.10-10.0.1.20"
+  node_ip_range      = "10.0.1.10-10.0.1.20" # explicit range (optional)
   master_flavor_id   = data.prodata_kubernetes_flavors.standard.flavors[0].id
 
   public_endpoint_enabled = true
@@ -99,8 +97,6 @@ provider "kubernetes" {
 - `kubernetes_version` (String) Kubernetes version (e.g. `v1.31.4`). Must be a version offered by the [`prodata_kubernetes_versions`](../data-sources/kubernetes_versions.md) data source. Upgrading is applied in place (asynchronous rollout).
 - `network_id` (Number) Local network ID the cluster's nodes attach to. Minimum `1`. Write-once (not read back from the API); changing it forces a new resource.
 - `pod_cidr` (String) Pod network CIDR. Must be a `/16` (e.g. `10.244.0.0/16`). Changing it forces a new resource.
-- `node_subnet` (Number) Node subnet prefix length used to carve node addressing out of the local network (e.g. `24`). Write-once; changing it forces a new resource.
-- `node_ip_range` (String) Control-plane IP range within the local network, as `start-end` (e.g. `10.0.0.10-10.0.0.20`). Write-once; changing it forces a new resource.
 - `master_flavor_id` (Number) Master node configuration (flavor) ID, from the [`prodata_kubernetes_flavors`](../data-sources/kubernetes_flavors.md) data source. Minimum `1`. Changing it forces a new resource: resizing the control plane in place is not yet supported, so a different master flavor recreates the cluster.
 - `default_node_pool` (Object) The cluster's default worker node pool, created with the cluster. Sizing (`vcpu`, `ram`, `disk_size`) and `name` are immutable (changing them forces a new resource); `node_count` and `autoscaling` are updated in place. Attributes:
   - `name` (String, required) Pool name. 3-24 characters, lowercase letters / digits / hyphens, not starting or ending with a hyphen.
@@ -121,6 +117,7 @@ provider "kubernetes" {
 - `public_endpoint_enabled` (Boolean) Provision a public IP for the cluster API endpoint. Defaults to `false`. Changing it forces a new resource.
 - `ssh_access_enabled` (Boolean) Authorize `public_key` for SSH access to the nodes. Defaults to `false`. Changing it forces a new resource.
 - `public_key` (String) SSH public key authorized on the nodes (used when `ssh_access_enabled` is true). Write-once; changing it forces a new resource.
+- `node_ip_range` (String) Control-plane IP range within the local network, as `start-end` (e.g. `10.0.0.10-10.0.0.20`). When omitted, the platform auto-allocates a free contiguous range from `network_id` (sized for the cluster's master and worker capacity) and reports it back; this attribute is then `Computed`. When set, the value is used as-is. Changing it forces a new resource.
 - `timeouts` (Object) See [Timeouts](#timeouts) below.
 
 ### Attribute Reference
@@ -178,10 +175,10 @@ To import a cluster in a different region or project, use the composite form `{r
 terraform import prodata_kubernetes_cluster.example UZ-5/42@my-project
 ```
 
-The default worker pool is reconstructed on import from the cluster's lowest-id worker pool. The write-once inputs (`network_id`, `node_subnet`, `node_ip_range`, `public_key`, `ssh_access_enabled`) are not returned by the API — set them in your configuration after import to match the live cluster so the next plan does not force a replacement.
+The default worker pool is reconstructed on import from the cluster's lowest-id worker pool. The write-once inputs (`network_id`, `public_key`, `ssh_access_enabled`) are not returned by the API — set them in your configuration after import to match the live cluster so the next plan does not force a replacement. `node_ip_range` is read back from the API on import, so it does not need to be re-supplied.
 
 ## Known Limitations
 
-- **Networking is not auto-allocated.** Unlike some managed-Kubernetes platforms, `pod_cidr`, `node_subnet`, and `node_ip_range` must be specified explicitly and the local network (`network_id`) must have enough free addressing for them.
+- **`pod_cidr` is not auto-allocated.** It must be specified explicitly. The node IP range (`node_ip_range`) is auto-allocated from `network_id` when omitted, but the local network must still have enough free contiguous addressing for the cluster's master and worker capacity — creation fails if it does not.
 - **`kube_config` is populated lazily.** The kubeconfig is fetched server-side after the cluster reaches `SUCCESS` and can lag briefly; `terraform apply` waits a bounded grace period for it. Gate any downstream consumer (a `kubernetes`/`helm` provider) on `status`.
 - **A `FAIL`ed cluster cannot be modified.** Inspect it in the panel and recreate it.
