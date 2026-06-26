@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"terraform-provider-prodata/internal/client"
+	"terraform-provider-prodata/internal/tfutil"
 
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/datasource/schema"
@@ -32,12 +33,13 @@ type K8sFlavorsDataSourceModel struct {
 }
 
 type K8sFlavorSummary struct {
-	ID               types.Int64 `tfsdk:"id"`
-	VCPU             types.Int64 `tfsdk:"vcpu"`
-	RAM              types.Int64 `tfsdk:"ram"`
-	DiskSize         types.Int64 `tfsdk:"disk_size"`
-	HighAvailability types.Bool  `tfsdk:"high_availability"`
-	RegionID         types.Int64 `tfsdk:"region_id"`
+	ID               types.Int64  `tfsdk:"id"`
+	VCPU             types.Int64  `tfsdk:"vcpu"`
+	RAM              types.Int64  `tfsdk:"ram"`
+	DiskSize         types.Int64  `tfsdk:"disk_size"`
+	HighAvailability types.Bool   `tfsdk:"high_availability"`
+	RegionID         types.Int64  `tfsdk:"region_id"`
+	Size             types.String `tfsdk:"size"`
 }
 
 func NewK8sFlavorsDataSource() datasource.DataSource {
@@ -96,6 +98,13 @@ func (d *K8sFlavorsDataSource) Schema(_ context.Context, _ datasource.SchemaRequ
 							MarkdownDescription: "Region this flavor belongs to.",
 							Computed:            true,
 						},
+						"size": schema.StringAttribute{
+							MarkdownDescription: "Control-plane size class (`small`/`medium`/`large`) derived " +
+								"from this flavor's capacity rank within its HA mode — the value you can pass to " +
+								"`prodata_kubernetes_cluster.control_plane_size`. Empty if the catalog for this HA " +
+								"mode is not a clean 3-tier ladder.",
+							Computed: true,
+						},
 					},
 				},
 			},
@@ -145,6 +154,7 @@ func (d *K8sFlavorsDataSource) Read(ctx context.Context, req datasource.ReadRequ
 		configs = append(configs, got...)
 	}
 
+	sizeByID := client.SizeClassByID(configs)
 	data.Flavors = make([]K8sFlavorSummary, 0, len(configs))
 	for _, c := range configs {
 		data.Flavors = append(data.Flavors, K8sFlavorSummary{
@@ -154,6 +164,7 @@ func (d *K8sFlavorsDataSource) Read(ctx context.Context, req datasource.ReadRequ
 			DiskSize:         types.Int64Value(int64(c.SSD)),
 			HighAvailability: types.BoolValue(c.IsHA),
 			RegionID:         types.Int64Value(c.RegionID),
+			Size:             tfutil.StringOrNull(sizeByID[c.ID]),
 		})
 	}
 

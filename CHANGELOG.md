@@ -6,8 +6,21 @@ All notable changes to this provider are documented here. The format is based on
 
 ## [0.23.0] - 2026-06-24
 
+### Added
+
+- `prodata_kubernetes_cluster`: new `control_plane_size` attribute (`small` / `medium` /
+  `large`) as a convenience alias for `master_flavor_id`. The provider resolves it to the
+  right master flavor based on `high_availability`, by ranking the region's master-flavor
+  catalog by capacity (smallest → `small`). Set **exactly one** of `control_plane_size` or
+  `master_flavor_id`.
+- `prodata_kubernetes_flavors` data source: each flavor now exports its derived `size`
+  (`small`/`medium`/`large`), i.e. the value to pass to `control_plane_size`.
+
 ### Changed
 
+- `prodata_kubernetes_cluster`: `master_flavor_id` is now **Optional+Computed** (was
+  Required) — supply it explicitly, or set `control_plane_size` and let the provider resolve
+  and export it. Exactly one of the two is required.
 - `prodata_kubernetes_cluster`: `node_ip_range` is now **Optional+Computed**. When omitted,
   the platform auto-allocates a free contiguous range from `network_id` (sized for the
   cluster's master and worker capacity) and reports it back in state; when set, the value is
