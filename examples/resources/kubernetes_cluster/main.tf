@@ -1,15 +1,13 @@
-# Pick the latest stable Kubernetes version and an HA master flavor.
+# Pick the latest stable Kubernetes version.
 data "prodata_kubernetes_versions" "stable" {}
 
-data "prodata_kubernetes_flavors" "ha" {
-  high_availability = true
-}
-
+# Only needed for the explicit master_flavor_id style (the "edge" cluster below).
 data "prodata_kubernetes_flavors" "standard" {
   high_availability = false
 }
 
 # A fixed-size cluster with a highly-available control plane.
+# control_plane_size picks the right HA master flavor for you — no flavor lookup needed.
 resource "prodata_kubernetes_cluster" "main" {
   name               = "prod-cluster"
   kubernetes_version = data.prodata_kubernetes_versions.stable.latest_version
@@ -17,7 +15,7 @@ resource "prodata_kubernetes_cluster" "main" {
   pod_cidr           = "10.244.0.0/16"
   node_ip_range      = "10.0.0.10-10.0.0.20"
   high_availability  = true
-  master_flavor_id   = data.prodata_kubernetes_flavors.ha.flavors[0].id
+  control_plane_size = "medium"
 
   default_node_pool = {
     name       = "workers"
