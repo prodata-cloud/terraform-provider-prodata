@@ -432,3 +432,52 @@ func keysOf(m map[string]any) []string {
 	}
 	return out
 }
+
+func TestSizeClassByID_and_FlavorIDBySize(t *testing.T) {
+	// Mirrors the real catalog: a clean 3-tier ladder per HA mode (cpu 2<8<16),
+	// supplied out of order to prove ranking is by capacity, not input order.
+	flavors := []MasterNodeConfig{
+		{ID: 12, CPU: 8, RAM: 16, SSD: 50, IsHA: false},   // medium / basic
+		{ID: 11, CPU: 2, RAM: 4, SSD: 20, IsHA: false},    // small / basic
+		{ID: 13, CPU: 16, RAM: 32, SSD: 100, IsHA: false}, // large / basic
+		{ID: 21, CPU: 2, RAM: 4, SSD: 20, IsHA: true},     // small / ha
+		{ID: 23, CPU: 16, RAM: 32, SSD: 100, IsHA: true},  // large / ha
+		{ID: 22, CPU: 8, RAM: 16, SSD: 50, IsHA: true},    // medium / ha
+	}
+
+	got := SizeClassByID(flavors)
+	want := map[int64]string{
+		11: "small", 12: "medium", 13: "large",
+		21: "small", 22: "medium", 23: "large",
+	}
+	for id, w := range want {
+		if got[id] != w {
+			t.Errorf("SizeClassByID[%d] = %q, want %q", id, got[id], w)
+		}
+	}
+
+	// FlavorIDBySize over a single HA-filtered group (how the resource calls it).
+	ha := []MasterNodeConfig{
+		{ID: 23, CPU: 16, RAM: 32, SSD: 100, IsHA: true},
+		{ID: 21, CPU: 2, RAM: 4, SSD: 20, IsHA: true},
+		{ID: 22, CPU: 8, RAM: 16, SSD: 50, IsHA: true},
+	}
+	for size, wantID := range map[string]int64{"small": 21, "medium": 22, "large": 23} {
+		gotID, ok := FlavorIDBySize(ha, size)
+		if !ok || gotID != wantID {
+			t.Errorf("FlavorIDBySize(%q) = %d,%v; want %d,true", size, gotID, ok, wantID)
+		}
+	}
+
+	// A non-3-tier group has no clean mapping: unmapped, and lookups fail.
+	two := []MasterNodeConfig{
+		{ID: 1, CPU: 2, RAM: 4, SSD: 20, IsHA: false},
+		{ID: 2, CPU: 8, RAM: 16, SSD: 50, IsHA: false},
+	}
+	if m := SizeClassByID(two); len(m) != 0 {
+		t.Errorf("SizeClassByID(2 flavors) = %v, want empty", m)
+	}
+	if _, ok := FlavorIDBySize(two, "small"); ok {
+		t.Error("FlavorIDBySize on a non-3-tier group should fail")
+	}
+}

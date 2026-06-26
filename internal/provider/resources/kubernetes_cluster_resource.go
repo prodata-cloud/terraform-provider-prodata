@@ -62,6 +62,7 @@ type K8sClusterModel struct {
 	SSHAccessEnabled      types.Bool           `tfsdk:"ssh_access_enabled"`
 	PublicEndpointEnabled types.Bool           `tfsdk:"public_endpoint_enabled"`
 	MasterFlavorID        types.Int64          `tfsdk:"master_flavor_id"`
+	ControlPlaneSize      types.String         `tfsdk:"control_plane_size"`
 	DefaultNodePool       *K8sDefaultPoolModel `tfsdk:"default_node_pool"`
 
 	// Computed, server-owned.
@@ -344,12 +345,30 @@ func (r *K8sClusterResource) Schema(ctx context.Context, _ resource.SchemaReques
 			},
 			"master_flavor_id": schema.Int64Attribute{
 				MarkdownDescription: "Master node configuration (flavor) ID, from the " +
-					"`prodata_kubernetes_flavors` data source. Changing it forces a new resource: " +
+					"`prodata_kubernetes_flavors` data source. Mutually exclusive with " +
+					"`control_plane_size` — set exactly one. When you set `control_plane_size` instead, " +
+					"this is resolved and exported as a computed value. Changing it forces a new resource: " +
 					"resizing the control plane in place is not yet supported, so a different master " +
 					"flavor recreates the cluster.",
-				Required:      true,
-				Validators:    []validator.Int64{int64validator.AtLeast(1)},
-				PlanModifiers: []planmodifier.Int64{int64planmodifier.RequiresReplace()},
+				Optional:   true,
+				Computed:   true,
+				Validators: []validator.Int64{int64validator.AtLeast(1)},
+				PlanModifiers: []planmodifier.Int64{
+					int64planmodifier.RequiresReplace(),
+					int64planmodifier.UseStateForUnknown(),
+				},
+			},
+			"control_plane_size": schema.StringAttribute{
+				MarkdownDescription: "Control-plane size class — `small`, `medium`, or `large` — a " +
+					"convenience alias that selects the master flavor for you based on " +
+					"`high_availability` (the provider maps the size onto the region's master-flavor " +
+					"catalog by capacity). Mutually exclusive with `master_flavor_id` — set exactly one. " +
+					"Changing it forces a new resource.",
+				Optional: true,
+				Validators: []validator.String{
+					stringvalidator.OneOf("small", "medium", "large"),
+				},
+				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
 			},
 			"default_node_pool": schema.SingleNestedAttribute{
 				MarkdownDescription: "The cluster's default worker node pool, created with the cluster. " +
@@ -519,7 +538,30 @@ func (r *K8sClusterResource) Configure(_ context.Context, req resource.Configure
 func (r *K8sClusterResource) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
 	var cfg K8sClusterModel
 	resp.Diagnostics.Append(req.Config.Get(ctx, &cfg)...)
-	if resp.Diagnostics.HasError() || cfg.DefaultNodePool == nil {
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	// Exactly one of master_flavor_id / control_plane_size must be set.
+	flavorSet := !cfg.MasterFlavorID.IsNull() && !cfg.MasterFlavorID.IsUnknown()
+	sizeSet := !cfg.ControlPlaneSize.IsNull() && !cfg.ControlPlaneSize.IsUnknown()
+	switch {
+	case flavorSet && sizeSet:
+		resp.Diagnostics.AddAttributeError(
+			path.Root("control_plane_size"),
+			"master_flavor_id and control_plane_size are mutually exclusive",
+			"Set exactly one of master_flavor_id (an explicit flavor ID) or control_plane_size "+
+				"(small/medium/large, resolved for you).",
+		)
+	case !flavorSet && !sizeSet:
+		resp.Diagnostics.AddAttributeError(
+			path.Root("control_plane_size"),
+			"a control-plane size is required",
+			"Set control_plane_size (small/medium/large) or master_flavor_id.",
+		)
+	}
+
+	if cfg.DefaultNodePool == nil {
 		return
 	}
 	p := cfg.DefaultNodePool
@@ -667,20 +709,19 @@ func (r *K8sClusterResource) Create(ctx context.Context, req resource.CreateRequ
 	autoscale := pool.Autoscaling != nil
 
 	wire := client.CreateClusterRequest{
-		ClusterName:        plan.Name.ValueString(),
-		WorkerDiskSize:     int(pool.DiskSize.ValueInt64()),
-		WorkerCPU:          int(pool.VCPU.ValueInt64()),
-		WorkerRAM:          int(pool.RAM.ValueInt64()),
-		KuberVersion:       plan.KubernetesVersion.ValueString(),
-		NodePoolName:       pool.Name.ValueString(),
-		NeedPublicIP:       plan.PublicEndpointEnabled.ValueBool(),
-		PublicKey:          plan.PublicKey.ValueString(),
-		AuthorizeSSH:       plan.SSHAccessEnabled.ValueBool(),
-		PodSubnet:          plan.PodCIDR.ValueString(),
-		LocalNetID:         plan.NetworkID.ValueInt64(),
-		IsHA:               plan.HighAvailability.ValueBool(),
-		MasterNodeConfigID: plan.MasterFlavorID.ValueInt64(),
-		AutoScaleEnabled:   autoscale,
+		ClusterName:      plan.Name.ValueString(),
+		WorkerDiskSize:   int(pool.DiskSize.ValueInt64()),
+		WorkerCPU:        int(pool.VCPU.ValueInt64()),
+		WorkerRAM:        int(pool.RAM.ValueInt64()),
+		KuberVersion:     plan.KubernetesVersion.ValueString(),
+		NodePoolName:     pool.Name.ValueString(),
+		NeedPublicIP:     plan.PublicEndpointEnabled.ValueBool(),
+		PublicKey:        plan.PublicKey.ValueString(),
+		AuthorizeSSH:     plan.SSHAccessEnabled.ValueBool(),
+		PodSubnet:        plan.PodCIDR.ValueString(),
+		LocalNetID:       plan.NetworkID.ValueInt64(),
+		IsHA:             plan.HighAvailability.ValueBool(),
+		AutoScaleEnabled: autoscale,
 	}
 	if autoscale {
 		wire.MinNodes = int(pool.Autoscaling.MinNodes.ValueInt64())
@@ -696,34 +737,63 @@ func (r *K8sClusterResource) Create(ctx context.Context, req resource.CreateRequ
 		wire.Addresses = []string{plan.NodeIPRange.ValueString()}
 	}
 
-	// Preflight the master flavor against the resolved region: an invalid or
-	// cross-region master_flavor_id otherwise fails as an opaque backend HTTP 500 from
-	// the create POST. This read-only check turns that into a precise plan-time-style
-	// diagnostic. Best-effort — if the lookup itself fails we fall through and let the
-	// POST validate server-side rather than blocking create on a transient read.
-	if flavors, ferr := r.c.GetMasterNodeConfigs(ctx, plan.HighAvailability.ValueBool(), opts); ferr == nil {
-		wantID := plan.MasterFlavorID.ValueInt64()
-		found := false
-		ids := make([]string, 0, len(flavors))
-		for i := range flavors {
-			ids = append(ids, strconv.FormatInt(flavors[i].ID, 10))
-			if flavors[i].ID == wantID {
-				found = true
-			}
-		}
-		if !found {
-			haDesc := "standard"
-			if plan.HighAvailability.ValueBool() {
-				haDesc = "high-availability"
-			}
+	// Resolve the master flavor from the region's HA-filtered catalog. Two paths:
+	//   - control_plane_size set -> map small/medium/large onto a flavor by capacity rank;
+	//   - master_flavor_id set   -> validate it is an available flavor for this region/HA.
+	// The fetch is also a useful preflight: an invalid or cross-region master_flavor_id
+	// otherwise fails as an opaque backend HTTP 500 from the create POST.
+	haDesc := "standard"
+	if plan.HighAvailability.ValueBool() {
+		haDesc = "high-availability"
+	}
+	useSize := !plan.ControlPlaneSize.IsNull() && !plan.ControlPlaneSize.IsUnknown()
+	flavors, ferr := r.c.GetMasterNodeConfigs(ctx, plan.HighAvailability.ValueBool(), opts)
+	switch {
+	case useSize:
+		// control_plane_size needs the catalog to resolve — fail loudly if we can't read it.
+		if ferr != nil {
 			resp.Diagnostics.AddError(
-				"Invalid master_flavor_id for this region",
-				fmt.Sprintf("master_flavor_id %d is not an available %s master flavor in region %q. "+
-					"Available ids: [%s]. Use the prodata_kubernetes_flavors data source (with the same "+
-					"high_availability value) to select a valid flavor.",
-					wantID, haDesc, region, strings.Join(ids, ", ")),
+				"Unable to resolve control_plane_size",
+				fmt.Sprintf("Could not list %s master flavors for region %q to map control_plane_size: %s",
+					haDesc, region, client.KuberErrorDetail(ferr)),
 			)
 			return
+		}
+		size := plan.ControlPlaneSize.ValueString()
+		id, ok := client.FlavorIDBySize(flavors, size)
+		if !ok {
+			resp.Diagnostics.AddAttributeError(
+				path.Root("control_plane_size"),
+				"Cannot map control_plane_size to a master flavor",
+				fmt.Sprintf("No %s master flavor matches control_plane_size %q in region %q. The "+
+					"control-plane catalog must be a small/medium/large (3-tier) ladder for this to work; "+
+					"set master_flavor_id explicitly instead.", haDesc, size, region),
+			)
+			return
+		}
+		wire.MasterNodeConfigID = id
+	default:
+		wantID := plan.MasterFlavorID.ValueInt64()
+		wire.MasterNodeConfigID = wantID
+		if ferr == nil { // best-effort preflight; transient read failures fall through to the POST
+			found := false
+			ids := make([]string, 0, len(flavors))
+			for i := range flavors {
+				ids = append(ids, strconv.FormatInt(flavors[i].ID, 10))
+				if flavors[i].ID == wantID {
+					found = true
+				}
+			}
+			if !found {
+				resp.Diagnostics.AddError(
+					"Invalid master_flavor_id for this region",
+					fmt.Sprintf("master_flavor_id %d is not an available %s master flavor in region %q. "+
+						"Available ids: [%s]. Use the prodata_kubernetes_flavors data source (with the same "+
+						"high_availability value) to select a valid flavor, or set control_plane_size.",
+						wantID, haDesc, region, strings.Join(ids, ", ")),
+				)
+				return
+			}
 		}
 	}
 
