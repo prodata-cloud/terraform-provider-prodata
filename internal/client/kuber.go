@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -595,4 +596,52 @@ func (c *Client) GetMasterNodeConfigs(ctx context.Context, isHA bool, opts *Requ
 		out = append(out, *dtos[i].toMasterNodeConfig())
 	}
 	return out, nil
+}
+
+// ControlPlaneSizes is the ordered control-plane size ladder, smallest first. It maps
+// onto the master-flavor catalog by capacity rank rather than by absolute specs, so the
+// mapping is stable even if a tier's CPU/RAM is later retuned.
+var ControlPlaneSizes = []string{"small", "medium", "large"}
+
+// SizeClassByID maps each master flavor to a control-plane size (small/medium/large) by
+// its capacity rank, computed independently within each HA mode (the catalog is a fixed
+// 3-tier ladder per region+HA). A flavor whose HA group is not exactly a 3-tier ladder is
+// omitted from the result, so callers can detect "no clean mapping" by a missing id.
+func SizeClassByID(flavors []MasterNodeConfig) map[int64]string {
+	byHA := map[bool][]MasterNodeConfig{}
+	for _, f := range flavors {
+		byHA[f.IsHA] = append(byHA[f.IsHA], f)
+	}
+	out := make(map[int64]string, len(flavors))
+	for _, group := range byHA {
+		if len(group) != len(ControlPlaneSizes) {
+			continue // not a clean small/medium/large ladder — leave these unmapped
+		}
+		sorted := append([]MasterNodeConfig(nil), group...)
+		sort.Slice(sorted, func(i, j int) bool {
+			if sorted[i].CPU != sorted[j].CPU {
+				return sorted[i].CPU < sorted[j].CPU
+			}
+			if sorted[i].RAM != sorted[j].RAM {
+				return sorted[i].RAM < sorted[j].RAM
+			}
+			return sorted[i].SSD < sorted[j].SSD
+		})
+		for i := range sorted {
+			out[sorted[i].ID] = ControlPlaneSizes[i]
+		}
+	}
+	return out
+}
+
+// FlavorIDBySize resolves a control-plane size (small/medium/large) to a master flavor ID
+// within the given HA-filtered flavor list. The second return is false when the list is not
+// a clean 3-tier ladder or the size is unknown.
+func FlavorIDBySize(flavors []MasterNodeConfig, size string) (int64, bool) {
+	for id, s := range SizeClassByID(flavors) {
+		if s == size {
+			return id, true
+		}
+	}
+	return 0, false
 }

@@ -40,3 +40,4 @@ resource "prodata_kubernetes_cluster" "main" {
   - `disk_size` (Number) Disk size per master node, in GB.
   - `high_availability` (Boolean) Whether this flavor provisions a highly-available control plane.
   - `region_id` (Number) Region this flavor belongs to.
+  - `size` (String) Control-plane size class (`small`/`medium`/`large`) derived from this flavor's capacity rank within its HA mode — the value you can pass to `prodata_kubernetes_cluster.control_plane_size`. Empty if this HA mode's catalog is not a clean 3-tier ladder.

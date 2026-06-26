@@ -22,10 +22,6 @@ Cluster creation is asynchronous; `terraform apply` blocks until the cluster rea
 ```terraform
 data "prodata_kubernetes_versions" "stable" {}
 
-data "prodata_kubernetes_flavors" "ha" {
-  high_availability = true
-}
-
 data "prodata_kubernetes_flavors" "standard" {
   high_availability = false
 }
@@ -37,7 +33,7 @@ resource "prodata_kubernetes_cluster" "main" {
   pod_cidr           = "10.244.0.0/16"
   # node_ip_range omitted — auto-allocated from network_id and reported back in state.
   high_availability  = true
-  master_flavor_id   = data.prodata_kubernetes_flavors.ha.flavors[0].id
+  control_plane_size = "medium" # picks the HA master flavor for you
 
   default_node_pool = {
     name       = "workers"
@@ -97,7 +93,6 @@ provider "kubernetes" {
 - `kubernetes_version` (String) Kubernetes version (e.g. `v1.31.4`). Must be a version offered by the [`prodata_kubernetes_versions`](../data-sources/kubernetes_versions.md) data source. Upgrading is applied in place (asynchronous rollout).
 - `network_id` (Number) Local network ID the cluster's nodes attach to. Minimum `1`. Write-once (not read back from the API); changing it forces a new resource.
 - `pod_cidr` (String) Pod network CIDR. Must be a `/16` (e.g. `10.244.0.0/16`). Changing it forces a new resource.
-- `master_flavor_id` (Number) Master node configuration (flavor) ID, from the [`prodata_kubernetes_flavors`](../data-sources/kubernetes_flavors.md) data source. Minimum `1`. Changing it forces a new resource: resizing the control plane in place is not yet supported, so a different master flavor recreates the cluster.
 - `default_node_pool` (Object) The cluster's default worker node pool, created with the cluster. Sizing (`vcpu`, `ram`, `disk_size`) and `name` are immutable (changing them forces a new resource); `node_count` and `autoscaling` are updated in place. Attributes:
   - `name` (String, required) Pool name. 3-24 characters, lowercase letters / digits / hyphens, not starting or ending with a hyphen.
   - `vcpu` (Number, required) vCPUs per worker node. Minimum `1`.
@@ -111,6 +106,10 @@ provider "kubernetes" {
 
 ### Optional
 
+> Set **exactly one** of `control_plane_size` or `master_flavor_id` to size the control plane.
+
+- `control_plane_size` (String) Control-plane size class — `small`, `medium`, or `large`. A convenience alias that selects the master flavor for you based on `high_availability`: the provider maps the size onto the region's master-flavor catalog by capacity (smallest → `small`). Mutually exclusive with `master_flavor_id`. Changing it forces a new resource.
+- `master_flavor_id` (Number) Master node configuration (flavor) ID, from the [`prodata_kubernetes_flavors`](../data-sources/kubernetes_flavors.md) data source. Minimum `1`. Mutually exclusive with `control_plane_size`; when you set `control_plane_size` instead, this is resolved for you and exported as a computed value. Changing it forces a new resource: resizing the control plane in place is not yet supported, so a different master flavor recreates the cluster.
 - `region` (String) Region ID. If omitted, uses the provider's default. See the note above about how the create region is resolved. Changing this forces a new resource.
 - `project_tag` (String) Project tag the cluster belongs to. If omitted, uses the provider default. Changing this forces a new resource.
 - `high_availability` (Boolean) Highly-available control plane (multiple master nodes). Defaults to `false`. Changing it forces a new resource.
