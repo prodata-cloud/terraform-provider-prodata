@@ -16,7 +16,6 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework-validators/int64validator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/attr"
-	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -39,31 +38,28 @@ var (
 )
 
 // K8sClusterResource implements the prodata_kubernetes_cluster resource. The
-// resource owns the cluster and its inline default worker node pool; additional
-// pools are managed by the separate prodata_kubernetes_node_pool resource.
+// resource owns the cluster's control plane only; all worker node pools —
+// including the first — are managed by the separate prodata_kubernetes_node_pool resource.
 type K8sClusterResource struct {
 	c *client.Client
 }
 
-// K8sClusterModel mirrors the prodata_kubernetes_cluster schema. DefaultNodePool
-// is a pointer so the framework keeps the block addressable for nested plan
-// modifiers.
+// K8sClusterModel mirrors the prodata_kubernetes_cluster schema.
 type K8sClusterModel struct {
-	ID                    types.Int64          `tfsdk:"id"`
-	Region                types.String         `tfsdk:"region"`
-	ProjectTag            types.String         `tfsdk:"project_tag"`
-	Name                  types.String         `tfsdk:"name"`
-	KubernetesVersion     types.String         `tfsdk:"kubernetes_version"`
-	HighAvailability      types.Bool           `tfsdk:"high_availability"`
-	NetworkID             types.Int64          `tfsdk:"network_id"`
-	PodCIDR               types.String         `tfsdk:"pod_cidr"`
-	NodeIPRange           types.String         `tfsdk:"node_ip_range"`
-	PublicKey             types.String         `tfsdk:"public_key"`
-	SSHAccessEnabled      types.Bool           `tfsdk:"ssh_access_enabled"`
-	PublicEndpointEnabled types.Bool           `tfsdk:"public_endpoint_enabled"`
-	MasterFlavorID        types.Int64          `tfsdk:"master_flavor_id"`
-	ControlPlaneSize      types.String         `tfsdk:"control_plane_size"`
-	DefaultNodePool       *K8sDefaultPoolModel `tfsdk:"default_node_pool"`
+	ID                    types.Int64  `tfsdk:"id"`
+	Region                types.String `tfsdk:"region"`
+	ProjectTag            types.String `tfsdk:"project_tag"`
+	Name                  types.String `tfsdk:"name"`
+	KubernetesVersion     types.String `tfsdk:"kubernetes_version"`
+	HighAvailability      types.Bool   `tfsdk:"high_availability"`
+	NetworkID             types.Int64  `tfsdk:"network_id"`
+	PodCIDR               types.String `tfsdk:"pod_cidr"`
+	NodeIPRange           types.String `tfsdk:"node_ip_range"`
+	PublicKey             types.String `tfsdk:"public_key"`
+	SSHAccessEnabled      types.Bool   `tfsdk:"ssh_access_enabled"`
+	PublicEndpointEnabled types.Bool   `tfsdk:"public_endpoint_enabled"`
+	MasterFlavorID        types.Int64  `tfsdk:"master_flavor_id"`
+	ControlPlaneSize      types.String `tfsdk:"control_plane_size"`
 
 	// Computed, server-owned.
 	APIEndpoint       types.String   `tfsdk:"api_endpoint"`
@@ -131,19 +127,6 @@ func kubeConfigObject(ctx context.Context, secret string) types.Object {
 		return types.ObjectNull(kubeConfigAttrTypes())
 	}
 	return obj
-}
-
-// K8sDefaultPoolModel is the inline default_node_pool block. vcpu/ram/disk_size
-// and name are RequiresReplace; node_count is updated in place (when autoscaling
-// is off); autoscaling presence toggles the autoscaler.
-type K8sDefaultPoolModel struct {
-	ID          types.Int64          `tfsdk:"id"`
-	Name        types.String         `tfsdk:"name"`
-	VCPU        types.Int64          `tfsdk:"vcpu"`
-	RAM         types.Int64          `tfsdk:"ram"`
-	DiskSize    types.Int64          `tfsdk:"disk_size"`
-	NodeCount   types.Int64          `tfsdk:"node_count"`
-	Autoscaling *K8sAutoscalingModel `tfsdk:"autoscaling"`
 }
 
 // K8sAutoscalingModel is the optional autoscaling sub-block. Its mere presence
@@ -226,10 +209,11 @@ func (r *K8sClusterResource) Metadata(_ context.Context, req resource.MetadataRe
 
 func (r *K8sClusterResource) Schema(ctx context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		MarkdownDescription: "Manages a ProData Managed Kubernetes cluster and its inline default worker " +
-			"node pool. Cluster creation is asynchronous; `terraform apply` blocks until the cluster " +
-			"reaches a usable state (SUCCESS with a kubeconfig) or the create timeout elapses. " +
-			"Additional worker pools are managed with `prodata_kubernetes_node_pool`.",
+		MarkdownDescription: "Manages a ProData Managed Kubernetes cluster's control plane. Cluster " +
+			"creation is asynchronous; `terraform apply` blocks until the cluster reaches a usable " +
+			"state (SUCCESS with a kubeconfig) or the create timeout elapses. Worker capacity is " +
+			"managed as independent `prodata_kubernetes_node_pool` resources — a cluster with zero " +
+			"node pools is a valid, control-plane-only steady state.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.Int64Attribute{
 				MarkdownDescription: "Cluster ID, assigned by the panel.",
@@ -370,72 +354,6 @@ func (r *K8sClusterResource) Schema(ctx context.Context, _ resource.SchemaReques
 				},
 				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
 			},
-			"default_node_pool": schema.SingleNestedAttribute{
-				MarkdownDescription: "The cluster's default worker node pool, created with the cluster. " +
-					"Sizing (`vcpu`, `ram`, `disk_size`) and `name` are immutable (force replacement); " +
-					"`node_count` and `autoscaling` are updated in place.",
-				Required: true,
-				Attributes: map[string]schema.Attribute{
-					"id": schema.Int64Attribute{
-						MarkdownDescription: "Default pool ID, discovered after creation.",
-						Computed:            true,
-						PlanModifiers:       []planmodifier.Int64{int64planmodifier.UseStateForUnknown()},
-					},
-					"name": schema.StringAttribute{
-						MarkdownDescription: "Default pool name (lowercase). Changing it forces a new resource.",
-						Required:            true,
-						PlanModifiers:       []planmodifier.String{stringplanmodifier.RequiresReplace()},
-						Validators: []validator.String{
-							stringvalidator.LengthBetween(k8sMinNameLen, k8sMaxNameLen),
-							stringvalidator.RegexMatches(k8sNameRegex,
-								"must be lowercase letters, digits and hyphens, and must not start or end with a hyphen"),
-						},
-					},
-					"vcpu": schema.Int64Attribute{
-						MarkdownDescription: "vCPUs per worker node. Changing it forces a new resource.",
-						Required:            true,
-						PlanModifiers:       []planmodifier.Int64{int64planmodifier.RequiresReplace()},
-						Validators:          []validator.Int64{int64validator.AtLeast(1)},
-					},
-					"ram": schema.Int64Attribute{
-						MarkdownDescription: "RAM per worker node, in GB. Changing it forces a new resource.",
-						Required:            true,
-						PlanModifiers:       []planmodifier.Int64{int64planmodifier.RequiresReplace()},
-						Validators:          []validator.Int64{int64validator.AtLeast(1)},
-					},
-					"disk_size": schema.Int64Attribute{
-						MarkdownDescription: "Disk size per worker node, in GB. Changing it forces a new resource.",
-						Required:            true,
-						PlanModifiers:       []planmodifier.Int64{int64planmodifier.RequiresReplace()},
-						Validators:          []validator.Int64{int64validator.AtLeast(1)},
-					},
-					"node_count": schema.Int64Attribute{
-						MarkdownDescription: "Number of worker nodes. Updated in place. Must be omitted when " +
-							"`autoscaling` is set (the autoscaler owns the count); the live value is then computed.",
-						Optional:      true,
-						Computed:      true,
-						PlanModifiers: []planmodifier.Int64{int64planmodifier.UseStateForUnknown()},
-						Validators:    []validator.Int64{int64validator.AtLeast(1)},
-					},
-					"autoscaling": schema.SingleNestedAttribute{
-						MarkdownDescription: "Enable cluster-autoscaler for this pool. Presence enables it; " +
-							"omit the block for a fixed-size pool. Mutually exclusive with `node_count`.",
-						Optional: true,
-						Attributes: map[string]schema.Attribute{
-							"min_nodes": schema.Int64Attribute{
-								MarkdownDescription: "Minimum node count.",
-								Required:            true,
-								Validators:          []validator.Int64{int64validator.AtLeast(1)},
-							},
-							"max_nodes": schema.Int64Attribute{
-								MarkdownDescription: "Maximum node count (>= min_nodes).",
-								Required:            true,
-								Validators:          []validator.Int64{int64validator.AtLeast(1)},
-							},
-						},
-					},
-				},
-			},
 
 			// ---- computed, server-owned ----
 			"api_endpoint": schema.StringAttribute{
@@ -532,9 +450,8 @@ func (r *K8sClusterResource) Configure(_ context.Context, req resource.Configure
 	r.c = c
 }
 
-// ValidateConfig enforces the ADR-K4 mutual exclusion: node_count and autoscaling
-// cannot both be set (the autoscaler owns the count). Validators are no-ops on
-// unknown values.
+// ValidateConfig enforces that exactly one of master_flavor_id / control_plane_size
+// is set. Validators are no-ops on unknown values.
 func (r *K8sClusterResource) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
 	var cfg K8sClusterModel
 	resp.Diagnostics.Append(req.Config.Get(ctx, &cfg)...)
@@ -560,44 +477,12 @@ func (r *K8sClusterResource) ValidateConfig(ctx context.Context, req resource.Va
 			"Set control_plane_size (small/medium/large) or master_flavor_id.",
 		)
 	}
-
-	if cfg.DefaultNodePool == nil {
-		return
-	}
-	p := cfg.DefaultNodePool
-	nodeCountSet := !p.NodeCount.IsNull() && !p.NodeCount.IsUnknown()
-	if p.Autoscaling != nil && nodeCountSet {
-		resp.Diagnostics.AddAttributeError(
-			path.Root("default_node_pool").AtName("node_count"),
-			"node_count conflicts with autoscaling",
-			"When default_node_pool.autoscaling is set, the autoscaler owns the node count. "+
-				"Remove node_count (its live value is exported as a computed attribute).",
-		)
-	}
-	if p.Autoscaling == nil && p.NodeCount.IsNull() {
-		resp.Diagnostics.AddAttributeError(
-			path.Root("default_node_pool").AtName("node_count"),
-			"node_count is required without autoscaling",
-			"Set default_node_pool.node_count for a fixed-size pool, or add an autoscaling block.",
-		)
-	}
-	if p.Autoscaling != nil {
-		minNodes, maxNodes := p.Autoscaling.MinNodes, p.Autoscaling.MaxNodes
-		if !minNodes.IsUnknown() && !maxNodes.IsUnknown() && minNodes.ValueInt64() > maxNodes.ValueInt64() {
-			resp.Diagnostics.AddAttributeError(
-				path.Root("default_node_pool").AtName("autoscaling").AtName("max_nodes"),
-				"Invalid autoscaling bounds",
-				"max_nodes must be greater than or equal to min_nodes.",
-			)
-		}
-	}
 }
 
 // ModifyPlan: when the kubernetes_version changes in place, the backend rewrites
 // the kubeconfig / api_endpoint and the cluster transits PROCESSING, so those
 // computed values must be unknown in the plan (ADR-K3) — otherwise Terraform's
-// "computed output must be consistent" check fails after apply. Also handles
-// default-pool out-of-band deletion drift (ADR-K8).
+// "computed output must be consistent" check fails after apply.
 func (r *K8sClusterResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
 	// Destroy plan — nothing to do.
 	if req.Plan.Raw.IsNull() {
@@ -615,36 +500,20 @@ func (r *K8sClusterResource) ModifyPlan(ctx context.Context, req resource.Modify
 		return
 	}
 
-	// ADR-K8: default pool was deleted out-of-band (Read nulled the block) but the
-	// config still declares it — force replacement of the whole cluster.
-	if state.DefaultNodePool == nil && plan.DefaultNodePool != nil {
-		resp.RequiresReplace = append(resp.RequiresReplace, path.Root("default_node_pool"))
-		resp.Diagnostics.AddAttributeWarning(
-			path.Root("default_node_pool"),
-			"Default node pool was deleted out-of-band",
-			"The cluster's default node pool is no longer present on the server; Terraform will "+
-				"replace the cluster to restore it.",
-		)
-	}
-
 	versionChanged := !plan.KubernetesVersion.Equal(state.KubernetesVersion)
-	poolChanged := defaultPoolChanged(state.DefaultNodePool, plan.DefaultNodePool)
 
 	// ADR-K3: a version upgrade rolls the control plane and can rewrite the kubeconfig /
-	// api_endpoint, so those (and the credentials) become unknown in the plan. The
-	// kube_config is a nested object, so it is blanked as a whole ObjectUnknown. (A
-	// master-flavor change forces replacement, so the framework handles it, not here.)
+	// api_endpoint (and the credentials), and transits the cluster through
+	// PROCESSING / blocked, so those and the volatile status/count fields must be
+	// unknown in the plan — otherwise Terraform's "provider produced inconsistent
+	// result after apply" check fails. kube_config is a nested object, blanked as a
+	// whole ObjectUnknown. (A master-flavor change forces replacement, so the
+	// framework handles it, not here.)
 	if versionChanged {
 		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("kube_config"), types.ObjectUnknown(kubeConfigAttrTypes()))...)
 		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("api_endpoint"), types.StringUnknown())...)
 		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("ssh_key_encoded"), types.StringUnknown())...)
 		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("private_key_encoded"), types.StringUnknown())...)
-	}
-
-	// Any in-place mutation transits the cluster through PROCESSING / blocked and
-	// changes the pool/node counts, so the volatile status fields must be unknown
-	// to avoid a "provider produced inconsistent result after apply" error.
-	if versionChanged || poolChanged {
 		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("status"), types.StringUnknown())...)
 		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("blocked"), types.BoolUnknown())...)
 		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("node_pool_count"), types.Int64Unknown())...)
@@ -652,37 +521,6 @@ func (r *K8sClusterResource) ModifyPlan(ctx context.Context, req resource.Modify
 		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("master_node_count"), types.Int64Unknown())...)
 		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("ip_addresses_count"), types.Int64Unknown())...)
 	}
-
-	// When the default pool is autoscaling after this change, the autoscaler owns
-	// the live node_count — it is server-chosen, so it must be unknown in the plan
-	// (UseStateForUnknown would otherwise pin the stale prior value and trip the
-	// inconsistent-result check when the autoscaler rebalances). ADR-K4.
-	if poolChanged && plan.DefaultNodePool != nil && plan.DefaultNodePool.Autoscaling != nil {
-		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx,
-			path.Root("default_node_pool").AtName("node_count"), types.Int64Unknown())...)
-	}
-}
-
-// defaultPoolChanged reports whether the in-place-updatable fields of the default
-// pool (node_count, autoscaling presence/bounds) differ between state and plan.
-func defaultPoolChanged(state, plan *K8sDefaultPoolModel) bool {
-	if state == nil || plan == nil {
-		return state != plan
-	}
-	if !plan.NodeCount.Equal(state.NodeCount) {
-		return true
-	}
-	stateAuto, planAuto := state.Autoscaling != nil, plan.Autoscaling != nil
-	if stateAuto != planAuto {
-		return true
-	}
-	if stateAuto && planAuto {
-		if !plan.Autoscaling.MinNodes.Equal(state.Autoscaling.MinNodes) ||
-			!plan.Autoscaling.MaxNodes.Equal(state.Autoscaling.MaxNodes) {
-			return true
-		}
-	}
-	return false
 }
 
 // ---- Create ----
@@ -705,30 +543,15 @@ func (r *K8sClusterResource) Create(ctx context.Context, req resource.CreateRequ
 	ctx, cancel := context.WithTimeout(ctx, createTimeout)
 	defer cancel()
 
-	pool := plan.DefaultNodePool
-	autoscale := pool.Autoscaling != nil
-
 	wire := client.CreateClusterRequest{
-		ClusterName:      plan.Name.ValueString(),
-		WorkerDiskSize:   int(pool.DiskSize.ValueInt64()),
-		WorkerCPU:        int(pool.VCPU.ValueInt64()),
-		WorkerRAM:        int(pool.RAM.ValueInt64()),
-		KuberVersion:     plan.KubernetesVersion.ValueString(),
-		NodePoolName:     pool.Name.ValueString(),
-		NeedPublicIP:     plan.PublicEndpointEnabled.ValueBool(),
-		PublicKey:        plan.PublicKey.ValueString(),
-		AuthorizeSSH:     plan.SSHAccessEnabled.ValueBool(),
-		PodSubnet:        plan.PodCIDR.ValueString(),
-		LocalNetID:       plan.NetworkID.ValueInt64(),
-		IsHA:             plan.HighAvailability.ValueBool(),
-		AutoScaleEnabled: autoscale,
-	}
-	if autoscale {
-		wire.MinNodes = int(pool.Autoscaling.MinNodes.ValueInt64())
-		wire.MaxNodes = int(pool.Autoscaling.MaxNodes.ValueInt64())
-		wire.WorkerReplicas = wire.MinNodes // backend forces replicas=minNodes for autoscale
-	} else {
-		wire.WorkerReplicas = int(pool.NodeCount.ValueInt64())
+		ClusterName:  plan.Name.ValueString(),
+		KuberVersion: plan.KubernetesVersion.ValueString(),
+		NeedPublicIP: plan.PublicEndpointEnabled.ValueBool(),
+		PublicKey:    plan.PublicKey.ValueString(),
+		AuthorizeSSH: plan.SSHAccessEnabled.ValueBool(),
+		PodSubnet:    plan.PodCIDR.ValueString(),
+		LocalNetID:   plan.NetworkID.ValueInt64(),
+		IsHA:         plan.HighAvailability.ValueBool(),
 	}
 	// node_ip_range is Optional+Computed: only pin it on the wire when the user set it.
 	// When omitted (unknown/null in the plan) the backend auto-allocates a free range
@@ -854,10 +677,7 @@ func (r *K8sClusterResource) Create(ctx context.Context, req resource.CreateRequ
 		result = created
 	}
 
-	// Discover the default pool id (create returns only the cluster id, ADR-K6).
-	poolID := r.discoverDefaultPoolID(ctx, created.ID, pool.Name.ValueString(), opts)
-
-	r.applyServerState(ctx, &plan, result, poolID, region, projectTag, false, nil)
+	r.applyServerState(ctx, &plan, result, region, projectTag)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 
 	if waitErr != nil {
@@ -907,11 +727,7 @@ func (r *K8sClusterResource) Read(ctx context.Context, req resource.ReadRequest,
 	region := valueOrDefault(data.Region, r.c.Region)
 	projectTag := valueOrDefault(data.ProjectTag, r.c.ProjectTag)
 
-	poolID := int64(0)
-	if data.DefaultNodePool != nil {
-		poolID = data.DefaultNodePool.ID.ValueInt64()
-	}
-	r.applyServerState(ctx, &data, cl, poolID, region, projectTag, true, &resp.Diagnostics)
+	r.applyServerState(ctx, &data, cl, region, projectTag)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
 
@@ -945,7 +761,7 @@ func (r *K8sClusterResource) Update(ctx context.Context, req resource.UpdateRequ
 		return
 	}
 
-	// 1) Kubernetes version upgrade (in-place, async).
+	// Kubernetes version upgrade (in-place, async).
 	if !plan.KubernetesVersion.Equal(state.KubernetesVersion) {
 		if _, err := r.c.UpdateClusterVersion(ctx, id, plan.KubernetesVersion.ValueString(), opts); err != nil {
 			resp.Diagnostics.AddError("Unable to upgrade Kubernetes version", client.KuberErrorDetail(err))
@@ -955,24 +771,6 @@ func (r *K8sClusterResource) Update(ctx context.Context, req resource.UpdateRequ
 			resp.Diagnostics.AddError("Cluster did not stabilize after version upgrade",
 				fmt.Sprintf("cluster %d: %s", id, waitErr.Error()))
 			return
-		}
-	}
-
-	// 2) Default pool scale / autoscaling transitions (async — wait for the pool
-	// to settle so we don't persist a transient PROCESSING snapshot).
-	if state.DefaultNodePool != nil && plan.DefaultNodePool != nil {
-		poolID := state.DefaultNodePool.ID.ValueInt64()
-		changed, err := r.reconcileDefaultPool(ctx, id, poolID, state.DefaultNodePool, plan.DefaultNodePool, opts)
-		if err != nil {
-			resp.Diagnostics.AddError("Unable to update default node pool", client.KuberErrorDetail(err))
-			return
-		}
-		if changed {
-			if waitErr := r.waitForPoolReady(ctx, poolID, plan.DefaultNodePool, opts); waitErr != nil {
-				resp.Diagnostics.AddError("Default node pool did not stabilize",
-					fmt.Sprintf("pool %d: %s", poolID, waitErr.Error()))
-				return
-			}
 		}
 	}
 
@@ -992,63 +790,8 @@ func (r *K8sClusterResource) Update(ctx context.Context, req resource.UpdateRequ
 	}
 	region := valueOrDefault(state.Region, r.c.Region)
 	projectTag := valueOrDefault(state.ProjectTag, r.c.ProjectTag)
-	poolID := int64(0)
-	if state.DefaultNodePool != nil {
-		poolID = state.DefaultNodePool.ID.ValueInt64()
-	}
-	r.applyServerState(ctx, &plan, final, poolID, region, projectTag, false, nil)
+	r.applyServerState(ctx, &plan, final, region, projectTag)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
-}
-
-// reconcileDefaultPool applies node_count / autoscaling changes to the default
-// pool, choosing the right endpoint for each transition (ADR-K4). It returns
-// whether a mutating call was issued (so the caller can wait for the pool to
-// settle).
-func (r *K8sClusterResource) reconcileDefaultPool(ctx context.Context, clusterID, poolID int64, state, plan *K8sDefaultPoolModel, opts *client.RequestOpts) (bool, error) {
-	if !defaultPoolChanged(state, plan) {
-		return false, nil
-	}
-	if poolID == 0 {
-		return false, fmt.Errorf("the default node pool id for cluster %d is unknown; run `terraform refresh` and try again", clusterID)
-	}
-
-	stateAuto := state.Autoscaling != nil
-	planAuto := plan.Autoscaling != nil
-
-	switch {
-	case !stateAuto && planAuto:
-		// fixed -> autoscaling: enable with the new bounds.
-		return true, r.c.EnableAutoscaling(ctx, client.ModifyNodePoolRequest{
-			ClusterID: clusterID, NodePoolID: poolID,
-			MinNodes: int(plan.Autoscaling.MinNodes.ValueInt64()),
-			MaxNodes: int(plan.Autoscaling.MaxNodes.ValueInt64()),
-		}, opts)
-
-	case stateAuto && !planAuto:
-		// autoscaling -> fixed: disable, pin to the requested node_count.
-		fixed := 0
-		if !plan.NodeCount.IsNull() && !plan.NodeCount.IsUnknown() {
-			fixed = int(plan.NodeCount.ValueInt64())
-		}
-		return true, r.c.DisableAutoscaler(ctx, client.DisableAutoscalerRequest{
-			ClusterID: clusterID, NodePoolID: poolID, FixedSize: fixed,
-		}, opts)
-
-	case stateAuto && planAuto:
-		// bounds change.
-		return true, r.c.UpdateAutoscaling(ctx, client.ModifyNodePoolRequest{
-			ClusterID: clusterID, NodePoolID: poolID,
-			MinNodes: int(plan.Autoscaling.MinNodes.ValueInt64()),
-			MaxNodes: int(plan.Autoscaling.MaxNodes.ValueInt64()),
-		}, opts)
-
-	default:
-		// both fixed: node_count changed.
-		return true, r.c.ChangeNodePoolSize(ctx, client.ModifyNodePoolRequest{
-			ClusterID: clusterID, NodePoolID: poolID,
-			WorkerReplicas: int(plan.NodeCount.ValueInt64()),
-		}, opts)
-	}
 }
 
 // ---- Delete ----
@@ -1186,36 +929,6 @@ func (r *K8sClusterResource) findClusterIDByName(ctx context.Context, name strin
 	return 0, nil
 }
 
-// discoverDefaultPoolID resolves the default pool's id after create. The create
-// response carries only the cluster id, so we list the cluster's pools and match
-// the one whose name equals the configured default pool name (lowercased). On any
-// ambiguity or failure it returns 0 — the caller still has valid cluster state.
-func (r *K8sClusterResource) discoverDefaultPoolID(ctx context.Context, clusterID int64, poolName string, opts *client.RequestOpts) int64 {
-	want := strings.ToLower(poolName)
-	for attempt := 0; ; attempt++ {
-		pools, err := r.c.ListNodePools(ctx, clusterID, opts)
-		if err == nil {
-			for i := range pools {
-				if strings.ToLower(pools[i].Name) == want {
-					return pools[i].ID
-				}
-			}
-		} else {
-			tflog.Warn(ctx, "Could not list node pools to resolve default pool id", map[string]any{
-				"cluster_id": clusterID, "error": err.Error(), "attempt": attempt,
-			})
-		}
-		if attempt >= k8sMaxConsecutiveErrs {
-			return 0
-		}
-		select {
-		case <-ctx.Done():
-			return 0
-		case <-time.After(k8sPollInterval):
-		}
-	}
-}
-
 // clusterUpgradeConverged reports whether an in-place version upgrade has settled:
 // the cluster is SUCCESS, reports the requested version, and has no operation still
 // in flight. It guards waitForClusterReady's upgrade mode against returning on the
@@ -1306,72 +1019,12 @@ func (r *K8sClusterResource) waitForClusterReady(ctx context.Context, id int64, 
 	}
 }
 
-// waitForPoolReady polls a node pool until it has CONVERGED to the requested
-// shape: status SUCCESS and its live fields match `want`. Pools rest at SUCCESS,
-// and the mutating calls are async, so a plain "status == SUCCESS" check can
-// return on the stale pre-mutation snapshot; matching the requested fields makes
-// the wait edge-correct regardless of whether the backend has flipped to
-// PROCESSING yet. Tolerates up to k8sMaxConsecutiveErrs transient errors (ADR-K5).
-func (r *K8sClusterResource) waitForPoolReady(ctx context.Context, poolID int64, want *K8sDefaultPoolModel, opts *client.RequestOpts) error {
-	var consecutiveErrs int
-	for {
-		pool, err := r.c.GetNodePool(ctx, poolID, opts)
-		switch {
-		case err == nil:
-			consecutiveErrs = 0
-			tflog.Debug(ctx, "Polling node pool", map[string]any{"id": poolID, "status": pool.Status})
-			if pool.Status == client.ClusterStatusSuccess && poolMatchesDesired(pool, want) {
-				return nil
-			}
-		case client.IsKuberNotFound(err):
-			return fmt.Errorf("node pool %d disappeared while waiting", poolID)
-		default:
-			consecutiveErrs++
-			if consecutiveErrs > k8sMaxConsecutiveErrs {
-				return fmt.Errorf("polling failed after %d consecutive errors: %w", consecutiveErrs, err)
-			}
-		}
-
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(k8sPollInterval):
-		}
-	}
-}
-
-// poolMatchesDesired reports whether a live pool reflects the requested default
-// pool shape. For an autoscaling pool it checks the flag and bounds (the live
-// node_count is autoscaler-owned and not asserted); for a fixed pool it checks
-// the flag is off and node_count equals the request (when known).
-func poolMatchesDesired(pool *client.NodePool, want *K8sDefaultPoolModel) bool {
-	if want == nil {
-		return true
-	}
-	if want.Autoscaling != nil {
-		return pool.AutoscaleEnabled &&
-			int64(pool.MinNodes) == want.Autoscaling.MinNodes.ValueInt64() &&
-			int64(pool.MaxNodes) == want.Autoscaling.MaxNodes.ValueInt64()
-	}
-	if pool.AutoscaleEnabled {
-		return false
-	}
-	if !want.NodeCount.IsNull() && !want.NodeCount.IsUnknown() {
-		return int64(pool.NodeCount) == want.NodeCount.ValueInt64()
-	}
-	return true
-}
-
 // applyServerState writes server-owned fields from a Cluster onto the model.
-// Write-once / RequiresReplace inputs that the API does not echo back
-// (public_key, authorize_ssh, and the default pool's sizing) are preserved from the
-// existing model rather than overwritten. node_ip_range IS echoed (the backend may
-// auto-allocate it), so it is read back here like any server-known value.
-//
-// fromRead selects the default-pool reconciliation mode: on Read (true) it
-// reconstructs the block after import and nulls it on out-of-band deletion; on
-// Create/Update (false) it only refreshes the live fields of an existing block.
-func (r *K8sClusterResource) applyServerState(ctx context.Context, m *K8sClusterModel, cl *client.Cluster, defaultPoolID int64, region, projectTag string, fromRead bool, diags *diag.Diagnostics) {
+// Write-once / RequiresReplace inputs the API does not echo back (public_key,
+// ssh_access_enabled) are preserved from the existing model rather than
+// overwritten. node_ip_range IS echoed (the backend may auto-allocate it), so it
+// is read back here like any server-known value.
+func (r *K8sClusterResource) applyServerState(ctx context.Context, m *K8sClusterModel, cl *client.Cluster, region, projectTag string) {
 	m.ID = types.Int64Value(cl.ID)
 	m.Region = types.StringValue(region)
 	m.ProjectTag = types.StringValue(projectTag)
@@ -1399,165 +1052,6 @@ func (r *K8sClusterResource) applyServerState(ctx context.Context, m *K8sCluster
 	if cl.MasterNodeConfig != nil {
 		m.MasterFlavorID = types.Int64Value(cl.MasterNodeConfig.ID)
 	}
-
-	r.applyDefaultPoolState(ctx, m, cl.ID, defaultPoolID, region, projectTag, fromRead, diags)
-}
-
-// applyDefaultPoolState reconciles the default_node_pool block with the server.
-//   - block present, pool found  -> refresh live fields (node_count/autoscaling),
-//     preserving the immutable sizing inputs already in the model.
-//   - block present, pool missing, fromRead -> null the block + warn (ADR-K8
-//     phase 1); ModifyPlan then forces a replacement on the next plan.
-//   - block absent, fromRead (import) -> reconstruct the whole block from the
-//     lowest-id pool, which is the worker pool created with the cluster (ADR-K6).
-//   - on Create/Update a transient discovery miss never nulls the block.
-func (r *K8sClusterResource) applyDefaultPoolState(ctx context.Context, m *K8sClusterModel, clusterID, defaultPoolID int64, region, projectTag string, fromRead bool, diags *diag.Diagnostics) {
-	opts := &client.RequestOpts{Region: region, ProjectTag: projectTag}
-
-	if m.DefaultNodePool == nil {
-		if !fromRead {
-			return // Create/Update always carry the plan's block
-		}
-		pool := r.discoverDefaultPool(ctx, clusterID, opts)
-		if pool == nil {
-			return // unresolved on import; ModifyPlan forces replacement
-		}
-		m.DefaultNodePool = &K8sDefaultPoolModel{
-			ID:        types.Int64Value(pool.ID),
-			Name:      types.StringValue(pool.Name),
-			VCPU:      types.Int64Value(int64(pool.CPU)),
-			RAM:       types.Int64Value(int64(pool.RAM)),
-			DiskSize:  types.Int64Value(int64(pool.SSD)),
-			NodeCount: types.Int64Value(int64(pool.NodeCount)),
-		}
-		if pool.AutoscaleEnabled {
-			m.DefaultNodePool.Autoscaling = &K8sAutoscalingModel{
-				MinNodes: types.Int64Value(int64(pool.MinNodes)),
-				MaxNodes: types.Int64Value(int64(pool.MaxNodes)),
-			}
-		}
-		return
-	}
-
-	if defaultPoolID == 0 {
-		defaultPoolID = m.DefaultNodePool.ID.ValueInt64()
-	}
-	pool, gone := r.fetchPool(ctx, defaultPoolID, m.DefaultNodePool.Name.ValueString(), clusterID, region, projectTag)
-	if pool == nil {
-		if fromRead {
-			if !gone {
-				// Inconclusive refresh (transient API error): keep the last-known
-				// node-pool values instead of nulling the block. Nulling it would make
-				// ModifyPlan propose REPLACING the whole cluster over a momentary blip.
-				if diags != nil {
-					diags.AddWarning(
-						"Default node pool refresh incomplete",
-						fmt.Sprintf("Could not refresh the default node pool of cluster %d due to a transient API error; "+
-							"keeping the last-known values. Re-run to refresh.", clusterID),
-					)
-				}
-				return
-			}
-			if diags != nil {
-				diags.AddWarning(
-					"Default node pool not found",
-					fmt.Sprintf("The default node pool of cluster %d is no longer present on the server. "+
-						"Terraform will plan to replace the cluster to restore it.", clusterID),
-				)
-			}
-			m.DefaultNodePool = nil
-		} else {
-			// Create/Update: a transient discovery/fetch miss must not leave the
-			// block's computed fields unknown in state (that fails Terraform's
-			// consistency check). Pin them to concrete known values; a later refresh
-			// reconciles the real id/count.
-			if defaultPoolID != 0 {
-				m.DefaultNodePool.ID = types.Int64Value(defaultPoolID)
-			} else if m.DefaultNodePool.ID.IsUnknown() {
-				m.DefaultNodePool.ID = types.Int64Null()
-			}
-			if m.DefaultNodePool.NodeCount.IsUnknown() {
-				m.DefaultNodePool.NodeCount = types.Int64Null()
-			}
-		}
-		return
-	}
-	m.DefaultNodePool.ID = types.Int64Value(pool.ID)
-	m.DefaultNodePool.NodeCount = types.Int64Value(int64(pool.NodeCount))
-	if pool.AutoscaleEnabled {
-		m.DefaultNodePool.Autoscaling = &K8sAutoscalingModel{
-			MinNodes: types.Int64Value(int64(pool.MinNodes)),
-			MaxNodes: types.Int64Value(int64(pool.MaxNodes)),
-		}
-	} else {
-		m.DefaultNodePool.Autoscaling = nil
-	}
-}
-
-// discoverDefaultPool resolves a cluster's default pool for import: the lowest-id
-// pool, which is the worker pool created with the cluster (before the master
-// pool), per ADR-K6. Returns nil if the cluster has no pools or the list fails.
-func (r *K8sClusterResource) discoverDefaultPool(ctx context.Context, clusterID int64, opts *client.RequestOpts) *client.NodePool {
-	pools, err := r.c.ListNodePools(ctx, clusterID, opts)
-	if err != nil || len(pools) == 0 {
-		return nil
-	}
-	lowest := &pools[0]
-	for i := range pools {
-		if pools[i].ID < lowest.ID {
-			lowest = &pools[i]
-		}
-	}
-	return lowest
-}
-
-// fetchPool returns the default pool by id, falling back to a name match if the id
-// is unknown. The second return value, gone, distinguishes a CONFIRMED absence (the
-// server affirmatively reported the pool does not exist) from an INCONCLUSIVE result
-// (a transient API error left it undetermined). It matters because the caller turns
-// a confirmed absence into a cluster replacement: a transient blip must NOT trigger
-// that. When the returned pool is non-nil, gone is meaningless (false).
-func (r *K8sClusterResource) fetchPool(ctx context.Context, poolID int64, poolName string, clusterID int64, region, projectTag string) (pool *client.NodePool, gone bool) {
-	opts := &client.RequestOpts{Region: region, ProjectTag: projectTag}
-	if poolID != 0 {
-		p, err := r.c.GetNodePool(ctx, poolID, opts)
-		if err == nil {
-			return p, false
-		}
-		if client.IsKuberNotFound(err) {
-			// Definitive: this id is gone (deleted out of band). Do NOT fall back to a
-			// name match — it could adopt a different pool that shares the name.
-			return nil, true
-		}
-		// Transient error on the by-id read: recover the SAME pool by id from the
-		// cluster's list. If the list itself fails we cannot tell present from absent,
-		// so report inconclusive (gone=false) rather than confirmed-gone.
-		pools, lerr := r.c.ListNodePools(ctx, clusterID, opts)
-		if lerr != nil {
-			return nil, false
-		}
-		for i := range pools {
-			if pools[i].ID == poolID {
-				return &pools[i], false
-			}
-		}
-		// The list succeeded and the id is not in it → confirmed gone.
-		return nil, true
-	}
-	// id unknown (create-time discovery / post-import): resolve by name.
-	pools, err := r.c.ListNodePools(ctx, clusterID, opts)
-	if err != nil {
-		// Could not determine — inconclusive, not confirmed-gone.
-		return nil, false
-	}
-	want := strings.ToLower(poolName)
-	for i := range pools {
-		if strings.ToLower(pools[i].Name) == want {
-			return &pools[i], false
-		}
-	}
-	// The list succeeded and no pool matches the name → confirmed absent.
-	return nil, true
 }
 
 // parseK8sImportID accepts a bare integer id or the composite

@@ -38,11 +38,10 @@ type K8sNodePoolResource struct {
 	c *client.Client
 }
 
-// K8sNodePoolModel mirrors the prodata_kubernetes_node_pool schema. It is the
-// standalone analogue of the cluster resource's inline K8sDefaultPoolModel, plus
-// the scope (region/project_tag) and parent (cluster_id) needed to address a pool
-// on its own. Autoscaling reuses the shared K8sAutoscalingModel: its mere presence
-// means "autoscaling enabled".
+// K8sNodePoolModel mirrors the prodata_kubernetes_node_pool schema. It carries the
+// pool's sizing/scaling fields plus the scope (region/project_tag) and parent
+// (cluster_id) needed to address a pool on its own. Autoscaling reuses the shared
+// K8sAutoscalingModel: its mere presence means "autoscaling enabled".
 type K8sNodePoolModel struct {
 	ID          types.Int64          `tfsdk:"id"`
 	ClusterID   types.Int64          `tfsdk:"cluster_id"`
@@ -292,8 +291,7 @@ func (r *K8sNodePoolResource) ModifyPlan(ctx context.Context, req resource.Modif
 }
 
 // nodePoolChanged reports whether the in-place-updatable fields of a pool
-// (node_count, autoscaling presence/bounds) differ between state and plan. Mirrors
-// defaultPoolChanged for the standalone model.
+// (node_count, autoscaling presence/bounds) differ between state and plan.
 func nodePoolChanged(state, plan *K8sNodePoolModel) bool {
 	if !plan.NodeCount.Equal(state.NodeCount) {
 		return true
@@ -549,8 +547,7 @@ func (r *K8sNodePoolResource) Update(ctx context.Context, req resource.UpdateReq
 
 // reconcilePool applies node_count / autoscaling changes, choosing the right
 // endpoint for each transition (ADR-K4). It returns whether a mutating call was
-// issued (so the caller waits for the pool to settle). Mirrors reconcileDefaultPool
-// for the standalone model.
+// issued (so the caller waits for the pool to settle).
 func (r *K8sNodePoolResource) reconcilePool(ctx context.Context, clusterID, poolID int64, state, plan *K8sNodePoolModel, opts *client.RequestOpts) (bool, error) {
 	if !nodePoolChanged(state, plan) {
 		return false, nil
@@ -634,9 +631,11 @@ func (r *K8sNodePoolResource) Delete(ctx context.Context, req resource.DeleteReq
 		if client.IsKuberNotFound(err) {
 			return
 		}
-		// 756 (last worker pool) and the "Cannot delete master node pool" guard both
-		// surface here; KuberErrorDetail maps 756 to a clear message and others fall
-		// through to the backend text. The pool still exists, so do not remove state.
+		// 756 (last worker pool) fires only on backends that still guard it; the new
+		// control-plane-only backend allows deleting the last pool. KuberErrorDetail
+		// maps 756 to a clear message for un-promoted prod, and the "Cannot delete
+		// master node pool" guard also surfaces here. The pool still exists, so do
+		// not remove state.
 		resp.Diagnostics.AddError("Unable to delete node pool", client.KuberErrorDetail(err))
 		return
 	}
@@ -840,8 +839,7 @@ func (r *K8sNodePoolResource) resolveNewPoolID(ctx context.Context, clusterID in
 // mutating calls are async, so a plain "status == SUCCESS" check can return on the
 // stale pre-mutation snapshot; matching the requested fields makes the wait
 // edge-correct. Pools never reach FAIL/DELETED, so there is no terminal-error
-// branch (a vanished pool is reported as not-found). Mirrors the cluster resource's
-// waitForPoolReady for the standalone model. ADR-K5.
+// branch (a vanished pool is reported as not-found). ADR-K5.
 func (r *K8sNodePoolResource) waitForPoolReady(ctx context.Context, poolID int64, want *K8sNodePoolModel, opts *client.RequestOpts) (*client.NodePool, error) {
 	var consecutiveErrs int
 	var last *client.NodePool
@@ -875,7 +873,7 @@ func (r *K8sNodePoolResource) waitForPoolReady(ctx context.Context, poolID int64
 // nodePoolMatchesDesired reports whether a live pool reflects the requested shape.
 // For an autoscaling pool it checks the flag and bounds (the live node_count is
 // autoscaler-owned and not asserted); for a fixed pool it checks the flag is off and
-// node_count equals the request (when known). Mirrors poolMatchesDesired.
+// node_count equals the request (when known).
 func nodePoolMatchesDesired(pool *client.NodePool, want *K8sNodePoolModel) bool {
 	if want == nil {
 		return true

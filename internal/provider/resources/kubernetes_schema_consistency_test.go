@@ -78,18 +78,6 @@ func TestK8sClusterSchemaModelConsistency(t *testing.T) {
 	}
 	assertTagsMatch(t, "cluster.kube_config", reflect.TypeOf(K8sKubeConfigModel{}), kc.Attributes)
 	assertAttrTypesMatch(t, "cluster.kube_config", kubeConfigAttrTypes(), kc.Attributes)
-
-	dp, ok := resp.Schema.Attributes["default_node_pool"].(rschema.SingleNestedAttribute)
-	if !ok {
-		t.Fatal("default_node_pool is not a SingleNestedAttribute")
-	}
-	assertTagsMatch(t, "cluster.default_node_pool", reflect.TypeOf(K8sDefaultPoolModel{}), dp.Attributes)
-
-	as, ok := dp.Attributes["autoscaling"].(rschema.SingleNestedAttribute)
-	if !ok {
-		t.Fatal("default_node_pool.autoscaling is not a SingleNestedAttribute")
-	}
-	assertTagsMatch(t, "cluster.default_node_pool.autoscaling", reflect.TypeOf(K8sAutoscalingModel{}), as.Attributes)
 }
 
 func TestK8sNodePoolSchemaModelConsistency(t *testing.T) {
