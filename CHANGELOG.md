@@ -4,6 +4,38 @@ All notable changes to this provider are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.24.0] - Unreleased
+
+### Removed
+
+- **BREAKING:** `prodata_kubernetes_cluster.default_node_pool` is removed. A cluster is now
+  **control-plane-only**; every worker pool — including the first — is a standalone
+  `prodata_kubernetes_node_pool` resource. This makes a pool's CPU/RAM/disk change replace
+  only that pool (never the cluster), allows any number of independently-managed pools, and
+  makes a zero-pool cluster a valid steady state.
+
+### Changed
+
+- `prodata_kubernetes_cluster`: creating a cluster no longer provisions a worker pool. Add
+  worker capacity with one or more `prodata_kubernetes_node_pool` resources.
+- `prodata_kubernetes_node_pool`: deleting a cluster's last worker pool is now allowed
+  (control-plane-only is legal). Against a backend not yet upgraded the panel still returns
+  code 756; the provider surfaces it as a clear message.
+
+### Migration
+
+- Existing clusters migrate **without destroying worker nodes**: remove the `default_node_pool`
+  block, add a `prodata_kubernetes_node_pool`, and **`terraform import`** the existing pool (its
+  id is the cluster's lowest-id worker pool) before any apply — a clean `terraform plan` (no
+  changes) is the success gate. Autoscaling pools: declare `autoscaling` and omit `node_count`.
+  Full recipe in the `prodata_kubernetes_cluster` resource docs.
+
+> **Deploy ordering:** this release requires the matching control-plane-only `panel-main` **and**
+> `panel-k8s` changes in the target region. Deploy/promote the backend first; against an
+> un-upgraded backend the old create path NPEs on a null `nodePoolName`. (Mirrors the 0.23.0
+> `node_ip_range` backend-first precedent.) The published release is held until the backend is
+> promoted `test → main` for uz + kz.
+
 ## [0.23.0] - 2026-06-24
 
 ### Added
@@ -312,7 +344,9 @@ for release-by-release commits. Notable in the 0.11 line: addition of
 `prodata_s3_bucket` resource and data sources, the `prodata_public_ip_attachment`
 restart note, plus VM and volume CRUD improvements.
 
-[Unreleased]: https://github.com/prodata-cloud/terraform-provider-prodata/compare/v0.22.0...HEAD
+[Unreleased]: https://github.com/prodata-cloud/terraform-provider-prodata/compare/v0.24.0...HEAD
+[0.24.0]: https://github.com/prodata-cloud/terraform-provider-prodata/compare/v0.23.0...v0.24.0
+[0.23.0]: https://github.com/prodata-cloud/terraform-provider-prodata/compare/v0.22.0...v0.23.0
 [0.22.0]: https://github.com/prodata-cloud/terraform-provider-prodata/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/prodata-cloud/terraform-provider-prodata/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/prodata-cloud/terraform-provider-prodata/compare/v0.19.0...v0.20.0
