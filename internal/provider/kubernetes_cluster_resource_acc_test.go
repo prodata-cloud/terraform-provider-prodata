@@ -86,14 +86,6 @@ resource "prodata_kubernetes_cluster" "test" {
   node_ip_range      = "10.30.0.10-10.30.0.20"
   master_flavor_id   = data.prodata_kubernetes_flavors.standard.flavors[0].id
 
-  default_node_pool = {
-    name       = "workers"
-    vcpu       = 2
-    ram        = 4
-    disk_size  = 40
-    node_count = 1
-  }
-
   timeouts = {
     create = "40m"
     delete = "30m"
