@@ -106,25 +106,17 @@ type KuberVersion struct {
 
 // ---- request bodies (mirror panel-main's create/modify DTOs exactly) ----
 
-// CreateClusterRequest is the body for POST /createCluster (NewClusterCreateDTO).
-// Dead fields gateway/prefix are intentionally omitted (gateway is taken from the
-// local network server-side; serviceSubnet is not a DTO field). nodeSubnet is also
-// omitted: panel-main derives the node subnet prefix from the local network's own
-// mask, so the inbound value was never authoritative for addressing. Addresses
-// (node_ip_range) is omitempty: when the caller omits it, panel-main auto-allocates a
-// free contiguous range from the local network and echoes it back on the cluster
-// (nodeIpRange). The region and project are NOT in the body: createCluster hardcodes
-// the user's current region (K8SCluster ctor), so the cluster lands in whatever region
-// the caller's headers resolve to.
+// CreateClusterRequest is the body for POST /createCluster (NewClusterCreateDTO),
+// now control-plane-only: worker capacity is added afterwards via CreateNodePool,
+// not baked into create. Dead fields gateway/prefix are intentionally omitted, and
+// nodeSubnet too (panel-main derives the node subnet prefix from the local network's
+// mask). Addresses (node_ip_range) is omitempty: when omitted, panel-main
+// auto-allocates a free contiguous range and echoes it back (nodeIpRange). The region
+// and project are NOT in the body: createCluster hardcodes the caller's current region.
 type CreateClusterRequest struct {
 	ClusterName        string   `json:"clusterName"`
-	WorkerDiskSize     int      `json:"workerDiskSize"`
-	WorkerCPU          int      `json:"workerCpu"`
-	WorkerRAM          int      `json:"workerRam"`
-	WorkerReplicas     int      `json:"workerReplicas"`
 	Addresses          []string `json:"addresses,omitempty"`
 	KuberVersion       string   `json:"kuberVersion"`
-	NodePoolName       string   `json:"nodePoolName"`
 	NeedPublicIP       bool     `json:"needPublicIp"`
 	PublicKey          string   `json:"publicKey,omitempty"`
 	AuthorizeSSH       bool     `json:"authorizeSsh"`
@@ -132,9 +124,6 @@ type CreateClusterRequest struct {
 	LocalNetID         int64    `json:"localNetId"`
 	IsHA               bool     `json:"isHa"`
 	MasterNodeConfigID int64    `json:"masterNodeConfigId"`
-	AutoScaleEnabled   bool     `json:"autoScaleEnabled"`
-	MaxNodes           int      `json:"maxNodes,omitempty"`
-	MinNodes           int      `json:"minNodes,omitempty"`
 	Description        string   `json:"description,omitempty"`
 }
 
@@ -409,10 +398,6 @@ func IsKuberNotFound(err error) bool {
 	return false
 }
 
-// IsLastWorkerPool reports whether err is the "cannot delete the last worker node
-// pool" guard (code 756, G1).
-func IsLastWorkerPool(err error) bool { return IsAPIError(err, 756) }
-
 // IsVersionUnavailable reports whether err is the "version not available in this
 // region" error (code 757, G10).
 func IsVersionUnavailable(err error) bool { return IsAPIError(err, 757) }
@@ -446,9 +431,10 @@ func KuberErrorDetail(err error) string {
 
 // ---- cluster operations ----
 
-// CreateCluster provisions a new cluster (plus its inline default node pool). The
-// response carries the new cluster's id; the counts and kubeconfig are populated
-// asynchronously by the backend reconciler and must be polled via GetCluster.
+// CreateCluster provisions a new control-plane-only cluster. Worker capacity is
+// added separately via CreateNodePool. The response carries the new cluster's id;
+// the counts and kubeconfig are populated asynchronously by the backend reconciler
+// and must be polled via GetCluster.
 func (c *Client) CreateCluster(ctx context.Context, req CreateClusterRequest, opts *RequestOpts) (*Cluster, error) {
 	dto, err := doKuberV1[*clusterDTO](ctx, c, http.MethodPost, "/createCluster", req, opts)
 	return singleCluster(dto, err, "create cluster")
@@ -532,8 +518,9 @@ func (c *Client) ListNodePools(ctx context.Context, clusterID int64, opts *Reque
 	return out, nil
 }
 
-// DeleteNodePool deletes a node pool. The backend refuses to delete the last
-// worker pool (code 756 — see IsLastWorkerPool).
+// DeleteNodePool deletes a node pool. Older backends refuse to delete the last
+// worker pool (code 756; KuberErrorDetail maps it); the control-plane-only backend
+// allows it.
 func (c *Client) DeleteNodePool(ctx context.Context, id int64, opts *RequestOpts) error {
 	path := fmt.Sprintf("/deleteNodePool/%d", id)
 	_, err := doKuberV1[json.RawMessage](ctx, c, http.MethodPost, path, nil, opts)

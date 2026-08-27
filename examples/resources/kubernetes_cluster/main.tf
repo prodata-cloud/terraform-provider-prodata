@@ -16,14 +16,15 @@ resource "prodata_kubernetes_cluster" "main" {
   node_ip_range      = "10.0.0.10-10.0.0.20"
   high_availability  = true
   control_plane_size = "medium"
+}
 
-  default_node_pool = {
-    name       = "workers"
-    vcpu       = 4
-    ram        = 8
-    disk_size  = 80
-    node_count = 3
-  }
+resource "prodata_kubernetes_node_pool" "main_workers" {
+  cluster_id = prodata_kubernetes_cluster.main.id
+  name       = "workers"
+  vcpu       = 4
+  ram        = 8
+  disk_size  = 80
+  node_count = 3
 }
 
 # An autoscaling cluster with a public API endpoint and SSH access to the nodes.
@@ -38,17 +39,18 @@ resource "prodata_kubernetes_cluster" "edge" {
   public_endpoint_enabled = true
   ssh_access_enabled      = true
   public_key              = file(pathexpand("~/.ssh/id_ed25519.pub"))
+}
 
-  default_node_pool = {
-    name      = "workers"
-    vcpu      = 2
-    ram       = 4
-    disk_size = 40
+resource "prodata_kubernetes_node_pool" "edge_workers" {
+  cluster_id = prodata_kubernetes_cluster.edge.id
+  name       = "workers"
+  vcpu       = 2
+  ram        = 4
+  disk_size  = 40
 
-    autoscaling = {
-      min_nodes = 1
-      max_nodes = 5
-    }
+  autoscaling = {
+    min_nodes = 1
+    max_nodes = 5
   }
 }
 

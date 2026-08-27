@@ -37,13 +37,8 @@ func TestCreateCluster_SendsExactFieldNames(t *testing.T) {
 	c := newTestClient(t, server)
 	cluster, err := c.CreateCluster(context.Background(), CreateClusterRequest{
 		ClusterName:        "tf-cluster",
-		WorkerDiskSize:     40,
-		WorkerCPU:          2,
-		WorkerRAM:          4,
-		WorkerReplicas:     2,
 		Addresses:          []string{"10.0.0.10-10.0.0.20"},
 		KuberVersion:       "v1.31.4",
-		NodePoolName:       "default",
 		PodSubnet:          "10.244.0.0/16",
 		LocalNetID:         115107,
 		MasterNodeConfigID: 7,
@@ -59,9 +54,8 @@ func TestCreateCluster_SendsExactFieldNames(t *testing.T) {
 		t.Errorf("path = %q, want /panel-main/api/kubernetes/createCluster", capture.path)
 	}
 	// Pin the make-or-break wire keys.
-	for _, key := range []string{"clusterName", "workerCpu", "workerRam", "workerDiskSize",
-		"workerReplicas", "addresses", "kuberVersion", "nodePoolName", "podSubnet",
-		"localNetId", "masterNodeConfigId"} {
+	for _, key := range []string{"clusterName", "addresses", "kuberVersion",
+		"podSubnet", "localNetId", "masterNodeConfigId"} {
 		if _, ok := capture.body[key]; !ok {
 			t.Errorf("request body missing key %q; got keys %v", key, keysOf(capture.body))
 		}
@@ -80,6 +74,14 @@ func TestCreateCluster_SendsExactFieldNames(t *testing.T) {
 	// local network's mask, so the provider must not carry it on the wire.
 	if _, ok := capture.body["nodeSubnet"]; ok {
 		t.Error("request body must not contain removed field nodeSubnet")
+	}
+	// Control-plane-only create: the removed worker/pool fields must never be sent
+	// (they lacked omitempty, so a present-zero would be a different backend contract).
+	for _, key := range []string{"workerCpu", "workerRam", "workerDiskSize",
+		"workerReplicas", "nodePoolName", "autoScaleEnabled"} {
+		if _, ok := capture.body[key]; ok {
+			t.Errorf("control-plane-only create must not send %q; got keys %v", key, keysOf(capture.body))
+		}
 	}
 
 	if cluster.ID != 500 {
@@ -327,9 +329,8 @@ func TestDeleteNodePool_LastWorkerPool756(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if !IsLastWorkerPool(err) {
-		t.Errorf("expected IsLastWorkerPool=true, got: %v", err)
-	}
+	// IsLastWorkerPool was removed (the guard is gone on the new backend); the 756
+	// KuberErrorDetail mapping stays for prod-until-promoted.
 	if !strings.Contains(KuberErrorDetail(err), "last worker node pool") {
 		t.Errorf("KuberErrorDetail = %q", KuberErrorDetail(err))
 	}
