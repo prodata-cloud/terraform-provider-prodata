@@ -2,12 +2,12 @@
 page_title: "prodata_kubernetes_node_pool Resource - ProData Provider"
 subcategory: "Kubernetes"
 description: |-
-  Manages an additional worker node pool on a ProData Managed Kubernetes cluster.
+  Manages a worker node pool on a ProData Managed Kubernetes cluster.
 ---
 
 # prodata_kubernetes_node_pool (Resource)
 
-Manages an additional worker node pool on a ProData Managed Kubernetes cluster. The cluster's first (default) worker pool is managed inline by the [`prodata_kubernetes_cluster`](kubernetes_cluster.md) resource; use this resource for every pool beyond it.
+Manages a worker node pool on a ProData Managed Kubernetes cluster. The cluster itself is control-plane-only; **every** worker pool — including the first — is managed with this resource.
 
 Pool creation and scaling are asynchronous; `terraform apply` blocks until the pool converges or the timeout elapses.
 
@@ -103,5 +103,5 @@ terraform import prodata_kubernetes_node_pool.example UZ-5/42/7@my-project
 
 ## Known Limitations
 
-- **The last worker pool cannot be deleted.** The backend refuses to delete a cluster's last worker node pool (it would leave the cluster with no workers). Destroy the whole cluster instead, or add another worker pool first. The provider surfaces this as a clear error.
+- **Deleting the last worker pool is allowed** — a control-plane-only cluster is a valid state. (Against a backend not yet upgraded, the panel still refuses with code 756; the provider surfaces that as a clear message. Destroy the whole cluster, or add another pool first, in that case.)
 - **Master (control-plane) pools are not manageable here.** This resource manages worker pools only; the master pool is owned by the cluster's `master_flavor_id`.

@@ -2,12 +2,12 @@
 page_title: "prodata_kubernetes_cluster Resource - ProData Provider"
 subcategory: "Kubernetes"
 description: |-
-  Manages a ProData Managed Kubernetes cluster and its inline default worker node pool.
+  Manages a ProData Managed Kubernetes cluster's control plane; worker pools are managed as independent prodata_kubernetes_node_pool resources.
 ---
 
 # prodata_kubernetes_cluster (Resource)
 
-Manages a ProData Managed Kubernetes cluster together with its inline default worker node pool. Additional worker pools are managed with the separate [`prodata_kubernetes_node_pool`](kubernetes_node_pool.md) resource.
+Manages a ProData Managed Kubernetes cluster's **control plane**. Worker capacity is managed as independent [`prodata_kubernetes_node_pool`](kubernetes_node_pool.md) resources — including the first pool. A cluster with zero node pools is a valid, control-plane-only steady state.
 
 Cluster creation is asynchronous; `terraform apply` blocks until the cluster reaches `SUCCESS` (with a bounded grace period for the lazily-fetched kubeconfig) or the create timeout elapses. If the kubeconfig still lags after the grace, the apply finishes with a warning and `terraform refresh` populates it.
 
@@ -34,18 +34,19 @@ resource "prodata_kubernetes_cluster" "main" {
   # node_ip_range omitted — auto-allocated from network_id and reported back in state.
   high_availability  = true
   control_plane_size = "medium" # picks the HA master flavor for you
+}
 
-  default_node_pool = {
-    name       = "workers"
-    vcpu       = 4
-    ram        = 8
-    disk_size  = 80
-    node_count = 3
-  }
+resource "prodata_kubernetes_node_pool" "main_workers" {
+  cluster_id = prodata_kubernetes_cluster.main.id
+  name       = "workers"
+  vcpu       = 4
+  ram        = 8
+  disk_size  = 80
+  node_count = 3
 }
 ```
 
-### Autoscaling default pool with a public endpoint and SSH access
+### Cluster with a public endpoint and an autoscaling worker pool
 
 ```terraform
 resource "prodata_kubernetes_cluster" "edge" {
@@ -59,17 +60,18 @@ resource "prodata_kubernetes_cluster" "edge" {
   public_endpoint_enabled = true
   ssh_access_enabled      = true
   public_key              = file(pathexpand("~/.ssh/id_ed25519.pub"))
+}
 
-  default_node_pool = {
-    name      = "workers"
-    vcpu      = 2
-    ram       = 4
-    disk_size = 40
+resource "prodata_kubernetes_node_pool" "edge_workers" {
+  cluster_id = prodata_kubernetes_cluster.edge.id
+  name       = "workers"
+  vcpu       = 2
+  ram        = 4
+  disk_size  = 40
 
-    autoscaling = {
-      min_nodes = 1
-      max_nodes = 5
-    }
+  autoscaling = {
+    min_nodes = 1
+    max_nodes = 5
   }
 }
 ```
@@ -93,17 +95,6 @@ provider "kubernetes" {
 - `kubernetes_version` (String) Kubernetes version (e.g. `v1.31.4`). Must be a version offered by the [`prodata_kubernetes_versions`](../data-sources/kubernetes_versions.md) data source. Upgrading is applied in place (asynchronous rollout).
 - `network_id` (Number) Local network ID the cluster's nodes attach to. Minimum `1`. Write-once (not read back from the API); changing it forces a new resource.
 - `pod_cidr` (String) Pod network CIDR. Must be a `/16` (e.g. `10.244.0.0/16`). Changing it forces a new resource.
-- `default_node_pool` (Object) The cluster's default worker node pool, created with the cluster. Sizing (`vcpu`, `ram`, `disk_size`) and `name` are immutable (changing them forces a new resource); `node_count` and `autoscaling` are updated in place. Attributes:
-  - `name` (String, required) Pool name. 3-24 characters, lowercase letters / digits / hyphens, not starting or ending with a hyphen.
-  - `vcpu` (Number, required) vCPUs per worker node. Minimum `1`.
-  - `ram` (Number, required) RAM per worker node, in GB. Minimum `1`.
-  - `disk_size` (Number, required) Disk size per worker node, in GB. Minimum `1`.
-  - `node_count` (Number, optional) Number of worker nodes. Minimum `1`. Updated in place. Must be omitted when `autoscaling` is set — the autoscaler then owns the count, exported as a computed value.
-  - `autoscaling` (Object, optional) Enable the cluster-autoscaler for this pool. Its presence enables it; omit the block for a fixed-size pool. Mutually exclusive with `node_count`. Attributes:
-    - `min_nodes` (Number, required) Minimum node count. Minimum `1`.
-    - `max_nodes` (Number, required) Maximum node count. Minimum `1`, and >= `min_nodes`.
-  - `id` (Number, computed) Default pool ID.
-
 ### Optional
 
 > Set **exactly one** of `control_plane_size` or `master_flavor_id` to size the control plane.
@@ -134,7 +125,7 @@ provider "kubernetes" {
 - `private_key_encoded` (String, Sensitive) Base64-encoded SSH private key for the nodes.
 - `status` (String) Lifecycle status: `NEW`, `PROCESSING`, `SUCCESS`, `FAIL`, or `DELETED`.
 - `blocked` (Boolean) True while a mutating operation is in flight on the cluster.
-- `node_pool_count` (Number) Number of node pools (including the default and master pools).
+- `node_pool_count` (Number) Number of node pools on the cluster (master + worker pools). Managed workers are separate `prodata_kubernetes_node_pool` resources.
 - `worker_node_count` (Number) Total worker node count across pools.
 - `master_node_count` (Number) Master node count.
 - `ip_addresses_count` (Number) Number of IP addresses allocated to the cluster.
@@ -174,7 +165,21 @@ To import a cluster in a different region or project, use the composite form `{r
 terraform import prodata_kubernetes_cluster.example UZ-5/42@my-project
 ```
 
-The default worker pool is reconstructed on import from the cluster's lowest-id worker pool. The write-once inputs (`network_id`, `public_key`, `ssh_access_enabled`) are not returned by the API — set them in your configuration after import to match the live cluster so the next plan does not force a replacement. `node_ip_range` is read back from the API on import, so it does not need to be re-supplied.
+The cluster imports its control plane only. Import each worker pool separately as a `prodata_kubernetes_node_pool` (see that resource's Import section). The write-once inputs (`network_id`, `public_key`, `ssh_access_enabled`) are not returned by the API — set them in your configuration after import to match the live cluster so the next plan does not force a replacement. `node_ip_range` is read back from the API on import, so it does not need to be re-supplied.
+
+## Migrating from a version with `default_node_pool`
+
+Before this release the cluster carried an inline `default_node_pool`. That attribute is removed; the pool it described is now a standalone `prodata_kubernetes_node_pool`. Existing clusters migrate **without destroying worker nodes** — import the pool, never recreate it:
+
+1. Upgrade the provider.
+2. Remove the `default_node_pool` block from the cluster's configuration (a stale block now fails at plan with *"Unsupported argument"*).
+3. Add a `prodata_kubernetes_node_pool` resource for the existing pool.
+4. Import it with the **scoped** ID form — the pool id is the cluster's lowest-id worker pool:
+   `terraform import prodata_kubernetes_node_pool.<name> {region}/{cluster_id}/{pool_id}@{project_tag}`
+5. `terraform state show prodata_kubernetes_node_pool.<name>` and copy `name`, `vcpu`, `ram`, `disk_size`, `cluster_id`, `region`, `project_tag` verbatim into configuration.
+6. **`terraform plan` must report no changes** before any apply. Any replace/in-place diff on the pool means a mismatched field — stop and fix it.
+
+If the original pool was autoscaling, declare `autoscaling { min_nodes, max_nodes }` (values from `state show`) and **omit `node_count`** — copying a literal `node_count` disables the autoscaler and can scale nodes away. If the cluster already had extra `prodata_kubernetes_node_pool` resources, leave them as-is and import only the former default (the lowest-id) pool — never point two resources at one pool id.
 
 ## Known Limitations
 
