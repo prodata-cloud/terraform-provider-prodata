@@ -137,10 +137,15 @@ type K8sAutoscalingModel struct {
 }
 
 const (
-	k8sPollInterval       = 30 * time.Second
-	k8sDefaultCreateTime  = 90 * time.Minute
-	k8sDefaultUpdateTime  = 60 * time.Minute
-	k8sDefaultDeleteTime  = 5 * time.Minute
+	k8sPollInterval      = 30 * time.Second
+	k8sDefaultCreateTime = 90 * time.Minute
+	k8sDefaultUpdateTime = 60 * time.Minute
+	// k8sDefaultDeleteTime is deliberately long: teardown is async — after the delete
+	// ack the backend finalizer runs in the background and its own timeout is 30-45m,
+	// at which point the cluster goes FAIL (still reserving its name) rather than
+	// DELETED. The provider must wait past that window to observe the real terminal
+	// verdict instead of giving up while teardown is still legitimately in progress.
+	k8sDefaultDeleteTime  = 45 * time.Minute
 	k8sMaxConsecutiveErrs = 3 // ADR-K5: tolerate up to 3 consecutive transient errors
 	// k8sKubeconfigGrace bounds how long create polling waits for the lazily
 	// fetched kubeconfig after the cluster is already SUCCESS, so a usable cluster
@@ -404,8 +409,9 @@ func (r *K8sClusterResource) Schema(ctx context.Context, _ resource.SchemaReques
 				Sensitive:           true,
 			},
 			"status": schema.StringAttribute{
-				MarkdownDescription: "Lifecycle status: `NEW`, `PROCESSING`, `SUCCESS`, `FAIL`, or `DELETED`.",
-				Computed:            true,
+				MarkdownDescription: "Lifecycle status: `NEW`, `PROCESSING`, `SUCCESS`, `FAIL`, `DELETING`, or " +
+					"`DELETED`. `DELETING` is a lingering state while the cluster's asynchronous teardown runs.",
+				Computed: true,
 			},
 			"blocked": schema.BoolAttribute{
 				MarkdownDescription: "True while a mutating operation is in flight on the cluster.",
@@ -622,17 +628,17 @@ func (r *K8sClusterResource) Create(ctx context.Context, req resource.CreateRequ
 
 	// ADR-K6: adopt-or-error. If a cluster with this name already exists in the
 	// scope, a lost create response (e.g. a 429 on read-back) must not orphan it.
-	existingID, adoptErr := r.findClusterIDByName(ctx, plan.Name.ValueString(), opts)
+	// The message branches on the found cluster's status: a DELETING or FAILED
+	// same-name cluster still holds the name but must not be imported (see
+	// adoptConflictDiag), whereas a live one can be adopted via terraform import.
+	existing, adoptErr := r.findClusterByName(ctx, plan.Name.ValueString(), opts)
 	if adoptErr != nil {
 		resp.Diagnostics.AddError("Unable to verify cluster name availability", client.KuberErrorDetail(adoptErr))
 		return
 	}
-	if existingID != 0 {
-		resp.Diagnostics.AddError(
-			"A cluster with this name already exists",
-			fmt.Sprintf("Cluster %q already exists (id %d) in this region/project. Import it "+
-				"(terraform import) or choose a different name.", plan.Name.ValueString(), existingID),
-		)
+	if existing != nil {
+		summary, detail := adoptConflictDiag(existing)
+		resp.Diagnostics.AddError(summary, detail)
 		return
 	}
 
@@ -718,6 +724,11 @@ func (r *K8sClusterResource) Read(ctx context.Context, req resource.ReadRequest,
 		resp.Diagnostics.AddError("Unable to read Kubernetes cluster", client.KuberErrorDetail(err))
 		return
 	}
+	// A soft-deleted cluster reads DELETED forever (there is no 404), so treat that
+	// as "gone" and drop it from state. DELETING is deliberately NOT handled here:
+	// the cluster still exists while its async teardown runs, so it must stay in
+	// state — it falls through to applyServerState below and keeps its DELETING
+	// status visible until it finally reads DELETED.
 	if cl.Status == client.ClusterStatusDeleted {
 		tflog.Warn(ctx, "Cluster reported DELETED, removing from state", map[string]any{"id": id})
 		resp.State.RemoveResource(ctx)
@@ -835,8 +846,23 @@ func (r *K8sClusterResource) Delete(ctx context.Context, req resource.DeleteRequ
 		switch {
 		case err == nil:
 			consecutiveErrs = 0
-			if cl.Status == client.ClusterStatusDeleted {
+			switch classifyDeletePoll(cl.Status) {
+			case deletePollDone:
+				// DELETED — teardown finished; the destroy succeeded.
 				return
+			case deletePollFailed:
+				// The backend put the cluster in FAIL (e.g. its teardown finalizer
+				// timed out). It is not gone and still reserves its name, so leave it
+				// in state (do NOT RemoveResource) and surface the failure.
+				resp.Diagnostics.AddError(
+					"Kubernetes cluster teardown failed",
+					fmt.Sprintf("Kubernetes cluster %d teardown failed — it is in FAILED state and still "+
+						"reserves its name. Re-run `terraform destroy` to retry, or resolve it in the panel.", id),
+				)
+				return
+			case deletePollPending:
+				// DELETING (or a still-transitional status) — teardown is in progress;
+				// keep polling until DELETED, FAIL, or the delete timeout.
 			}
 		case client.IsKuberNotFound(err):
 			return
@@ -913,20 +939,74 @@ func (r *K8sClusterResource) optsFromState(region, projectTag types.String) *cli
 	return opts
 }
 
-// findClusterIDByName returns the id of a non-DELETED cluster with the given name
-// in the resolved scope, or 0 if none. Used for create-time adopt-or-error.
-func (r *K8sClusterResource) findClusterIDByName(ctx context.Context, name string, opts *client.RequestOpts) (int64, error) {
+// findClusterByName returns the non-DELETED cluster with the given name in the
+// resolved scope, or nil if none exists. Used for create-time adopt-or-error, which
+// branches on the returned cluster's Status (a DELETING or FAILED same-name cluster
+// is reported differently from a live collision — see adoptConflictDiag).
+func (r *K8sClusterResource) findClusterByName(ctx context.Context, name string, opts *client.RequestOpts) (*client.Cluster, error) {
 	clusters, err := r.c.ListClusters(ctx, opts)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	want := strings.ToLower(name)
 	for i := range clusters {
 		if strings.ToLower(clusters[i].Name) == want && clusters[i].Status != client.ClusterStatusDeleted {
-			return clusters[i].ID, nil
+			return &clusters[i], nil
 		}
 	}
-	return 0, nil
+	return nil, nil
+}
+
+// adoptConflictDiag builds the (summary, detail) diagnostic for a same-named cluster
+// found at create time, branching on its lifecycle status. A DELETING cluster's name
+// frees up once teardown finishes, and a FAILED cluster keeps reserving its name
+// until it is deleted — neither should be adopted via terraform import, so those get
+// tailored guidance; any other (live) status is a genuine collision the user can
+// import instead.
+func adoptConflictDiag(existing *client.Cluster) (summary, detail string) {
+	switch existing.Status {
+	case client.ClusterStatusDeleting:
+		return "A cluster with this name is still being deleted",
+			fmt.Sprintf("a cluster named %q is still being deleted; wait for teardown to finish, then retry", existing.Name)
+	case client.ClusterStatusFail:
+		return "A cluster with this name exists in FAILED state",
+			fmt.Sprintf("a cluster named %q exists in FAILED state; delete it before recreating", existing.Name)
+	default:
+		return "A cluster with this name already exists",
+			fmt.Sprintf("Cluster %q already exists (id %d) in this region/project. Import it "+
+				"(terraform import) or choose a different name.", existing.Name, existing.ID)
+	}
+}
+
+// deletePollOutcome classifies one delete-time observation of a cluster's status
+// (see classifyDeletePoll).
+type deletePollOutcome int
+
+const (
+	// deletePollPending means teardown is still in progress — including the dedicated
+	// DELETING state — so the caller keeps polling.
+	deletePollPending deletePollOutcome = iota
+	// deletePollDone means the cluster reads DELETED: teardown finished and the
+	// destroy succeeded.
+	deletePollDone
+	// deletePollFailed means the cluster reads FAIL: teardown failed (e.g. the backend
+	// finalizer timed out). The cluster still reserves its name and must be left in state.
+	deletePollFailed
+)
+
+// classifyDeletePoll maps a cluster status observed while waiting out a delete to a
+// deletePollOutcome. DELETING is the lingering async-teardown state and stays
+// pending; only DELETED is success and only FAIL is a failure.
+func classifyDeletePoll(status string) deletePollOutcome {
+	switch status {
+	case client.ClusterStatusDeleted:
+		return deletePollDone
+	case client.ClusterStatusFail:
+		return deletePollFailed
+	default:
+		// NEW / PROCESSING / SUCCESS / DELETING — teardown not finished; keep polling.
+		return deletePollPending
+	}
 }
 
 // clusterUpgradeConverged reports whether an in-place version upgrade has settled:

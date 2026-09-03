@@ -6,6 +6,14 @@ All notable changes to this provider are documented here. The format is based on
 
 ## [0.24.0] - Unreleased
 
+### Added
+
+- `prodata_kubernetes_cluster`: recognize the backend's new `DELETING` lifecycle status — a
+  lingering state while a cluster's asynchronous teardown runs. `terraform destroy` now polls
+  through `DELETING` until the cluster reads `DELETED`; the `status` attribute can report
+  `DELETING`; and `terraform plan`/`refresh` keeps a `DELETING` cluster in state instead of
+  dropping it as gone.
+
 ### Removed
 
 - **BREAKING:** `prodata_kubernetes_cluster.default_node_pool` is removed. A cluster is now
@@ -21,6 +29,14 @@ All notable changes to this provider are documented here. The format is based on
 - `prodata_kubernetes_node_pool`: deleting a cluster's last worker pool is now allowed
   (control-plane-only is legal). Against a backend not yet upgraded the panel still returns
   code 756; the provider surfaces it as a clear message.
+- `prodata_kubernetes_cluster`: the default **delete timeout is raised from 5m to 45m** —
+  cluster teardown is asynchronous and the backend finalizer can take 30-45 minutes, so the
+  old timeout gave up before the real terminal verdict. If teardown fails (or times out
+  server-side) the cluster is left in `FAIL` — which now **holds the cluster name** until the
+  failed cluster is deleted — and `terraform destroy` surfaces a clear error and keeps the
+  resource in state instead of reporting success. Creating a cluster whose name is still held
+  by a same-named `DELETING` or `FAILED` cluster now fails with tailored guidance (wait for
+  teardown, or delete the failed cluster) rather than a generic "already exists".
 
 ### Migration
 
