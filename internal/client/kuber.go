@@ -17,13 +17,17 @@ import (
 const kuberBasePath = "/api/kubernetes"
 
 // Cluster lifecycle statuses (the name field of panel-main's nested Statuses
-// entity). SUCCESS and FAIL are terminal; DELETED is returned forever by
-// getCluster after a soft-delete (there is no 404), so Read maps it to "gone".
+// entity). SUCCESS is the terminal live state. DELETING is a lingering state
+// during async teardown, between the live states and DELETED. DELETED is returned
+// forever by getCluster after a soft-delete (there is no 404), so Read maps it to
+// "gone". FAIL is terminal; on a teardown timeout the backend also sets FAIL, and a
+// FAILED cluster keeps reserving its name until it is deleted.
 const (
 	ClusterStatusNew        = "NEW"
 	ClusterStatusProcessing = "PROCESSING"
 	ClusterStatusSuccess    = "SUCCESS"
 	ClusterStatusFail       = "FAIL"
+	ClusterStatusDeleting   = "DELETING"
 	ClusterStatusDeleted    = "DELETED"
 )
 
@@ -37,7 +41,7 @@ const (
 type Cluster struct {
 	ID                int64
 	Name              string
-	Status            string // status.name — NEW|PROCESSING|SUCCESS|FAIL|DELETED
+	Status            string // status.name — NEW|PROCESSING|SUCCESS|FAIL|DELETING|DELETED
 	KubeVersion       string // kuberVersion (NOT "kubernetes_version")
 	APIEndpoint       string
 	IsPublic          bool

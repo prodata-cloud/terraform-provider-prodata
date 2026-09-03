@@ -123,7 +123,7 @@ provider "kubernetes" {
 - `api_endpoint` (String) Kubernetes API server endpoint.
 - `ssh_key_encoded` (String) Base64-encoded SSH public key registered on the nodes.
 - `private_key_encoded` (String, Sensitive) Base64-encoded SSH private key for the nodes.
-- `status` (String) Lifecycle status: `NEW`, `PROCESSING`, `SUCCESS`, `FAIL`, or `DELETED`.
+- `status` (String) Lifecycle status: `NEW`, `PROCESSING`, `SUCCESS`, `FAIL`, `DELETING`, or `DELETED`. `DELETING` is a lingering state while the cluster's asynchronous teardown runs; on a teardown timeout the cluster goes `FAIL` and keeps reserving its name until it is deleted.
 - `blocked` (Boolean) True while a mutating operation is in flight on the cluster.
 - `node_pool_count` (Number) Number of node pools on the cluster (master + worker pools). Managed workers are separate `prodata_kubernetes_node_pool` resources.
 - `worker_node_count` (Number) Total worker node count across pools.
