@@ -3,9 +3,18 @@ package client
 import (
 	"context"
 	"errors"
+	"fmt"
+	"go/ast"
+	"go/build"
+	"go/parser"
+	"go/token"
+	"maps"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -99,22 +108,263 @@ func TestCreateCluster_SendsExactFieldNames(t *testing.T) {
 	}
 }
 
+// kuberRequests are the requests, below /panel-main, that the kuber methods
+// send; the verbs stand for the method's arguments other than the context, a
+// request body and opts, in order. The test's strings need no escaping, so %s
+// shows one as is (TestUpdateClusterVersion_PathAndQuery checks the escaping).
+var kuberRequests = map[string]string{
+	"CreateCluster":        "POST /api/kubernetes/createCluster",
+	"GetCluster":           "GET /api/kubernetes/getCluster/%d",
+	"ListClusters":         "GET /api/kubernetes/getClusters",
+	"DeleteCluster":        "POST /api/kubernetes/deleteCluster/%d",
+	"UpdateClusterVersion": "POST /api/kubernetes/updateClusterKuberVersion/%d?version=%s",
+	"UpdateMasterConfig":   "PATCH /api/kubernetes/updateMasterNodeConfig",
+	"CreateNodePool":       "POST /api/kubernetes/createNewNodePool",
+	"GetNodePool":          "GET /api/kubernetes/getK8SNodePool/%d",
+	"ListNodePools":        "GET /api/kubernetes/getNodePoolsByClusters/%d",
+	"DeleteNodePool":       "POST /api/kubernetes/deleteNodePool/%d",
+	"ChangeNodePoolSize":   "POST /api/kubernetes/changeNodePoolSize",
+	"EnableAutoscaling":    "POST /api/kubernetes/enableAutoscaling",
+	"UpdateAutoscaling":    "POST /api/kubernetes/updateAutoscaling",
+	"DisableAutoscaler":    "POST /api/kubernetes/disableAutoscaler",
+	"ListKuberVersions":    "GET /api/kubernetes/getKuberVersions",
+	"GetMasterNodeConfigs": "GET /api/kubernetes/getMasterNodeConfig/%t",
+}
+
+// Every kuber method asks for English and keeps the region and project its call
+// is scoped to (the provider's for any that opts leaves unset). For API-key
+// callers the panel reads these headers only where it scopes a reply: the
+// cluster list by region and project, the master flavors by region. Permissions
+// are global to the key, and a cluster is created in the key owner's current
+// region and project. Every method is pinned anyway, so a call that drops its
+// scope is caught now rather than when the panel starts reading it.
 func TestKuberClient_SendsXLangEnglish(t *testing.T) {
-	var gotLang string
+	checkSendsEnglishInScope(t, "doKuberV1", kuberRequests)
+}
+
+// checkSendsEnglishInScope calls every method in requests with zero arguments
+// and with sample ones, in one scope after another, and requires it to send
+// exactly its request, asking for English, in that scope. The calls share one
+// client, as a provider's resources do, so a scope kept past its call shows in
+// a later scope's calls. No two sample integers or strings of a call are
+// alike, so the request shows which argument went where. A method returning a
+// list gets one element back, two with sample arguments, so what it does per
+// element runs too. A branch taken only for other values is not reached.
+//
+// requests must name exactly the functions of the package build that refer to
+// send, so a new method calling send cannot be left out. The methods must call
+// send themselves: a helper they share over send fails the test, and a method
+// that reaches the panel only through another method, or around send, is not
+// checked.
+func checkSendsEnglishInScope(t *testing.T, send string, requests map[string]string) {
+	t.Helper()
+	methods := slices.Sorted(maps.Keys(requests))
+	if callers := callersOf(t, send); !slices.Equal(callers, methods) {
+		t.Fatalf("functions calling %s: %v; want the methods under test: %v", send, callers, methods)
+	}
+	type request struct {
+		line   string // method and URI below /panel-main
+		header http.Header
+	}
+	var (
+		mu   sync.Mutex
+		data string
+		sent []request
+	)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotLang = r.Header.Get("X-Lang")
+		mu.Lock()
+		sent = append(sent, request{r.Method + " " + strings.TrimPrefix(r.URL.RequestURI(), "/panel-main"), r.Header.Clone()})
+		reply := `{"error":0,"errMessage":null,"data":` + data + `}`
+		mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(200)
-		_, _ = w.Write([]byte(`{"error":0,"errMessage":null,"data":[]}`))
+		_, _ = w.Write([]byte(reply))
 	}))
 	defer server.Close()
+	client := reflect.ValueOf(newTestClient(t, server))
 
-	c := newTestClient(t, server)
-	if _, err := c.ListClusters(context.Background(), nil); err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	// The provider sends a resource's region and project in opts, leaving unset
+	// any it has no value for; nil opts leave both unset. The region alone and
+	// the project alone are first the second resource's, so a client that
+	// remembers which project goes with a region, or which region with a
+	// project, shows, then the first resource's, so one that puts the second
+	// resource's region or project in place of the one given shows. The last
+	// scope sets nothing, so a project kept from the one before shows.
+	for _, scope := range []struct {
+		name               string
+		opts               *RequestOpts
+		region, projectTag string
+	}{
+		{"the first resource's region and project", &RequestOpts{Region: "UZ7", ProjectTag: "p-7"}, "UZ7", "p-7"},
+		{"no region or project", &RequestOpts{}, "TEST", "test-project"},
+		{"the second resource's region and project", &RequestOpts{Region: "UZ8", ProjectTag: "p-8"}, "UZ8", "p-8"},
+		{"the second resource's region alone", &RequestOpts{Region: "UZ8"}, "UZ8", "test-project"},
+		{"the second resource's project alone", &RequestOpts{ProjectTag: "p-8"}, "TEST", "p-8"},
+		{"nil opts", nil, "TEST", "test-project"},
+		{"the first resource's region alone", &RequestOpts{Region: "UZ7"}, "UZ7", "test-project"},
+		{"the first resource's project alone", &RequestOpts{ProjectTag: "p-7"}, "TEST", "p-7"},
+		{"no region or project again", &RequestOpts{}, "TEST", "test-project"},
+	} {
+		for _, fill := range []struct {
+			name       string
+			sample     bool   // sample arguments rather than zero ones
+			item, list string // the panel's answer to a method returning an object, or a list
+		}{
+			{"zero arguments", false, `{}`, `[{}]`},
+			{"sample arguments", true, `{"id":1}`, `[{"id":1},{"id":2}]`},
+		} {
+			t.Run(scope.name+", "+fill.name, func(t *testing.T) {
+				for _, name := range methods {
+					method := client.MethodByName(name)
+					if !method.IsValid() {
+						t.Errorf("Client has no method %s", name)
+						continue
+					}
+					mt := method.Type()
+					arg := reflect.Zero
+					if fill.sample {
+						arg = (&sampler{t: t}).value // one per call, so its values do not depend on the calls before it
+					}
+					args := make([]reflect.Value, mt.NumIn())
+					var inLine []any // the arguments the request line shows
+					for i := range args {
+						switch in := mt.In(i); in {
+						case reflect.TypeFor[context.Context]():
+							args[i] = reflect.ValueOf(context.Background())
+						case reflect.TypeFor[*RequestOpts]():
+							args[i] = reflect.ValueOf(scope.opts)
+						default:
+							args[i] = arg(in)
+							if in.Kind() != reflect.Struct {
+								inLine = append(inLine, args[i].Interface())
+							}
+						}
+					}
+					want := fmt.Sprintf(requests[name], inLine...)
+					mu.Lock()
+					sent, data = nil, fill.item
+					if mt.Out(0).Kind() == reflect.Slice {
+						data = fill.list
+					}
+					mu.Unlock()
+
+					out := method.Call(args)
+					if err, _ := out[len(out)-1].Interface().(error); err != nil {
+						t.Errorf("%s: %v", name, err)
+					}
+					mu.Lock()
+					got := sent
+					mu.Unlock()
+					if len(got) != 1 || got[0].line != want {
+						lines := make([]string, len(got))
+						for i, r := range got {
+							lines[i] = r.line
+						}
+						t.Errorf("%s sent %q, want only %q", name, lines, want)
+						continue
+					}
+					for _, h := range [][2]string{{"X-Lang", "en"}, {"X-Region", scope.region}, {"X-Project-Tag", scope.projectTag}} {
+						if v := got[0].header.Get(h[0]); v != h[1] {
+							t.Errorf("%s: %s = %q, want %q", name, h[0], v, h[1])
+						}
+					}
+				}
+			})
+		}
 	}
-	if gotLang != "en" {
-		t.Errorf("X-Lang = %q, want en (ADR-K1)", gotLang)
+}
+
+// sampler makes the sample arguments of a call: every integer and string in
+// them differs from the others, every bool is true and every slice has one
+// element. A kind it has no value for fails the test.
+type sampler struct {
+	t *testing.T
+	n int // the integers and strings made so far
+}
+
+func (s *sampler) value(typ reflect.Type) reflect.Value {
+	v := reflect.New(typ).Elem()
+	switch typ.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		s.n++
+		v.SetInt(int64(10 + s.n))
+	case reflect.String:
+		s.n++
+		v.SetString(fmt.Sprintf("x%d", s.n))
+	case reflect.Bool:
+		v.SetBool(true)
+	case reflect.Slice:
+		v.Set(reflect.Append(v, s.value(typ.Elem())))
+	case reflect.Pointer:
+		v.Set(s.value(typ.Elem()).Addr())
+	case reflect.Struct:
+		for i := range typ.NumField() {
+			if typ.Field(i).IsExported() {
+				v.Field(i).Set(s.value(typ.Field(i).Type))
+			}
+		}
+	default:
+		s.t.Fatalf("no sample value for %s", typ)
+	}
+	return v
+}
+
+// callersOf returns, sorted, the functions that refer to fn in the files the
+// package build compiles, tests aside.
+func callersOf(t *testing.T, fn string) []string {
+	t.Helper()
+	pkg, err := build.ImportDir(".", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var callers []string
+	for _, file := range pkg.GoFiles {
+		f, err := parser.ParseFile(token.NewFileSet(), file, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", file, err)
+		}
+		for _, decl := range f.Decls {
+			caller, self := "a declaration in "+file, (*ast.Ident)(nil)
+			if fd, ok := decl.(*ast.FuncDecl); ok {
+				caller, self = fd.Name.Name, fd.Name
+			}
+			ast.Inspect(decl, func(n ast.Node) bool {
+				if id, ok := n.(*ast.Ident); ok && id.Name == fn && id != self && !slices.Contains(callers, caller) {
+					callers = append(callers, caller)
+				}
+				return true
+			})
+		}
+	}
+	slices.Sort(callers)
+	return callers
+}
+
+// withEnglishLang, which doKuberV1 and doLBV1 put in front of every call (the
+// X-Lang tests pin both), adds English without dropping the region and project
+// the call is scoped to, keeps a language the caller asked for, and leaves the
+// caller's opts as they were.
+func TestWithEnglishLang(t *testing.T) {
+	if got := withEnglishLang(nil); *got != (RequestOpts{Lang: "en"}) {
+		t.Errorf("nil opts: got %+v, want only Lang en", *got)
+	}
+	for _, given := range []RequestOpts{
+		{},
+		{Region: "UZ7"},
+		{ProjectTag: "p-7"},
+		{Region: "UZ7", ProjectTag: "p-7"},
+	} {
+		opts, want := given, given
+		want.Lang = "en"
+		if got := withEnglishLang(&opts); *got != want {
+			t.Errorf("%+v: got %+v, want %+v", given, *got, want)
+		}
+		if opts != given {
+			t.Errorf("%+v: the caller's opts changed to %+v", given, opts)
+		}
+	}
+
+	if got := withEnglishLang(&RequestOpts{Region: "UZ7", Lang: "ru"}); got.Lang != "ru" {
+		t.Errorf("Lang = %q, want the caller's ru", got.Lang)
 	}
 }
 
@@ -228,15 +478,16 @@ func TestUpdateClusterVersion_PathAndQuery(t *testing.T) {
 	defer server.Close()
 
 	c := newTestClient(t, server)
-	cl, err := c.UpdateClusterVersion(context.Background(), 5, "v1.31.4", nil)
+	cl, err := c.UpdateClusterVersion(context.Background(), 5, "v1.31.4+k3s1", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if capture.path != "/panel-main/api/kubernetes/updateClusterKuberVersion/5" {
 		t.Errorf("path = %q, want .../updateClusterKuberVersion/5", capture.path)
 	}
-	if !strings.Contains(capture.rawQuery, "version=v1.31.4") {
-		t.Errorf("rawQuery = %q, want version=v1.31.4", capture.rawQuery)
+	// Unescaped, the + would reach the panel as a space.
+	if capture.rawQuery != "version=v1.31.4%2Bk3s1" {
+		t.Errorf("rawQuery = %q, want version=v1.31.4%%2Bk3s1", capture.rawQuery)
 	}
 	if cl.Status != ClusterStatusProcessing {
 		t.Errorf("Status = %q, want PROCESSING", cl.Status)

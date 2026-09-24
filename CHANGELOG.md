@@ -52,6 +52,20 @@ All notable changes to this provider are documented here. The format is based on
 > `node_ip_range` backend-first precedent.) The published release is held until the backend is
 > promoted `test → main` for uz + kz.
 
+### Fixed
+
+- `prodata_lb`: panel code 662 — a `network_id` that is not a local network of your account
+  (an unknown id, a deleted network, or a public IP's id) — is now reported as a clear "Local
+  network not found" message instead of the raw API error. The panel returns 662 for these
+  once the matching `panel-main` change is deployed; until then an unknown network gets the
+  misleading code 737 (not enough free IPs in the network) and a public IP's id the generic
+  code 627.
+- `prodata_lb`: load-balancer calls now ask the panel for English (`X-Lang: en`, as the
+  Kubernetes calls already do), so an error the provider does not map yet is shown in English
+  rather than in the language of the API key user's profile. This needs a panel that lets
+  `X-Lang` take precedence over the profile's language; on an older panel a language set on the
+  profile still wins.
+
 ## [0.23.0] - 2026-06-24
 
 ### Added

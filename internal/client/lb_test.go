@@ -186,6 +186,7 @@ func TestLBErrorDetail(t *testing.T) {
 		err       error
 		wantSubst string
 	}{
+		{"662 network not found", &APIError{StatusCode: 404, Codes: []int{662}, Message: "x"}, "Local network not found"},
 		{"701 duplicate name", &APIError{StatusCode: 400, Codes: []int{701}, Message: "x"}, "already exists"},
 		{"736 not found", &APIError{StatusCode: 404, Codes: []int{736}, Message: "x"}, "not found"},
 		{"737 free IPs", &APIError{StatusCode: 400, Codes: []int{737}, Message: "x"}, "free IPs"},
@@ -204,6 +205,29 @@ func TestLBErrorDetail(t *testing.T) {
 			}
 		})
 	}
+}
+
+// lbRequests are the requests, below /panel-main, that the load-balancer
+// methods send; the verbs stand for the method's arguments other than the
+// context, a request body and opts, in order.
+var lbRequests = map[string]string{
+	"CreateLoadBalancerFrontend":    "POST /api/loadbalancer/createLoadbalancer",
+	"CreateLoadBalancerCCM":         "POST /api/ccm/loadbalancer/create",
+	"GetLoadBalancer":               "GET /api/loadbalancer/getLoadBalancer?loadBalancerId=%d",
+	"ListLoadBalancers":             "GET /api/loadbalancer/getUserLoadBalancers",
+	"ConfigureLoadBalancerFrontend": "POST /api/loadbalancer/configureLoadbalancer/%d",
+	"ConfigureLoadBalancerCCM":      "POST /api/ccm/loadbalancer/configureLoadbalancer/%d",
+	"DeleteLoadBalancerFrontend":    "POST /api/loadbalancer/deleteLoadbalancer/%d",
+	"DeleteLoadBalancerCCM":         "POST /api/ccm/loadbalancer/deleteLoadbalancer/%d",
+}
+
+// An error code LBErrorDetail does not map reaches the diagnostics as the
+// panel's own text, in the language the call asks for where the panel honors it
+// (see RequestOpts.Lang), so every load-balancer call asks for English. It must
+// keep the region and project it is scoped to (the provider's for any that opts
+// leaves unset): losing them would send the call to the provider's defaults.
+func TestLBClient_SendsXLangEnglish(t *testing.T) {
+	checkSendsEnglishInScope(t, "doLBV1", lbRequests)
 }
 
 func TestGetLoadBalancer_NotFound736(t *testing.T) {
