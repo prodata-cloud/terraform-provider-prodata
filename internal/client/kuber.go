@@ -312,8 +312,11 @@ func derefInt(p *int) int {
 
 // withEnglishLang returns a copy of opts with Lang forced to "en" (unless the
 // caller already set a language). The kuber endpoints distinguish business
-// errors only by their errMessage text (ADR-K1), so the provider pins them to
-// English to keep its matchers stable regardless of the API key's user language.
+// errors only by their errMessage text (ADR-K1); the strings the provider
+// matches on are English literals on the panel side and need no header, but the
+// DB-backed error text it passes through comes in English only when asked (see
+// RequestOpts.Lang). The load-balancer calls use it for the same text (see
+// doLBV1).
 func withEnglishLang(opts *RequestOpts) *RequestOpts {
 	out := RequestOpts{Lang: "en"}
 	if opts != nil {
@@ -370,9 +373,10 @@ func singleNodePool(dto *nodePoolDTO, err error, op string) (*NodePool, error) {
 // kuberNotFoundMessages are the errMessage strings panel-main returns (at HTTP
 // 500, V1 envelope) for a missing cluster or node pool. The kuber endpoints do
 // NOT use the standard not-found codes (601/703/628), so the provider matches on
-// these strings — pinned to English via X-Lang and captured in step 0.0's
-// baseline. (Cross-project access is reported as not-found by these endpoints,
-// which is acceptable here: ownership is enforced and there is no distinct code.)
+// these strings — English literals on the panel side, whatever the language
+// asked for, captured in step 0.0's baseline. (Cross-project access is reported
+// as not-found by these endpoints, which is acceptable here: ownership is
+// enforced and there is no distinct code.)
 var kuberNotFoundMessages = []string{
 	"Cluster not found!",
 	"Could not find cluster",

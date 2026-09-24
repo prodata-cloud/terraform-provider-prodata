@@ -139,9 +139,12 @@ type RequestOpts struct {
 	Region     string
 	ProjectTag string
 	// Lang sets the X-Lang header (e.g. "en") so DB-backed error messages come
-	// back localized. Empty means no header is sent and the server falls back to
-	// its default ("ru"). The Kubernetes client sets "en" on every call (ADR-K1)
-	// so its error strings — which the provider matches on — are stable English.
+	// back localized. Empty means no header is sent and the server goes by the
+	// API key user's profile language, else Russian; an older panel goes by the
+	// profile even when the header is sent. The Kubernetes (ADR-K1) and
+	// load-balancer clients set "en" on every call so the error text they pass
+	// through is English; the kuber strings the provider matches on are English
+	// literals that do not depend on it.
 	Lang string
 }
 

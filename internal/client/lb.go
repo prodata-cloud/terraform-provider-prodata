@@ -195,10 +195,12 @@ func lbTypeFromIsPublic(isPublic bool) string {
 }
 
 // doLBV1 issues a request to a V1 (load-balancer) endpoint and decodes the V1
-// envelope into T.
+// envelope into T. It asks for English: an error code LBErrorDetail does not
+// map reaches the diagnostics as the panel's own text, which otherwise comes in
+// the language of the API key user's profile (see RequestOpts.Lang).
 func doLBV1[T any](ctx context.Context, c *Client, method, path string, body any, opts *RequestOpts) (T, error) {
 	var zero T
-	statusCode, respBody, err := c.doRequest(ctx, method, path, body, opts)
+	statusCode, respBody, err := c.doRequest(ctx, method, path, body, withEnglishLang(opts))
 	if err != nil {
 		return zero, err
 	}
@@ -226,6 +228,8 @@ func LBErrorDetail(err error) string {
 	var apiErr *APIError
 	if errors.As(err, &apiErr) {
 		switch {
+		case apiErr.HasCode(662):
+			return "Local network not found. network_id must be the id of an existing local network of your account (e.g. prodata_local_network.web.id), not a public IP's id or a deleted network."
 		case apiErr.HasCode(701):
 			return "A load balancer with this name already exists in this region. Choose a different name."
 		case apiErr.HasCode(736):
