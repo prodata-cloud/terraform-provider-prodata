@@ -124,7 +124,7 @@ func localNetworkConfig(t *testing.T, set map[string]tftypes.Value) tfsdk.Config
 }
 
 func TestLocalNetworkDataSource_ExactlyOneOfIDOrName(t *testing.T) {
-	ds := NewLocalNetworkDataSource().(*LocalNetworkDataSource)
+	ds := &LocalNetworkDataSource{}
 
 	tests := []struct {
 		name    string
