@@ -16,6 +16,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework-validators/int64validator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/attr"
+	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -295,20 +296,18 @@ func (r *K8sClusterResource) Schema(ctx context.Context, _ resource.SchemaReques
 				MarkdownDescription: "Control-plane IP range within the local network, as `start-end` " +
 					"(e.g. `10.0.0.10-10.0.0.20`). Optional: when omitted, the platform auto-allocates a free " +
 					"contiguous range from `network_id` (sized for the master and worker node capacity) and " +
-					"reports it back here. When set explicitly, the value is used as-is. Changing it forces a " +
-					"new resource.",
+					"reports it back here. When set explicitly, the value is used as-is, but it is checked against " +
+					"`network_id` before the cluster is created: it must lie inside the network's CIDR and must " +
+					"not contain the network's gateway. Changing it forces a new resource.",
 				Optional: true,
 				Computed: true,
 				PlanModifiers: []planmodifier.String{
 					stringplanmodifier.RequiresReplace(),
 					stringplanmodifier.UseStateForUnknown(),
 				},
-				Validators: []validator.String{
-					stringvalidator.RegexMatches(
-						regexp.MustCompile(`^(\d{1,3}\.){3}\d{1,3}-(\d{1,3}\.){3}\d{1,3}$`),
-						"must be an IPv4 range as start-end, e.g. 10.0.0.10-10.0.0.20",
-					),
-				},
+				// Static checks only (well-formed IPv4, start < end); the checks that need the
+				// local network (CIDR, gateway) run in ModifyPlan / Create — see preflightNodeIPRange.
+				Validators: []validator.String{IPv4Range()},
 			},
 			"public_key": schema.StringAttribute{
 				MarkdownDescription: "SSH public key authorized on the nodes (used when `ssh_access_enabled` is true). " +
@@ -485,26 +484,42 @@ func (r *K8sClusterResource) ValidateConfig(ctx context.Context, req resource.Va
 	}
 }
 
-// ModifyPlan: when the kubernetes_version changes in place, the backend rewrites
-// the kubeconfig / api_endpoint and the cluster transits PROCESSING, so those
-// computed values must be unknown in the plan (ADR-K3) — otherwise Terraform's
-// "computed output must be consistent" check fails after apply.
+// ModifyPlan does two things:
+//   - runs the node_ip_range preflight (planNodeIPRange);
+//   - when the kubernetes_version changes in place, the backend rewrites the
+//     credentials / api_endpoint and the cluster transits PROCESSING, so those computed
+//     values must be unknown in the plan (ADR-K3) — otherwise Terraform's "computed
+//     output must be consistent" check fails after apply.
 func (r *K8sClusterResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
 	// Destroy plan — nothing to do.
 	if req.Plan.Raw.IsNull() {
 		return
 	}
-	// Create plan — no prior state to diff.
-	if req.State.Raw.IsNull() {
-		return
-	}
 
-	var state, plan K8sClusterModel
-	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+	var cfg, plan K8sClusterModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &cfg)...)
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
+	// Create plan — no prior state to diff; only the node_ip_range preflight applies.
+	if req.State.Raw.IsNull() {
+		r.planNodeIPRange(ctx, cfg, plan, nil, &resp.Diagnostics)
+		return
+	}
+
+	var state K8sClusterModel
+	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	// A new node_ip_range / network_id (the cluster will be replaced): check the new pairing.
+	// This stateful call is also the only place where the *warnings* for such a change reach
+	// the user — Terraform core drops warnings of the create-form re-plan that follows.
+	// An unchanged existing cluster is not re-checked here (see planNodeIPRange).
+	r.planNodeIPRange(ctx, cfg, plan, &state, &resp.Diagnostics)
 
 	versionChanged := !plan.KubernetesVersion.Equal(state.KubernetesVersion)
 
@@ -526,6 +541,114 @@ func (r *K8sClusterResource) ModifyPlan(ctx context.Context, req resource.Modify
 		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("worker_node_count"), types.Int64Unknown())...)
 		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("master_node_count"), types.Int64Unknown())...)
 		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("ip_addresses_count"), types.Int64Unknown())...)
+	}
+}
+
+// planNodeIPRange runs the plan-time node_ip_range checks. state is nil on a create plan.
+//
+// It looks at the *configured* value, not the planned one: node_ip_range is
+// Optional+Computed, so the plan carries the old (or an unknown) range whenever the
+// user left it out, and checking that would be wrong.
+//
+//   - not configured, create plan: a warning that the platform will auto-allocate;
+//   - configured and unknown (e.g. fed by another resource): skipped here; the value is
+//     validated again once known, and Terraform re-runs ModifyPlan with the final values
+//     right before Create;
+//   - configured, create plan or the range / network_id changes: preflight against the
+//     network. Terraform core re-plans every replacement with a null prior state, so a
+//     replacement for ANY reason (name, pod_cidr, flavor, -replace, …) also arrives here
+//     as a create plan and is checked (only its errors reach the user, see ModifyPlan);
+//   - configured but identical to state with the same network (or network_id merely
+//     adopted after an import): NOT checked. An in-place update and a plain destroy of an
+//     existing cluster whose range already contains the gateway must keep working.
+func (r *K8sClusterResource) planNodeIPRange(ctx context.Context, cfg, plan K8sClusterModel, state *K8sClusterModel, diags *diag.Diagnostics) {
+	if cfg.NodeIPRange.IsUnknown() {
+		return
+	}
+	if cfg.NodeIPRange.IsNull() {
+		if state == nil {
+			diags.AddAttributeWarning(
+				path.Root("node_ip_range"),
+				"node_ip_range is not set",
+				"The platform will auto-allocate the control-plane IP range from network_id. That range "+
+					"is sized from the capacity known at creation time and is never widened afterwards, so "+
+					"node pools added later can run out of addresses. Set node_ip_range explicitly to "+
+					"choose the addresses; it must lie inside the network's CIDR and must not contain the "+
+					"network's gateway.",
+			)
+		}
+		return
+	}
+	if state != nil {
+		rangeChanged := !plan.NodeIPRange.Equal(state.NodeIPRange)
+		// network_id is write-once: null in state after an import is adoption of the
+		// configured value, not a change, so it must not trigger a check.
+		networkChanged := !state.NetworkID.IsNull() && !plan.NetworkID.Equal(state.NetworkID)
+		if !rangeChanged && !networkChanged {
+			return
+		}
+	}
+	if plan.NetworkID.IsNull() || plan.NetworkID.IsUnknown() || r.c == nil {
+		return
+	}
+	region, projectTag := r.resolveScope(plan.Region, plan.ProjectTag)
+	opts := &client.RequestOpts{Region: region, ProjectTag: projectTag}
+	r.preflightNodeIPRange(ctx, cfg.NodeIPRange.ValueString(), plan.NetworkID.ValueInt64(), opts, false, diags)
+}
+
+// nodeIPRangePlanLookupTimeout bounds the plan-time network lookup. The API client has no
+// HTTP timeout on purpose, and ModifyPlan's context has no deadline, so without this a hung
+// panel would hang `terraform plan` (which never talked to the API for a create before).
+var nodeIPRangePlanLookupTimeout = 30 * time.Second
+
+// preflightNodeIPRange fetches the local network and checks the range against its CIDR and
+// gateway (checkNodeIPRange).
+//
+// The lookup uses the v2 local-networks endpoint, which only sees networks of the request's
+// project, whereas the panel's cluster-create accepts any network of the organisation. So a
+// failed lookup must never block anything:
+//   - at plan time (atCreate=false) it becomes a "skipped" warning (silent if the plan was
+//     cancelled);
+//   - in Create (atCreate=true) it is skipped silently — the plan already warned, and a
+//     failure there would otherwise strand a replacement after the old cluster is deleted.
+//
+// Findings about a network that WAS read are reported at both points; Create adds no
+// warnings, to avoid showing the same ones again.
+func (r *K8sClusterResource) preflightNodeIPRange(ctx context.Context, rng string, networkID int64, opts *client.RequestOpts, atCreate bool, diags *diag.Diagnostics) {
+	attr := path.Root("node_ip_range")
+
+	lookupCtx := ctx
+	if !atCreate {
+		var cancel context.CancelFunc
+		lookupCtx, cancel = context.WithTimeout(ctx, nodeIPRangePlanLookupTimeout)
+		defer cancel()
+	}
+	network, err := r.c.GetLocalNetwork(lookupCtx, networkID, opts)
+	if err != nil {
+		if atCreate || ctx.Err() != nil {
+			tflog.Debug(ctx, "node_ip_range preflight skipped: local network lookup failed",
+				map[string]any{"network_id": networkID, "error": err.Error()})
+			return
+		}
+		diags.AddAttributeWarning(attr, "Unable to check node_ip_range against the local network (skipped)",
+			fmt.Sprintf("Could not read local network %d: %s. The range was not checked.", networkID, err))
+		return
+	}
+	if network.ID == 0 {
+		network.ID = networkID // an empty response body must not read as "network 0"
+	}
+
+	errs, warns := checkNodeIPRange(*network, rng)
+	if !atCreate {
+		for _, w := range warns {
+			diags.AddAttributeWarning(attr, "Suspicious node_ip_range", w+".")
+		}
+	}
+	for _, e := range errs {
+		diags.AddAttributeError(attr, "Invalid node_ip_range for network_id",
+			e+". This check runs whenever the cluster is created, including a replacement forced by "+
+				"another attribute; if you are destroying with such a change pending, use "+
+				"`terraform destroy -refresh=false`.")
 	}
 }
 
@@ -563,6 +686,13 @@ func (r *K8sClusterResource) Create(ctx context.Context, req resource.CreateRequ
 	// When omitted (unknown/null in the plan) the backend auto-allocates a free range
 	// and echoes it back, which Read reflects into state.
 	if !plan.NodeIPRange.IsNull() && !plan.NodeIPRange.IsUnknown() {
+		// Last look before anything is created. Terraform re-runs ModifyPlan with the final
+		// values right before Create, so this only matters if that was somehow skipped; an
+		// unreadable network is not an error here (see preflightNodeIPRange).
+		r.preflightNodeIPRange(ctx, plan.NodeIPRange.ValueString(), plan.NetworkID.ValueInt64(), opts, true, &resp.Diagnostics)
+		if resp.Diagnostics.HasError() {
+			return
+		}
 		wire.Addresses = []string{plan.NodeIPRange.ValueString()}
 	}
 

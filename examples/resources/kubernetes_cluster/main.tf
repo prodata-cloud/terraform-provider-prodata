@@ -33,7 +33,7 @@ resource "prodata_kubernetes_cluster" "edge" {
   kubernetes_version = data.prodata_kubernetes_versions.stable.latest_version
   network_id         = prodata_local_network.k8s.id
   pod_cidr           = "10.245.0.0/16"
-  node_ip_range      = "10.0.1.10-10.0.1.20"
+  node_ip_range      = "10.0.0.30-10.0.0.40"
   master_flavor_id   = data.prodata_kubernetes_flavors.standard.flavors[0].id
 
   public_endpoint_enabled = true
