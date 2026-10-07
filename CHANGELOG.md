@@ -8,6 +8,11 @@ All notable changes to this provider are documented here. The format is based on
 
 ### Added
 
+- `prodata_local_network` data source: look a network up by `name` as well as by `id`
+  (exactly one is required). `id` is now `Optional`+`Computed` instead of `Required`, so existing
+  configs keep working. The name is matched exactly (case-sensitive) among the networks of the
+  selected region and project; no match, or more than one network with the same name (the panel
+  does not enforce unique names on every path), is an error that points to the `id` lookup.
 - `prodata_kubernetes_cluster`: recognize the backend's new `DELETING` lifecycle status — a
   lingering state while a cluster's asynchronous teardown runs. `terraform destroy` now polls
   through `DELETING` until the cluster reads `DELETED`; the `status` attribute can report
