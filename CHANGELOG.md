@@ -4,6 +4,39 @@ All notable changes to this provider are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.26.0] - Unreleased
+
+### Changed
+
+- `prodata_kubernetes_cluster`: **`node_ip_range` validation is stricter.** The old check was a
+  single regular expression that accepted `999.1.1.1-0.0.0.0`, a reversed range, a range in some
+  other network, and a range containing the network's gateway; the panel accepted all of these and
+  broke later. Now:
+  - at validate time the value must be an IPv4 `start-end` (no spaces, no IPv6, no leading zeros)
+    with `start` strictly below `end`;
+  - at plan time the range is checked against the local network of `network_id`: it must lie
+    inside the network's CIDR and must not contain the network's gateway, otherwise the plan
+    fails. A range that includes the network or broadcast address only warns. The check needs the
+    network to be readable in the cluster's region and project; if it is not, it is skipped with a
+    warning. When `network_id` is not known at plan time the check runs during apply, before the
+    cluster is created;
+  - omitting `node_ip_range` now produces a warning on create: the automatic range is sized from
+    the capacity known at creation time and is never widened, so node pools added later can run
+    out of addresses;
+  - an in-place update or a plain destroy of an **existing cluster is not re-checked** while
+    `node_ip_range` and `network_id` stay unchanged, so a cluster whose range already contains the
+    gateway can still be updated and destroyed;
+  - a **replacement** (changed `name`, `pod_cidr`, flavor, region, `-replace`, …) creates a new
+    cluster and is checked like a create. For a replacement the plan shows only the errors;
+    warnings appear during apply. If such a change is pending, `terraform destroy` runs the same
+    check — use `terraform destroy -refresh=false` or revert the change.
+
+  Upgrade note: a malformed or reversed `node_ip_range` (octet above 255, leading zeros, `start`
+  above or equal to `end`) now fails validation on every plan and destroy, even for an
+  already-created cluster. To keep such a cluster, remove `node_ip_range` from the configuration —
+  the stored value stays in state and nothing is replaced; editing the value forces a new cluster.
+  A range that contains the gateway fails the plan of a new or replaced cluster only.
+
 ## [0.25.0] - 2026-10-07
 
 ### Added

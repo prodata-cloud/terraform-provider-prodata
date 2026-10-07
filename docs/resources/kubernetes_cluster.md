@@ -15,6 +15,15 @@ Cluster creation is asynchronous; `terraform apply` blocks until the cluster rea
 
 ~> **Note:** The networking inputs are immutable — changing `network_id`, `pod_cidr`, or `node_ip_range` forces a new resource. `network_id` is additionally **write-once**: the API does not return it, so it is preserved in state and accepted from configuration after `terraform import` without forcing a replacement. `pod_cidr` and `node_ip_range` are read back normally — `node_ip_range` is `Optional`/`Computed`, so when you omit it the platform auto-allocates a free range from `network_id` and records it in state.
 
+~> **Note:** An explicit `node_ip_range` is validated before the cluster is created. A malformed or reversed value is rejected on every plan. Against the local network in `network_id` it must lie inside the network's CIDR and must not contain the network's gateway, otherwise the plan fails; a range that includes the network or broadcast address only produces a warning.
+
+- The network check needs the network to be readable in the cluster's region and project. If it cannot be read, the check is skipped with a warning.
+- If `network_id` is not known at plan time (for example the network is created in the same apply), the check runs during apply, after the network exists and before the cluster is created.
+- An in-place update or a plain `terraform destroy` of an existing cluster does not run the network check while `node_ip_range` and `network_id` are unchanged. A **replacement** — for any reason, such as a changed `name`, `pod_cidr`, flavor or region, or `-replace` — creates a new cluster and is checked like a create; during such a replacement the plan shows only the errors, and warnings appear during apply. If a replacement-forcing change is pending in the configuration, `terraform destroy` runs the same check; use `terraform destroy -refresh=false` or revert that change.
+- Clusters created in the web console often hold a range that starts at the network address or contains the gateway. They keep working, but to replace such a cluster you must give it a valid `node_ip_range`.
+- Omitting `node_ip_range` produces a warning on create, because the platform sizes the automatic range from the capacity known at creation time and never widens it.
+- To keep an existing cluster whose stored `node_ip_range` no longer passes validation, remove the attribute from the configuration: the stored value stays in state and nothing is replaced. Editing the value forces a new cluster.
+
 ## Example Usage
 
 ### Fixed-size, highly-available cluster
@@ -54,7 +63,7 @@ resource "prodata_kubernetes_cluster" "edge" {
   kubernetes_version = "v1.31.4"
   network_id         = prodata_local_network.k8s.id
   pod_cidr           = "10.245.0.0/16"
-  node_ip_range      = "10.0.1.10-10.0.1.20" # explicit range (optional)
+  node_ip_range      = "10.0.0.30-10.0.0.40" # explicit range (optional)
   master_flavor_id   = data.prodata_kubernetes_flavors.standard.flavors[0].id
 
   public_endpoint_enabled = true
@@ -107,7 +116,7 @@ provider "kubernetes" {
 - `public_endpoint_enabled` (Boolean) Provision a public IP for the cluster API endpoint. Defaults to `false`. Changing it forces a new resource.
 - `ssh_access_enabled` (Boolean) Authorize `public_key` for SSH access to the nodes. Defaults to `false`. Changing it forces a new resource.
 - `public_key` (String) SSH public key authorized on the nodes (used when `ssh_access_enabled` is true). Write-once; changing it forces a new resource.
-- `node_ip_range` (String) Control-plane IP range within the local network, as `start-end` (e.g. `10.0.0.10-10.0.0.20`). When omitted, the platform auto-allocates a free contiguous range from `network_id` (sized for the cluster's master and worker capacity) and reports it back; this attribute is then `Computed`. When set, the value is used as-is. Changing it forces a new resource.
+- `node_ip_range` (String) Control-plane IP range within the local network, as `start-end` (e.g. `10.0.0.10-10.0.0.20`). When omitted, the platform auto-allocates a free contiguous range from `network_id` (sized for the cluster's master and worker capacity) and reports it back; this attribute is then `Computed`. When set, the value is used as-is, but it is validated: it must be an IPv4 `start-end` with `start` below `end`, and — checked against `network_id` before the cluster is created — it must lie inside the network's CIDR and must not contain the network's gateway. A range that includes the network or broadcast address only produces a warning. Changing it forces a new resource.
 - `timeouts` (Object) See [Timeouts](#timeouts) below.
 
 ### Attribute Reference
