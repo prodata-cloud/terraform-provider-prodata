@@ -4,7 +4,7 @@ All notable changes to this provider are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.24.0] - Unreleased
+## [0.25.0] - Unreleased
 
 ### Added
 
@@ -18,6 +18,33 @@ All notable changes to this provider are documented here. The format is based on
   through `DELETING` until the cluster reads `DELETED`; the `status` attribute can report
   `DELETING`; and `terraform plan`/`refresh` keeps a `DELETING` cluster in state instead of
   dropping it as gone.
+
+### Changed
+
+- `prodata_kubernetes_cluster`: the default **delete timeout is raised from 5m to 45m** —
+  cluster teardown is asynchronous and the backend finalizer can take 30-45 minutes, so the
+  old timeout gave up before the real terminal verdict. If teardown fails (or times out
+  server-side) the cluster is left in `FAIL` — which now **holds the cluster name** until the
+  failed cluster is deleted — and `terraform destroy` surfaces a clear error and keeps the
+  resource in state instead of reporting success. Creating a cluster whose name is still held
+  by a same-named `DELETING` or `FAILED` cluster now fails with tailored guidance (wait for
+  teardown, or delete the failed cluster) rather than a generic "already exists".
+
+### Fixed
+
+- `prodata_lb`: panel code 662 — a `network_id` that is not a local network of your account
+  (an unknown id, a deleted network, or a public IP's id) — is now reported as a clear "Local
+  network not found" message instead of the raw API error. The panel returns 662 for these
+  once the matching `panel-main` change is deployed; until then an unknown network gets the
+  misleading code 737 (not enough free IPs in the network) and a public IP's id the generic
+  code 627.
+- `prodata_lb`: load-balancer calls now ask the panel for English (`X-Lang: en`, as the
+  Kubernetes calls already do), so an error the provider does not map yet is shown in English
+  rather than in the language of the API key user's profile. This needs a panel that lets
+  `X-Lang` take precedence over the profile's language; on an older panel a language set on the
+  profile still wins.
+
+## [0.24.0] - 2026-08-28
 
 ### Removed
 
@@ -34,15 +61,6 @@ All notable changes to this provider are documented here. The format is based on
 - `prodata_kubernetes_node_pool`: deleting a cluster's last worker pool is now allowed
   (control-plane-only is legal). Against a backend not yet upgraded the panel still returns
   code 756; the provider surfaces it as a clear message.
-- `prodata_kubernetes_cluster`: the default **delete timeout is raised from 5m to 45m** —
-  cluster teardown is asynchronous and the backend finalizer can take 30-45 minutes, so the
-  old timeout gave up before the real terminal verdict. If teardown fails (or times out
-  server-side) the cluster is left in `FAIL` — which now **holds the cluster name** until the
-  failed cluster is deleted — and `terraform destroy` surfaces a clear error and keeps the
-  resource in state instead of reporting success. Creating a cluster whose name is still held
-  by a same-named `DELETING` or `FAILED` cluster now fails with tailored guidance (wait for
-  teardown, or delete the failed cluster) rather than a generic "already exists".
-
 ### Migration
 
 - Existing clusters migrate **without destroying worker nodes**: remove the `default_node_pool`
@@ -56,20 +74,6 @@ All notable changes to this provider are documented here. The format is based on
 > un-upgraded backend the old create path NPEs on a null `nodePoolName`. (Mirrors the 0.23.0
 > `node_ip_range` backend-first precedent.) The published release is held until the backend is
 > promoted `test → main` for uz + kz.
-
-### Fixed
-
-- `prodata_lb`: panel code 662 — a `network_id` that is not a local network of your account
-  (an unknown id, a deleted network, or a public IP's id) — is now reported as a clear "Local
-  network not found" message instead of the raw API error. The panel returns 662 for these
-  once the matching `panel-main` change is deployed; until then an unknown network gets the
-  misleading code 737 (not enough free IPs in the network) and a public IP's id the generic
-  code 627.
-- `prodata_lb`: load-balancer calls now ask the panel for English (`X-Lang: en`, as the
-  Kubernetes calls already do), so an error the provider does not map yet is shown in English
-  rather than in the language of the API key user's profile. This needs a panel that lets
-  `X-Lang` take precedence over the profile's language; on an older panel a language set on the
-  profile still wins.
 
 ## [0.23.0] - 2026-06-24
 
