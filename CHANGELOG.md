@@ -4,6 +4,40 @@ All notable changes to this provider are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.26.1] - 2026-10-08
+
+### Fixed
+
+- `prodata_kubernetes_cluster`: **`control_plane_size` and `master_flavor_id` can be set from a
+  variable, a data source or another resource's attribute again.** Since 0.23.0 the "set exactly
+  one of `master_flavor_id` / `control_plane_size`" check treated a value Terraform does not know
+  yet as "not set". Terraform validates the configuration with variables and data sources still
+  unknown before it plans, so any configuration that did not write the value as a literal —
+  `control_plane_size = var.size`, or the `master_flavor_id =
+  data.prodata_kubernetes_flavors.….flavors[0].id` form shown in the documentation — was rejected
+  with `a control-plane size is required`, even when the variable was set (`terraform plan -var
+  size=small`). The check now waits until both values are known; Terraform validates again with
+  the real values during plan and apply, so a configuration that ends up with both or neither is
+  still rejected.
+- `prodata_kubernetes_node_pool`: **`autoscaling` can be set as a whole value — from an object
+  variable or a conditional.** `autoscaling = var.autoscaling`, or `autoscaling = var.autoscale ?
+  { min_nodes = 1, max_nodes = 3 } : null`, failed in `terraform validate` and `terraform plan`
+  with `Value Conversion Error … Received unknown value, however the target type cannot handle
+  unknown values`: Terraform validates with variables still unknown, and the check could not read
+  an `autoscaling` block that is unknown as a whole. The "`node_count` or `autoscaling`, not both
+  and not neither" check and the bounds check now wait until the block is known. When it is known
+  only after apply, a clash with `node_count` is reported during apply, before the pool is
+  created, rather than at plan; on an update plan, `status` and a `node_count` that is not written
+  in the configuration show as `(known after apply)` meanwhile.
+- `prodata_lb`: **`backend_group` and `port` can be set as a whole value that is known only after
+  apply** (for example a conditional on another resource's attribute); the plan no longer fails
+  with the same `Value Conversion Error`. On an existing load balancer, a switch of the backend
+  mode or `node_pool_id` that only shows up during apply still stops that apply with `Provider
+  produced inconsistent final plan`; run it again (see Known Limitations on the `prodata_lb`
+  page). The rule that `description` is not configurable on a node pool (CCM) load balancer now
+  also applies at plan time when `node_pool_id` is the id of a pool created in the same apply;
+  before, it was reported only during apply, after the pool had already been created.
+
 ## [0.26.0] - 2026-10-07
 
 ### Changed
