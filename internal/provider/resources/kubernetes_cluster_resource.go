@@ -456,7 +456,11 @@ func (r *K8sClusterResource) Configure(_ context.Context, req resource.Configure
 }
 
 // ValidateConfig enforces that exactly one of master_flavor_id / control_plane_size
-// is set. Validators are no-ops on unknown values.
+// is set. An unknown value (a variable, a data source or another resource's attribute —
+// Terraform validates with those unknown before it plans) is not "unset":
+// it may resolve to either, so the check waits until both values are known. Terraform
+// validates again with the real values during plan and apply, so a configuration that
+// ends up with both or neither is still rejected.
 func (r *K8sClusterResource) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
 	var cfg K8sClusterModel
 	resp.Diagnostics.Append(req.Config.Get(ctx, &cfg)...)
@@ -464,9 +468,13 @@ func (r *K8sClusterResource) ValidateConfig(ctx context.Context, req resource.Va
 		return
 	}
 
+	if cfg.MasterFlavorID.IsUnknown() || cfg.ControlPlaneSize.IsUnknown() {
+		return
+	}
+
 	// Exactly one of master_flavor_id / control_plane_size must be set.
-	flavorSet := !cfg.MasterFlavorID.IsNull() && !cfg.MasterFlavorID.IsUnknown()
-	sizeSet := !cfg.ControlPlaneSize.IsNull() && !cfg.ControlPlaneSize.IsUnknown()
+	flavorSet := !cfg.MasterFlavorID.IsNull()
+	sizeSet := !cfg.ControlPlaneSize.IsNull()
 	switch {
 	case flavorSet && sizeSet:
 		resp.Diagnostics.AddAttributeError(

@@ -20,6 +20,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	"github.com/hashicorp/terraform-plugin-framework/types/basetypes"
 	"github.com/hashicorp/terraform-plugin-log/tflog"
 )
 
@@ -213,15 +214,28 @@ func (r *K8sNodePoolResource) Configure(_ context.Context, req resource.Configur
 
 // ValidateConfig enforces the ADR-K4 mutual exclusion: node_count and autoscaling
 // cannot both be set (the autoscaler owns the count), and exactly one must be
-// present. Validators are no-ops on unknown values.
+// present. Terraform validates the configuration before it plans, with variables and
+// data sources still unknown, so a value that is not known yet is neither set nor
+// unset: it is waited out here and checked once Terraform validates with the real one.
 func (r *K8sNodePoolResource) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
-	var cfg K8sNodePoolModel
-	resp.Diagnostics.Append(req.Config.Get(ctx, &cfg)...)
+	// The two attributes are read on their own: a whole-model Get cannot place an
+	// autoscaling block that is unknown as a whole (autoscaling = var.<object>, or a
+	// conditional) into the *K8sAutoscalingModel field and fails with a conversion error.
+	var nodeCount types.Int64
+	var autoscaling types.Object
+	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("node_count"), &nodeCount)...)
+	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("autoscaling"), &autoscaling)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	nodeCountSet := !cfg.NodeCount.IsNull() && !cfg.NodeCount.IsUnknown()
-	if cfg.Autoscaling != nil && nodeCountSet {
+	// An unknown block may turn out absent or present, and either answer decides which of
+	// the checks below applies — none of them can run yet.
+	if autoscaling.IsUnknown() {
+		return
+	}
+	autoscalingSet := !autoscaling.IsNull()
+	nodeCountSet := !nodeCount.IsNull() && !nodeCount.IsUnknown()
+	if autoscalingSet && nodeCountSet {
 		resp.Diagnostics.AddAttributeError(
 			path.Root("node_count"),
 			"node_count conflicts with autoscaling",
@@ -231,16 +245,20 @@ func (r *K8sNodePoolResource) ValidateConfig(ctx context.Context, req resource.V
 	}
 	// Only flag a concretely-absent node_count: an unknown (interpolated) value may
 	// resolve to a real count at apply time, so ValidateConfig must stay a no-op on it.
-	if cfg.Autoscaling == nil && cfg.NodeCount.IsNull() {
+	if !autoscalingSet && nodeCount.IsNull() {
 		resp.Diagnostics.AddAttributeError(
 			path.Root("node_count"),
 			"node_count is required without autoscaling",
 			"Set node_count for a fixed-size pool, or add an autoscaling block.",
 		)
 	}
-	if cfg.Autoscaling != nil {
-		minNodes, maxNodes := cfg.Autoscaling.MinNodes, cfg.Autoscaling.MaxNodes
-		if !minNodes.IsUnknown() && !maxNodes.IsUnknown() && minNodes.ValueInt64() > maxNodes.ValueInt64() {
+	if autoscalingSet {
+		var bounds K8sAutoscalingModel
+		resp.Diagnostics.Append(autoscaling.As(ctx, &bounds, basetypes.ObjectAsOptions{})...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		if !bounds.MinNodes.IsUnknown() && !bounds.MaxNodes.IsUnknown() && bounds.MinNodes.ValueInt64() > bounds.MaxNodes.ValueInt64() {
 			resp.Diagnostics.AddAttributeError(
 				path.Root("autoscaling").AtName("max_nodes"),
 				"Invalid autoscaling bounds",
@@ -263,6 +281,30 @@ func (r *K8sNodePoolResource) ModifyPlan(ctx context.Context, req resource.Modif
 	}
 	// Create plan — no prior state to diff.
 	if req.State.Raw.IsNull() {
+		return
+	}
+
+	// An autoscaling block that is unknown as a whole (a conditional on a value known only
+	// after apply) cannot be decoded into the pointer-struct model below. Whether the pool is
+	// scaled by the autoscaler after this apply is not known either, so keep both volatile
+	// fields open: status always, node_count too unless the configuration pins it.
+	var planAutoscaling types.Object
+	resp.Diagnostics.Append(req.Plan.GetAttribute(ctx, path.Root("autoscaling"), &planAutoscaling)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	if planAutoscaling.IsUnknown() {
+		var cfgNodeCount types.Int64
+		resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("node_count"), &cfgNodeCount)...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("status"), types.StringUnknown())...)
+		// A node_count written in the configuration is planned as exactly that value;
+		// only the one the provider fills in (UseStateForUnknown) may be reopened.
+		if cfgNodeCount.IsNull() {
+			resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("node_count"), types.Int64Unknown())...)
+		}
 		return
 	}
 

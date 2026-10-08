@@ -27,6 +27,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	"github.com/hashicorp/terraform-plugin-framework/types/basetypes"
 	"github.com/hashicorp/terraform-plugin-log/tflog"
 )
 
@@ -312,24 +313,28 @@ func (r *LbResource) ConfigValidators(_ context.Context) []resource.ConfigValida
 //     panel value reads back into state.)
 //   - Update: mode-switches (vm_ids <-> node_pool_id) mark backend_group as
 //     requires-replace. Same-mode content changes pass through to Update.
+//
+// Only description and backend_group matter here, so they are read on their own: decoding
+// the whole model fails when backend_group (or port) is unknown as a whole — a conditional
+// on a value known only after apply — which the pointer and slice fields cannot hold. A
+// backend_group like that says nothing about the mode yet, so it is waited out. (A mode or
+// pool change that only shows at apply then fails Terraform's final-plan check. Replacing the
+// balancer whenever the block is unknown would avoid that, but would recreate it every time,
+// changed or not.)
 func (r *LbResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
 	if req.Plan.Raw.IsNull() {
 		return
 	}
-	var plan LbResourceModel
-	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	var description types.String
+	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("description"), &description)...)
+	planGroup, diags := readBackendGroup(ctx, req.Plan)
+	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
 
-	var config LbResourceModel
-	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
-	if resp.Diagnostics.HasError() {
-		return
-	}
-
-	_, hasPool := backendMode(plan.BackendGroup)
-	descriptionSet := !config.Description.IsNull() && !config.Description.IsUnknown()
+	_, hasPool := backendMode(planGroup)
+	descriptionSet := !description.IsNull() && !description.IsUnknown()
 	if summary := validateCCMDescriptionNotConfigurable(hasPool, descriptionSet); summary != "" {
 		resp.Diagnostics.AddAttributeError(
 			path.Root("description"),
@@ -345,16 +350,38 @@ func (r *LbResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequ
 	if req.State.Raw.IsNull() {
 		return
 	}
-	var state LbResourceModel
-	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+	stateGroup, diags := readBackendGroup(ctx, req.State)
+	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	stateHasVMs, stateHasPool := backendMode(state.BackendGroup)
-	planHasVMs, planHasPool := backendMode(plan.BackendGroup)
+	stateHasVMs, stateHasPool := backendMode(stateGroup)
+	planHasVMs, planHasPool := backendMode(planGroup)
 	if detectModeSwitch(stateHasVMs, stateHasPool, planHasVMs, planHasPool) {
 		resp.RequiresReplace = append(resp.RequiresReplace, path.Root("backend_group"))
 	}
+}
+
+// attributeReader is what tfsdk.Config, tfsdk.Plan and tfsdk.State share.
+type attributeReader interface {
+	GetAttribute(ctx context.Context, p path.Path, target any) diag.Diagnostics
+}
+
+// readBackendGroup reads backend_group from a config, plan or state. The block comes back
+// nil when it is null — and when it is unknown as a whole, which a *LbBackendGroupModel
+// cannot represent; that is what a whole-model Get fails on.
+func readBackendGroup(ctx context.Context, src attributeReader) (*LbBackendGroupModel, diag.Diagnostics) {
+	var obj types.Object
+	diags := src.GetAttribute(ctx, path.Root("backend_group"), &obj)
+	if diags.HasError() || obj.IsNull() || obj.IsUnknown() {
+		return nil, diags
+	}
+	var group LbBackendGroupModel
+	diags.Append(obj.As(ctx, &group, basetypes.ObjectAsOptions{})...)
+	if diags.HasError() {
+		return nil, diags
+	}
+	return &group, diags
 }
 
 // ---- Create ----
@@ -975,9 +1002,19 @@ func backendMode(bg *LbBackendGroupModel) (hasVMs, hasPool bool) {
 	if bg == nil {
 		return false, false
 	}
-	hasVMs = !bg.VMIDs.IsNull() && !bg.VMIDs.IsUnknown()
-	hasPool = !bg.NodePoolID.IsNull() && !bg.NodePoolID.IsUnknown()
-	return
+	return modeInUse(bg.VMIDs, bg.NodePoolID), modeInUse(bg.NodePoolID, bg.VMIDs)
+}
+
+// modeInUse reports whether the backend mode held in v is in use, given the other mode's
+// value. A planned value may not be known yet (node_pool_id of a pool created in the same
+// apply). The two modes are mutually exclusive, so an unknown one has to be the mode in use
+// when the other is known to be absent; when the other is set or unknown as well, nothing
+// can be told yet and the unknown one does not count.
+func modeInUse(v, other attr.Value) bool {
+	if v.IsUnknown() {
+		return !other.IsUnknown() && other.IsNull()
+	}
+	return !v.IsNull()
 }
 
 // detectModeSwitch returns true iff one mode is set in state and the other in plan
