@@ -30,10 +30,15 @@ the [Terraform Registry](https://registry.terraform.io/providers/prodata-cloud/p
 - `prodata_kubernetes_cluster` / `prodata_kubernetes_node_pool`
 - `prodata_kubernetes_versions` / `prodata_kubernetes_flavors`
 
+**Ephemeral resources** (Terraform 1.10 or later)
+
+- `prodata_kubernetes_kubeconfig` — a cluster's connection details for the `kubernetes` and `helm`
+  providers, read without writing them to Terraform state or to a saved plan
+
 ## Requirements
 
 - [Go](https://go.dev/dl/) >= 1.25
-- [Terraform](https://developer.hashicorp.com/terraform/downloads) >= 1.0 (only needed to run acceptance tests)
+- [Terraform](https://developer.hashicorp.com/terraform/downloads) >= 1.0 (only needed to run acceptance tests; >= 1.10 for the ephemeral resource tests, which are skipped with an older one)
 
 ## Building
 
@@ -88,6 +93,16 @@ other resources):
 export PRODATA_LB_TEST_NET_ID=<network-id>
 export PRODATA_LB_TEST_VM_GUID=<vm-guid>
 ```
+
+The acceptance tests that provision Kubernetes clusters are slow and expensive, so they run
+only when you also opt in:
+
+```sh
+export PRODATA_K8S_ACC=1
+```
+
+`TestAccK8sKubeconfig_clusterNotFound` (the `prodata_kubernetes_kubeconfig` ephemeral
+resource) only reads and creates nothing, so it runs without that opt-in.
 
 Acceptance tests create resources with a disposable `tfacc-` name prefix. Mutating
 runs against a production host are blocked unless you explicitly opt in:

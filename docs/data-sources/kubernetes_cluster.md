@@ -11,6 +11,8 @@ Look up a single ProData Managed Kubernetes cluster by `id` or `name` (exactly o
 
 Looking up by `id` can return a soft-deleted cluster, which is rejected with an error; looking up by `name` only sees live clusters and errors on an ambiguous name.
 
+~> **Note:** Like the cluster resource, this data source stores the cluster's credentials — `kube_config` and, when the platform generated the nodes' SSH key pair, `private_key_encoded` — in Terraform state by default. Set `exclude_credentials_from_state = true` to keep them out, and read the kubeconfig with the [`prodata_kubernetes_kubeconfig`](../ephemeral-resources/kubernetes_kubeconfig.md) ephemeral resource instead. See [Credentials in Terraform state](../resources/kubernetes_cluster.md#credentials-in-terraform-state).
+
 ## Example Usage
 
 ```terraform
@@ -44,6 +46,7 @@ Exactly one of `id` or `name` selects the cluster; both are also computed, so th
 
 - `region` (String) Region ID override. If omitted, uses the provider's default region.
 - `project_tag` (String) Project tag override. If omitted, uses the provider default.
+- `exclude_credentials_from_state` (Boolean) Keep the cluster's credentials out of Terraform state. When `true`, `kube_config` and `private_key_encoded` are always null; read the kubeconfig with the [`prodata_kubernetes_kubeconfig`](../ephemeral-resources/kubernetes_kubeconfig.md) ephemeral resource instead (Terraform 1.10 or later). Unset or `false`, the credentials are stored in state as before. Turning it on removes the credentials from the state written from then on; earlier state versions kept by your backend still contain them.
 
 ### Attribute Reference
 
@@ -54,9 +57,9 @@ Exactly one of `id` or `name` selects the cluster; both are also computed, so th
 - `node_ip_range` (String) Control-plane IP range within the local network, as `start-end`. Either supplied at creation or auto-allocated by the platform.
 - `master_flavor_id` (Number) Master node configuration (flavor) ID.
 - `api_endpoint` (String) Kubernetes API server endpoint. Null until the cluster reaches `SUCCESS`.
-- `kube_config` (Object, Sensitive) Structured cluster credentials parsed from the kubeconfig. Null until the kubeconfig is available (usually at or shortly after `SUCCESS`). The certificate fields are base64 as they appear in the kubeconfig — wrap them in `base64decode()`. Attributes: `host`, `cluster_ca_certificate`, `client_certificate`, `client_key`, `token`, `raw_config`.
-- `ssh_key_encoded` (String) Base64-encoded SSH public key registered on the nodes.
-- `private_key_encoded` (String, Sensitive) Base64-encoded SSH private key for the nodes.
+- `kube_config` (Object, Sensitive) Structured cluster credentials parsed from the kubeconfig. Null until the kubeconfig is available (usually at or shortly after `SUCCESS`), and always null when `exclude_credentials_from_state` is `true`. The certificate fields are base64 as they appear in the kubeconfig — wrap them in `base64decode()`. Attributes: `host`, `cluster_ca_certificate`, `client_certificate`, `client_key`, `token`, `raw_config`.
+- `ssh_key_encoded` (String) Base64-encoded SSH public key registered on the nodes. It is the public half, not a secret.
+- `private_key_encoded` (String, Sensitive) Base64-encoded SSH private key for the nodes. It exists only when the platform generated the key pair, and is null when the cluster was created with your own `public_key`. Always null when `exclude_credentials_from_state` is `true`.
 - `status` (String) Lifecycle status: `NEW`, `PROCESSING`, `SUCCESS`, or `FAIL`. A `DELETED` cluster is never returned — the lookup errors instead.
 - `blocked` (Boolean) True while a mutating operation is in flight on the cluster.
 - `node_pool_count` (Number) Number of node pools (including the default and master pools).

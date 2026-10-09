@@ -36,6 +36,9 @@ type K8sClusterDataSourceModel struct {
 	Region     types.String `tfsdk:"region"`
 	ProjectTag types.String `tfsdk:"project_tag"`
 
+	// ExcludeCredentialsFromState keeps kube_config and private_key_encoded out of state.
+	ExcludeCredentialsFromState types.Bool `tfsdk:"exclude_credentials_from_state"`
+
 	// Computed output.
 	KubernetesVersion     types.String `tfsdk:"kubernetes_version"`
 	HighAvailability      types.Bool   `tfsdk:"high_availability"`
@@ -88,6 +91,13 @@ func (d *K8sClusterDataSource) Schema(_ context.Context, _ datasource.SchemaRequ
 			"project_tag": schema.StringAttribute{
 				MarkdownDescription: "Project tag override. If omitted, uses the provider default.",
 				Optional:            true,
+			},
+			"exclude_credentials_from_state": schema.BoolAttribute{
+				MarkdownDescription: "Keep the cluster's credentials out of Terraform state. When `true`, `kube_config` " +
+					"and `private_key_encoded` are always null. Read the kubeconfig with the " +
+					"`prodata_kubernetes_kubeconfig` ephemeral resource instead (Terraform 1.10 or later). " +
+					"Unset or `false`, the credentials are stored in state as before.",
+				Optional: true,
 			},
 			"kubernetes_version": schema.StringAttribute{
 				MarkdownDescription: "Kubernetes version (e.g. `v1.31.4`).",
@@ -283,9 +293,8 @@ func (d *K8sClusterDataSource) Read(ctx context.Context, req datasource.ReadRequ
 		data.MasterFlavorID = types.Int64Null()
 	}
 	data.APIEndpoint = tfutil.StringOrNull(cl.APIEndpoint)
-	data.KubeConfig = kubeConfigObject(ctx, cl.Kubeconfig)
-	data.SSHKeyEncoded = tfutil.StringOrNull(cl.SSHKeyEncoded)
-	data.PrivateKeyEncoded = tfutil.StringOrNull(cl.PrivateKeyEncoded)
+	data.KubeConfig, data.PrivateKeyEncoded = clusterCredentials(ctx, data.ExcludeCredentialsFromState, cl)
+	data.SSHKeyEncoded = tfutil.StringOrNull(cl.SSHKeyEncoded) // the public half; not a secret
 	data.Status = types.StringValue(cl.Status)
 	data.Blocked = types.BoolValue(cl.Blocked)
 	data.NodePoolCount = types.Int64Value(int64(cl.NodePoolCount))
