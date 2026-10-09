@@ -62,6 +62,9 @@ type K8sClusterModel struct {
 	MasterFlavorID        types.Int64  `tfsdk:"master_flavor_id"`
 	ControlPlaneSize      types.String `tfsdk:"control_plane_size"`
 
+	// ExcludeCredentialsFromState keeps kube_config and private_key_encoded out of state.
+	ExcludeCredentialsFromState types.Bool `tfsdk:"exclude_credentials_from_state"`
+
 	// Computed, server-owned.
 	APIEndpoint       types.String   `tfsdk:"api_endpoint"`
 	KubeConfig        types.Object   `tfsdk:"kube_config"`
@@ -128,6 +131,38 @@ func kubeConfigObject(ctx context.Context, secret string) types.Object {
 		return types.ObjectNull(kubeConfigAttrTypes())
 	}
 	return obj
+}
+
+// credentialsExcluded reports whether exclude_credentials_from_state is on. Only an
+// explicit true counts: null (not set) keeps the default of storing the credentials, and
+// unknown (a value still being computed at plan time) is not yet a decision.
+func credentialsExcluded(v types.Bool) bool {
+	return !v.IsNull() && !v.IsUnknown() && v.ValueBool()
+}
+
+// clusterCredentials returns the two credential attributes as they belong in state — the
+// parsed kube_config and the SSH private key — or nulls when the model excludes them.
+// applyServerState is its only caller and every write of server data to state goes through
+// applyServerState, so no path can put a credential into state around the flag.
+func clusterCredentials(ctx context.Context, exclude types.Bool, cl *client.Cluster) (types.Object, types.String) {
+	if credentialsExcluded(exclude) {
+		return types.ObjectNull(kubeConfigAttrTypes()), types.StringNull()
+	}
+	return kubeConfigObject(ctx, cl.Kubeconfig), tfutil.StringOrNull(cl.PrivateKeyEncoded)
+}
+
+// planCredentialsExcluded makes the plan say what apply will do when
+// exclude_credentials_from_state is on: kube_config and private_key_encoded end up null
+// whatever else the plan changes, so they are planned as null instead of "known after
+// apply". A known null also makes a configuration that reads them (a kubernetes provider
+// fed from kube_config.host, say) fail at plan time, rather than half-way through an apply
+// after the cluster has been built.
+func planCredentialsExcluded(ctx context.Context, plan K8sClusterModel, resp *resource.ModifyPlanResponse) {
+	if !credentialsExcluded(plan.ExcludeCredentialsFromState) {
+		return
+	}
+	resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("kube_config"), types.ObjectNull(kubeConfigAttrTypes()))...)
+	resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("private_key_encoded"), types.StringNull())...)
 }
 
 // K8sAutoscalingModel is the optional autoscaling sub-block. Its mere presence
@@ -358,6 +393,17 @@ func (r *K8sClusterResource) Schema(ctx context.Context, _ resource.SchemaReques
 				},
 				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
 			},
+			"exclude_credentials_from_state": schema.BoolAttribute{
+				MarkdownDescription: "Keep the cluster's credentials out of Terraform state. When `true`, `kube_config` " +
+					"and `private_key_encoded` are always null. Read the kubeconfig with the " +
+					"`prodata_kubernetes_kubeconfig` ephemeral resource instead (Terraform 1.10 or later). " +
+					"Unset or `false`, the credentials are stored in state as before. Turning it on removes the " +
+					"credentials from the state written from then on; earlier state versions kept by your backend " +
+					"still contain them. Changing it is an in-place update that changes nothing on the cluster. Like any " +
+					"in-place update, it plans `kube_config` and `private_key_encoded` as known after apply — as null " +
+					"when you turn the flag on — so leave the argument unset unless you mean to turn it on.",
+				Optional: true,
+			},
 
 			// ---- computed, server-owned ----
 			"api_endpoint": schema.StringAttribute{
@@ -492,12 +538,55 @@ func (r *K8sClusterResource) ValidateConfig(ctx context.Context, req resource.Va
 	}
 }
 
-// ModifyPlan does two things:
+// panelMinPublicKeyBytes: the panel (KuberService.createCluster) takes a public_key as given
+// only when it is longer than this many bytes; with ssh_access_enabled and anything shorter,
+// the empty string included, it generates the SSH key pair itself.
+const panelMinPublicKeyBytes = 5
+
+// warnGeneratedKeyNotKept warns, when a cluster is created, about the one combination in
+// which turning the exclusion on loses something: ssh_access_enabled without a public_key
+// makes the platform generate the nodes' SSH key pair, and the private half reaches
+// Terraform only as private_key_encoded — which the exclusion keeps out of state. A value
+// that is still unknown may yet resolve to a key (or to false), so it is not judged.
+//
+// It is a create-time warning on purpose. Its advice — set public_key — can only work for
+// a cluster that does not exist yet: the SSH key is fixed when the cluster is created, and
+// the provider accepts a public_key added to an existing cluster without sending it
+// anywhere (see the Update method).
+func warnGeneratedKeyNotKept(cfg K8sClusterModel, diags *diag.Diagnostics) {
+	if !credentialsExcluded(cfg.ExcludeCredentialsFromState) {
+		return
+	}
+	// Only an explicit true is judged: ValueBool is false for null and for a value that is
+	// not known yet alike.
+	if !cfg.SSHAccessEnabled.ValueBool() {
+		return
+	}
+	if cfg.PublicKey.IsUnknown() || len(cfg.PublicKey.ValueString()) > panelMinPublicKeyBytes {
+		return
+	}
+	diags.AddAttributeWarning(
+		path.Root("exclude_credentials_from_state"),
+		"The nodes' SSH private key will not be kept",
+		"ssh_access_enabled is true and public_key is not set (or is 5 bytes or shorter, which the platform "+
+			"ignores), so the platform generates the SSH key pair for "+
+			"the nodes and Terraform would receive the private key only as private_key_encoded — which "+
+			"exclude_credentials_from_state keeps out of state. Set public_key to authorize your own key "+
+			"(recommended), or leave exclude_credentials_from_state off.",
+	)
+}
+
+// ModifyPlan does four things:
 //   - runs the node_ip_range preflight (planNodeIPRange);
+//   - when a cluster is created with exclude_credentials_from_state on, warns if the platform
+//     would generate an SSH key pair whose private half is then not kept
+//     (warnGeneratedKeyNotKept);
 //   - when the kubernetes_version changes in place, the backend rewrites the
 //     credentials / api_endpoint and the cluster transits PROCESSING, so those computed
 //     values must be unknown in the plan (ADR-K3) — otherwise Terraform's "computed
-//     output must be consistent" check fails after apply.
+//     output must be consistent" check fails after apply;
+//   - with exclude_credentials_from_state on, plans the credentials as null
+//     (planCredentialsExcluded), overriding the unknowns above.
 func (r *K8sClusterResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
 	// Destroy plan — nothing to do.
 	if req.Plan.Raw.IsNull() {
@@ -511,9 +600,12 @@ func (r *K8sClusterResource) ModifyPlan(ctx context.Context, req resource.Modify
 		return
 	}
 
-	// Create plan — no prior state to diff; only the node_ip_range preflight applies.
+	// Create plan — no prior state to diff; the node_ip_range preflight, the generated-key
+	// warning and the credential exclusion are all that apply.
 	if req.State.Raw.IsNull() {
 		r.planNodeIPRange(ctx, cfg, plan, nil, &resp.Diagnostics)
+		warnGeneratedKeyNotKept(cfg, &resp.Diagnostics)
+		planCredentialsExcluded(ctx, plan, resp)
 		return
 	}
 
@@ -550,6 +642,10 @@ func (r *K8sClusterResource) ModifyPlan(ctx context.Context, req resource.Modify
 		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("master_node_count"), types.Int64Unknown())...)
 		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("ip_addresses_count"), types.Int64Unknown())...)
 	}
+
+	// Last, so that it wins over the unknowns set above: with the exclusion on, the
+	// credentials stay null even when a version upgrade rewrites them server-side.
+	planCredentialsExcluded(ctx, plan, resp)
 }
 
 // planNodeIPRange runs the plan-time node_ip_range checks. state is nil on a create plan.
@@ -832,12 +928,24 @@ func (r *K8sClusterResource) Create(ctx context.Context, req resource.CreateRequ
 		return
 	}
 	if result != nil && result.Status == client.ClusterStatusSuccess && result.Kubeconfig == "" {
-		resp.Diagnostics.AddWarning(
-			"Cluster is ready but its kubeconfig is not yet available",
-			fmt.Sprintf("Cluster %d reached SUCCESS but the panel has not populated its kubeconfig yet "+
-				"(it is fetched lazily server-side). Run `terraform refresh` once it is available.", created.ID),
-		)
+		summary, detail := kubeconfigPendingDiag(created.ID, plan.ExcludeCredentialsFromState)
+		resp.Diagnostics.AddWarning(summary, detail)
 	}
+}
+
+// kubeconfigPendingDiag builds the (summary, detail) warning for a cluster that reached
+// SUCCESS before the panel produced its kubeconfig. What to do next depends on
+// exclude_credentials_from_state: with it on, a refresh would store nothing, and what needs
+// the kubeconfig is the ephemeral resource.
+func kubeconfigPendingDiag(id int64, exclude types.Bool) (summary, detail string) {
+	next := "Run `terraform refresh` once it is available."
+	if credentialsExcluded(exclude) {
+		next = "The kubeconfig is not kept in state, so there is nothing to refresh; the " +
+			"prodata_kubernetes_kubeconfig ephemeral resource reads it from the panel and fails until it is available."
+	}
+	return "Cluster is ready but its kubeconfig is not yet available",
+		fmt.Sprintf("Cluster %d reached SUCCESS but the panel has not populated its kubeconfig yet "+
+			"(it is fetched lazily server-side). %s", id, next)
 }
 
 // ---- Read ----
@@ -901,17 +1009,21 @@ func (r *K8sClusterResource) Update(ctx context.Context, req resource.UpdateRequ
 	ctx, cancel := context.WithTimeout(ctx, updateTimeout)
 	defer cancel()
 
-	// ADR-K7: serialize per-cluster mutations within this process and refuse to
-	// act on a FAILed or in-flight (blocked) cluster.
-	unlock := lockCluster(id)
-	defer unlock()
-	if err := r.ensureMutable(ctx, id, opts); err != nil {
-		resp.Diagnostics.AddError("Cluster is not in a modifiable state", client.KuberErrorDetail(err))
-		return
-	}
-
-	// Kubernetes version upgrade (in-place, async).
+	// Kubernetes version upgrade (in-place, async) — the only change that calls the cluster.
+	// Every other in-place change (exclude_credentials_from_state, timeouts) only rewrites
+	// state, so it must not depend on the cluster's condition: the flag in particular is
+	// how credentials get out of state, and a FAILed or busy cluster is no reason to keep them.
 	if !plan.KubernetesVersion.Equal(state.KubernetesVersion) {
+		// ADR-K7: serialize per-cluster mutations within this process and refuse to
+		// act on a FAILed or in-flight (blocked) cluster. The lock is held through the
+		// read-back below.
+		unlock := lockCluster(id)
+		defer unlock()
+		if err := r.ensureMutable(ctx, id, opts); err != nil {
+			resp.Diagnostics.AddError("Cluster is not in a modifiable state", client.KuberErrorDetail(err))
+			return
+		}
+
 		if _, err := r.c.UpdateClusterVersion(ctx, id, plan.KubernetesVersion.ValueString(), opts); err != nil {
 			resp.Diagnostics.AddError("Unable to upgrade Kubernetes version", client.KuberErrorDetail(err))
 			return
@@ -930,10 +1042,13 @@ func (r *K8sClusterResource) Update(ctx context.Context, req resource.UpdateRequ
 	// prior state and ask for a refresh rather than corrupt it.
 	final, readErr := r.getClusterWithRetry(ctx, id, opts)
 	if readErr != nil {
+		next := "Nothing was changed on the cluster; run `terraform apply` again."
+		if !plan.KubernetesVersion.Equal(state.KubernetesVersion) {
+			next = "The version upgrade itself succeeded; run `terraform refresh` to reconcile Terraform state."
+		}
 		resp.Diagnostics.AddError(
-			"Cluster updated but its new state could not be read back",
-			fmt.Sprintf("cluster %d was modified successfully but reading it back failed: %s. "+
-				"Run `terraform refresh` to reconcile Terraform state.", id, client.KuberErrorDetail(readErr)),
+			"Unable to read the cluster back after the update",
+			fmt.Sprintf("Reading cluster %d back failed: %s. %s", id, client.KuberErrorDetail(readErr), next),
 		)
 		return
 	}
@@ -1256,9 +1371,8 @@ func (r *K8sClusterResource) applyServerState(ctx context.Context, m *K8sCluster
 	m.NodeIPRange = types.StringValue(cl.NodeIPRange)
 
 	m.APIEndpoint = tfutil.StringOrNull(cl.APIEndpoint)
-	m.KubeConfig = kubeConfigObject(ctx, cl.Kubeconfig)
-	m.SSHKeyEncoded = tfutil.StringOrNull(cl.SSHKeyEncoded)
-	m.PrivateKeyEncoded = tfutil.StringOrNull(cl.PrivateKeyEncoded)
+	m.KubeConfig, m.PrivateKeyEncoded = clusterCredentials(ctx, m.ExcludeCredentialsFromState, cl)
+	m.SSHKeyEncoded = tfutil.StringOrNull(cl.SSHKeyEncoded) // the public half; not a secret
 	m.Status = types.StringValue(cl.Status)
 	m.Blocked = types.BoolValue(cl.Blocked)
 	m.NodePoolCount = types.Int64Value(int64(cl.NodePoolCount))

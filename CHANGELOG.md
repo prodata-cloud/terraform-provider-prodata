@@ -4,6 +4,68 @@ All notable changes to this provider are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.27.0] - 2026-10-09
+
+### Added
+
+- **Ephemeral resource `prodata_kubernetes_kubeconfig`** (Terraform 1.10 or later): reads a
+  cluster's connection details — `host`, `cluster_ca_certificate`, `client_certificate`,
+  `client_key`, `token` and the full `raw_config` — for the `kubernetes` and `helm` providers
+  **without writing them to Terraform state or to a saved plan**; they live in memory for the run
+  only. The attributes have the names and encodings of `kube_config` on the cluster resource and
+  data source, so moving a configuration over is a change of reference. The lookup fails with an
+  error, rather than returning empty values, when the cluster is not found, is deleted, has no
+  kubeconfig yet, or its kubeconfig names no API server or holds neither a client certificate
+  with its key nor a token: a `kubernetes` or `helm` provider that is given no host or no
+  credentials may fall back to other connection settings it finds (a kubeconfig named by
+  `config_path` or `KUBE_CONFIG_PATH`, or the service account of the pod it runs in) and connect
+  to whatever cluster those name. None of this applies while `cluster_id` is unknown, that is while
+  the cluster is created or replaced in the same run: the provider is then configured with unknown
+  values and may treat them as missing, so keep the cluster and its workloads in separate
+  configurations. The failure also cannot help when a kubeconfig file is configured
+  as well: the provider applies the values you pass on top of that file and takes whatever you
+  leave unset, such as a token or an `exec` plugin, from it. Do not set `config_path`,
+  `config_paths`, `KUBE_CONFIG_PATH` or `KUBE_CONFIG_PATHS` for a provider configured from this
+  resource.
+- `prodata_kubernetes_cluster` (resource and data source): **`exclude_credentials_from_state`**
+  (optional boolean, no default: unset behaves as `false`). When `true`, `kube_config` and
+  `private_key_encoded` are always null and are never stored in state — a cluster's kubeconfig is
+  a cluster-admin credential that Kubernetes cannot revoke, and `private_key_encoded` is the SSH
+  private key of the nodes. Set it on the resource and on every data source that reads the
+  cluster, and read the kubeconfig with the new ephemeral resource. Set `public_key` when you
+  create the cluster as well: a key pair the platform generates (`ssh_access_enabled = true`
+  without `public_key`) can be returned only as `private_key_encoded`, so with the opt-out on you
+  would never receive its private half; `terraform plan` warns about this combination when a
+  cluster is created. The SSH key cannot be changed on an existing cluster (a `public_key` added to
+  one that was created without it is accepted but never sent to the platform).
+
+### Fixed
+
+- `prodata_kubernetes_cluster`: **an in-place update that does not change `kubernetes_version` no
+  longer waits for — or refuses — the cluster.** That is an update of only `timeouts` or
+  `exclude_credentials_from_state`, or one that sets a write-once input (`network_id`, `public_key`,
+  `ssh_access_enabled`) after an import. Every in-place update used to take the per-cluster lock and
+  require a modifiable cluster: it failed for a cluster in the `FAIL` state and waited, up to the
+  update timeout, while an operation was in flight on the cluster, although the change calls nothing
+  on it. Only a `kubernetes_version` upgrade does that now.
+
+### Notes
+
+- Nothing changes unless you set the flag (apart from the fix above): it is off by default,
+  adding it needs no state upgrade, and existing configurations plan with no changes. Writing
+  `exclude_credentials_from_state = false` explicitly on an existing cluster is a one-time in-place
+  update that changes nothing on the cluster. As for any in-place update of the cluster, that plan
+  shows `kube_config` as known after apply, so leave the argument unset (or `null`) unless you are
+  turning the exclusion on.
+- Turning the flag on removes the credentials from the state written from then on. State versions
+  written before (a remote backend's history, a local `terraform.tfstate.backup`) still contain
+  them, and so does the state of a cluster you import until the first apply with the flag set.
+  For a cluster whose SSH key pair the platform generated, that also removes the only copy of the
+  private key that Terraform holds from the state: copy it out first if you need SSH access.
+- Other sensitive values are not covered by this change: for example `prodata_vm` `password` is
+  still stored in state (see the provider page).
+- There is no ephemeral counterpart for the nodes' SSH private key; bring your own `public_key`.
+
 ## [0.26.1] - 2026-10-08
 
 ### Fixed

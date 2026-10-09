@@ -7,9 +7,11 @@ import (
 
 	"terraform-provider-prodata/internal/client"
 	"terraform-provider-prodata/internal/provider/datasources"
+	"terraform-provider-prodata/internal/provider/ephemeralresources"
 	"terraform-provider-prodata/internal/provider/resources"
 
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
+	"github.com/hashicorp/terraform-plugin-framework/ephemeral"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/provider"
 	"github.com/hashicorp/terraform-plugin-framework/provider/schema"
@@ -17,7 +19,10 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
 
-var _ provider.Provider = &ProDataProvider{}
+var (
+	_ provider.Provider                       = &ProDataProvider{}
+	_ provider.ProviderWithEphemeralResources = &ProDataProvider{}
+)
 
 type ProDataProvider struct {
 	version string
@@ -153,6 +158,7 @@ func (p *ProDataProvider) Configure(ctx context.Context, req provider.ConfigureR
 
 	resp.DataSourceData = c
 	resp.ResourceData = c
+	resp.EphemeralResourceData = c
 }
 
 func (p *ProDataProvider) Resources(ctx context.Context) []func() resource.Resource {
@@ -167,6 +173,12 @@ func (p *ProDataProvider) Resources(ctx context.Context) []func() resource.Resou
 		resources.NewLbResource,
 		resources.NewK8sClusterResource,
 		resources.NewK8sNodePoolResource,
+	}
+}
+
+func (p *ProDataProvider) EphemeralResources(ctx context.Context) []func() ephemeral.EphemeralResource {
+	return []func() ephemeral.EphemeralResource{
+		ephemeralresources.NewK8sKubeconfigEphemeralResource,
 	}
 }
 

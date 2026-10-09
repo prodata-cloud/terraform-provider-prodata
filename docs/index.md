@@ -73,14 +73,38 @@ written to the state file (and any plan file) in plaintext:
 
 - `api_secret_key` (provider configuration)
 - `prodata_vm`: `password`
-- `prodata_kubernetes_cluster`: the entire `kube_config` block (client certificate, client
-  key, bearer `token`, `raw_config`), plus `ssh_key_encoded` and `private_key_encoded`
+- `prodata_kubernetes_cluster` (resource and data source): the entire `kube_config` block
+  (client certificate, client key, bearer `token`, `raw_config`) and, when the platform
+  generated the nodes' SSH key pair, `private_key_encoded` — unless you opt out, see
+  [Keeping Kubernetes credentials out of state](#keeping-kubernetes-credentials-out-of-state)
 
 Treat the state file as a secret. Use a remote backend with **encryption at rest and access
 controls** (for example an encrypted object-storage backend), restrict who can read it, and
-avoid committing `terraform.tfstate` to source control. Write-only attributes that are never
-read back (`prodata_vm` `password`, `ssh_public_key`, and `user_data`) are not stored in
-state at all.
+avoid committing `terraform.tfstate` to source control. Of the attributes the API never reads
+back (`prodata_vm` `password`, `ssh_public_key` and `user_data`), only `user_data` is truly
+write-only — it is never stored in state (Terraform 1.11 or later); `password` and
+`ssh_public_key` are kept in state exactly as you configured them.
+
+### Keeping Kubernetes credentials out of state
+
+A cluster's `kube_config` is a cluster-admin credential, and Kubernetes cannot revoke a client
+certificate, so it is worth keeping out of the state altogether:
+
+- Set `exclude_credentials_from_state = true` on `prodata_kubernetes_cluster` (on the resource
+  and on every data source that reads the cluster). `kube_config` and `private_key_encoded` are
+  then always null and never stored.
+- Read the kubeconfig with the
+  [`prodata_kubernetes_kubeconfig`](ephemeral-resources/kubernetes_kubeconfig.md) ephemeral
+  resource, which holds it in memory for the run only and never writes it to the state or to a
+  saved plan. It needs Terraform 1.10 or later.
+- Set `public_key` when you create the cluster. Without it the platform generates the nodes' SSH
+  key pair and the private key could be returned only as `private_key_encoded`, which the opt-out
+  keeps out of state — so you would never receive it. The key cannot be changed on an existing
+  cluster (a `public_key` added to one that was created without it is accepted but never sent to the
+  platform).
+
+State versions written before you opt out still contain the credentials. See
+[Credentials in Terraform state](resources/kubernetes_cluster.md#credentials-in-terraform-state).
 
 ## Schema
 

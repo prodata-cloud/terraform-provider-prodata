@@ -59,6 +59,22 @@ func kubeConfigObject(ctx context.Context, secret string) types.Object {
 	return obj
 }
 
+// credentialsExcluded reports whether exclude_credentials_from_state is on. Only an
+// explicit true counts: null (not set) keeps the default of storing the credentials.
+func credentialsExcluded(v types.Bool) bool {
+	return !v.IsNull() && !v.IsUnknown() && v.ValueBool()
+}
+
+// clusterCredentials returns the two credential attributes as they belong in state — the
+// parsed kube_config and the SSH private key — or nulls when exclude_credentials_from_state
+// is on. Mirrors the resource's helper of the same name.
+func clusterCredentials(ctx context.Context, exclude types.Bool, cl *client.Cluster) (types.Object, types.String) {
+	if credentialsExcluded(exclude) {
+		return types.ObjectNull(kubeConfigAttrTypes()), types.StringNull()
+	}
+	return kubeConfigObject(ctx, cl.Kubeconfig), tfutil.StringOrNull(cl.PrivateKeyEncoded)
+}
+
 // scopeOpts builds a RequestOpts carrying only the region / project_tag overrides
 // that are actually set; an empty field defers to the provider/client default.
 func scopeOpts(region, projectTag types.String) *client.RequestOpts {
