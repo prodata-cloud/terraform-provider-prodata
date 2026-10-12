@@ -4,6 +4,59 @@ All notable changes to this provider are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.0] - Unreleased
+
+### Added
+
+- `prodata_public_ip_attachment`: **`reboot_after_attach`** (optional boolean, no default: unset is
+  not the same as `false`). The platform applies the network configuration of a public IP only
+  when the VM starts, so on a running VM the address did not work until the VM was stopped and
+  started again, while `apply` had already reported the attachment as created and everything that
+  depends on it had gone on. With `reboot_after_attach = true` the provider restarts a running VM
+  during `apply` — the platform's stop, then its start — and the create finishes only once the VM
+  is `RUNNING` again, so whatever depends on the attachment is created after the restart. A VM
+  that is not running is left alone (it applies the configuration at its next start), and one
+  that is still starting is waited for first; one that went down between the attach and the
+  restart is left stopped, with a warning. **The platform's stop is not a clean shutdown of the
+  guest operating system** — it may power the VM off at once — so do not use the flag for a VM
+  that needs one (a database, an NFS server): shut that one down from inside the VM and restart
+  it yourself. `RUNNING` is the platform's view of the VM, and the provider cannot check that the
+  address answers. A stop or a start that fails in a way that does not say whether the platform
+  carried it out (its generic error, a gateway error, a dropped connection) is judged by what the
+  VM does next and repeated for up to about three minutes, and a VM that reads `STOPPED` again
+  after an accepted start is given as long; a clear refusal, such as "forbidden", ends the
+  restart at once, and the `create` timeout bounds all of it. If the restart fails, the attachment
+  is kept in the state and marked as tainted, so the next apply detaches the public IP and attaches
+  it again; a VM that the failed restart left stopped stays stopped, so start it yourself.
+- `prodata_public_ip_attachment`: a **warning** when the attachment is created on a VM that is
+  running or starting and `reboot_after_attach` is not set, saying that the address works only
+  after a restart. Setting `reboot_after_attach = false` says that you restart the VM yourself and
+  silences it.
+- `prodata_public_ip_attachment`: **`timeouts`** with `create` (default `15m`), a ceiling for the
+  whole create: the attach call and, with `reboot_after_attach`, the restart. The provider returns
+  as soon as it is done and does not wait out the timeout.
+
+### Changed
+
+- `prodata_public_ip_attachment`: an in-place update is no longer an error. `reboot_after_attach`
+  and `timeouts` can be changed on an existing attachment; the change is only recorded — nothing is
+  sent to the platform and the VM is not touched. `vm_id`, `public_ip_id`, `region` and
+  `project_tag` still force a new resource.
+- Documentation of `prodata_public_ip_attachment`: the advice to stop and start the VM after
+  *detaching* a public IP is gone. The platform takes the local network's default gateway off the
+  VM when a public IP is attached and does not currently put it back when the public IP is
+  detached, so a VM that has applied the attachment can be left without a default route after the
+  detach, at once or at its next restart, and a restart would not bring the gateway back. The
+  provider never restarts the VM when the attachment is destroyed. The note in `prodata_vm` about attaching
+  a public IP now says why the VM has to be restarted and points to `reboot_after_attach`.
+
+### Notes
+
+- Existing configurations plan with no changes and need no state upgrade: the new attributes are
+  null in existing state. The only difference is the warning above when an attachment is created
+  on a running VM. Setting `reboot_after_attach` on an existing attachment is a one-time in-place
+  update that restarts nothing, and so is importing one.
+
 ## [0.27.0] - 2026-10-09
 
 ### Added
