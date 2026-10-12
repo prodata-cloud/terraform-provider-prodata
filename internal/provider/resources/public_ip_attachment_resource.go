@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"terraform-provider-prodata/internal/client"
 
+	"github.com/hashicorp/terraform-plugin-framework-timeouts/resource/timeouts"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -24,16 +26,27 @@ var (
 	_ resource.ResourceWithImportState = &PublicIPAttachmentResource{}
 )
 
+// publicIPAttachmentDefaultCreateTime is a ceiling for the whole create — the attach call and,
+// with reboot_after_attach, the VM's stop and start — not a fixed wait: the provider returns as
+// soon as the VM is back. Overridable via the timeouts attribute.
+const publicIPAttachmentDefaultCreateTime = 15 * time.Minute
+
 type PublicIPAttachmentResource struct {
 	client *client.Client
+
+	// restartPoll is the interval between VM status reads while restarting; zero means the
+	// default. Tests shorten it.
+	restartPoll time.Duration
 }
 
 type PublicIPAttachmentResourceModel struct {
-	VmID       types.Int64  `tfsdk:"vm_id"`
-	PublicIPID types.Int64  `tfsdk:"public_ip_id"`
-	PublicIP   types.String `tfsdk:"public_ip"`
-	Region     types.String `tfsdk:"region"`
-	ProjectTag types.String `tfsdk:"project_tag"`
+	VmID              types.Int64    `tfsdk:"vm_id"`
+	PublicIPID        types.Int64    `tfsdk:"public_ip_id"`
+	PublicIP          types.String   `tfsdk:"public_ip"`
+	Region            types.String   `tfsdk:"region"`
+	ProjectTag        types.String   `tfsdk:"project_tag"`
+	RebootAfterAttach types.Bool     `tfsdk:"reboot_after_attach"`
+	Timeouts          timeouts.Value `tfsdk:"timeouts"`
 }
 
 func NewPublicIPAttachmentResource() resource.Resource {
@@ -89,6 +102,23 @@ func (r *PublicIPAttachmentResource) Schema(ctx context.Context, req resource.Sc
 					stringplanmodifier.UseStateForUnknown(),
 				},
 			},
+			"reboot_after_attach": schema.BoolAttribute{
+				MarkdownDescription: "Restart the VM during `apply`, once the public IP is attached, so that the address works " +
+					"when `apply` finishes. The platform applies the network configuration of a public IP only when the VM " +
+					"starts, so on a running VM the address does not work until the VM has been stopped and started again; " +
+					"with this set to `true` the attachment is not reported as created until the VM is `RUNNING` again. " +
+					"The restart is the platform's stop followed by its start, and that stop is not a clean shutdown of the " +
+					"guest operating system: it may power the VM off at once, leaving the guest no chance to flush its buffers " +
+					"or stop its services. A VM that is not running is left alone: the configuration is applied the next time " +
+					"it starts. Only used when the attachment is created; changing it afterwards does nothing, and the VM is " +
+					"never restarted when the attachment is destroyed. " +
+					"If unset, the VM is not restarted and a running VM produces a warning; set it to `false` to say that " +
+					"you restart the VM yourself and silence the warning.",
+				Optional: true,
+			},
+			"timeouts": timeouts.Attributes(ctx, timeouts.Opts{
+				Create: true,
+			}),
 		},
 	}
 }
@@ -117,6 +147,14 @@ func (r *PublicIPAttachmentResource) Create(ctx context.Context, req resource.Cr
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
+	createTimeout, diags := data.Timeouts.Create(ctx, publicIPAttachmentDefaultCreateTime)
+	resp.Diagnostics.Append(diags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, createTimeout)
+	defer cancel()
 
 	opts := r.buildOpts(&data)
 	vmID := data.VmID.ValueInt64()
@@ -155,7 +193,74 @@ func (r *PublicIPAttachmentResource) Create(ctx context.Context, req resource.Cr
 		"public_ip": vm.PublicIP,
 	})
 
+	// The attachment exists on the panel from here on. Record it before anything that can
+	// still fail: a failed restart must not leave an attachment Terraform does not know of,
+	// which a retry would then be refused ("VM already has a public IP").
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	switch {
+	case data.RebootAfterAttach.ValueBool():
+		restarted, err := restartRunningVM(ctx, r.client, vmID, opts, r.pollInterval())
+		if err != nil {
+			resp.Diagnostics.AddError(
+				"Public IP Attached, but the VM Could Not Be Restarted",
+				fmt.Sprintf("Public IP %d is attached to VM %d, but restarting the VM so that the address takes effect failed: %s\n\n"+
+					"The attachment is kept in the state and marked as tainted, so the next apply detaches the public IP and attaches it again. "+
+					"Check the VM in the panel and start it if it is stopped: the provider does not start a VM that is not running, "+
+					"the next apply included.",
+					attachReq.PublicIPID, vmID, err),
+			)
+			return
+		}
+		tflog.Debug(ctx, "Public IP attachment finished", map[string]any{
+			"vm_id":     vmID,
+			"restarted": restarted,
+		})
+		if !restarted && vmIsUp(vm.Status) {
+			// It was up when the IP was attached and is not up now: somebody stopped it in
+			// between. Starting a VM that is off is not the provider's call.
+			resp.Diagnostics.AddWarning(
+				"Public IP Attached, but the VM Was Not Restarted",
+				fmt.Sprintf("VM %d was %s when public IP %d was attached, but it was no longer running when the provider came "+
+					"to restart it, so it was left as it is. The platform applies the network configuration of a public IP when "+
+					"the VM starts, so the address works once the VM has been started; the provider does not start a VM that "+
+					"is not running.",
+					vmID, vm.Status, attachReq.PublicIPID),
+			)
+		}
+	case data.RebootAfterAttach.IsNull() && vmIsUp(vm.Status):
+		resp.Diagnostics.AddWarning(
+			"Public IP Attached, but It Works Only After the VM Restarts",
+			fmt.Sprintf("VM %d was %s when public IP %d was attached. The platform applies the network configuration of a "+
+				"public IP only when the VM starts, so the address does not work until the VM has been stopped and started again, "+
+				"although the attachment is recorded as created.\n\n"+
+				"Set reboot_after_attach = true to have the provider restart the VM during apply (the platform's stop is not "+
+				"a clean shutdown of the guest operating system), or restart the VM yourself and set reboot_after_attach = "+
+				"false to silence this warning.",
+				vmID, vm.Status, attachReq.PublicIPID),
+		)
+	}
+}
+
+// pollInterval is the interval between VM status reads while the VM restarts.
+func (r *PublicIPAttachmentResource) pollInterval() time.Duration {
+	if r.restartPoll > 0 {
+		return r.restartPoll
+	}
+	return vmRestartPollInterval
+}
+
+// vmIsUp reports whether a VM in this status is running or on its way to running, so that a
+// public IP attached now is not part of the network configuration it started with.
+func vmIsUp(status string) bool {
+	switch status {
+	case "RUNNING", "STARTING", "REBOOTING":
+		return true
+	}
+	return false
 }
 
 func (r *PublicIPAttachmentResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
@@ -210,10 +315,17 @@ func (r *PublicIPAttachmentResource) Read(ctx context.Context, req resource.Read
 }
 
 func (r *PublicIPAttachmentResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
-	resp.Diagnostics.AddError(
-		"Update Not Supported",
-		"All attributes of prodata_public_ip_attachment require replacement. This is a bug in the provider.",
-	)
+	// vm_id, public_ip_id, region and project_tag all require replacement, so the only changes
+	// that get here are to reboot_after_attach and timeouts — options that Create alone reads.
+	// There is nothing to tell the panel; the new values are just recorded.
+	var data PublicIPAttachmentResourceModel
+
+	resp.Diagnostics.Append(req.Plan.Get(ctx, &data)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
 
 func (r *PublicIPAttachmentResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {

@@ -11,7 +11,7 @@ Manages a ProData virtual machine.
 
 ~> **Note:** Most attributes require resource replacement when changed (destroy and recreate). The `name`, `cpu_cores`, `ram`, `disk_size`, and `disk_type` attributes can be updated in-place — changing them forces a VM reboot but not a full replacement.
 
-~> **Note:** After attaching a public IP to a VM (via `prodata_public_ip_attachment`), the VM must be rebooted for the IP to become active.
+~> **Note:** The platform applies the network configuration of a public IP only when the VM starts, so a public IP attached to a running VM (via `prodata_public_ip_attachment`) becomes active only after the VM has been stopped and started again. Set `reboot_after_attach = true` on the attachment to have the provider do that during `apply`.
 
 ## Example Usage
 
