@@ -4,6 +4,19 @@ All notable changes to this provider are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.1] - 2026-10-16
+
+### Changed
+
+- Documentation of `prodata_s3_bucket`, the S3 data sources and the provider index: corrected how S3
+  access works. The old text said that S3 needs a separate key pair from **Account** → **S3 Credentials**
+  (the console has no such page) and that the key used by Terraform is not an S3 key. A key generated
+  with an `S3` permission is an S3 key as well, and it acts as its **owner**, not as the project: the
+  page now explains why a key owned by another user of the organization is accepted by the S3
+  endpoint but lists none of the project's buckets and gets `403` on them, which key to use or how to
+  grant access, that over S3 a key's `READ`/`WRITE` level is not enforced, and why a bucket created
+  directly over S3 shows up only in the default project of the key's owner, within about an hour.
+
 ## [0.28.0] - 2026-10-12
 
 ### Added
