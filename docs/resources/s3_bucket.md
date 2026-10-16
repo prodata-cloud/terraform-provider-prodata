@@ -54,16 +54,27 @@ Once created, a bucket is reachable via any S3-compatible client (awscli, mc, rc
 | Uzbekistan | `https://storage.pro-data.tech`      |
 | Kazakhstan | `https://storage.kz-1.pro-data.tech` |
 
-S3 access uses a **separate** `access_key` / `secret_key` pair — not the API key used by Terraform. Generate them under **Account** → **S3 Credentials** in the ProData Console.
+S3 clients authenticate with an **access key** generated under **Account** → **Access Keys** → **Generate Key** in the ProData Console. A key generated with an `S3` permission is both an API key and an S3 key: the value the console shows as **Access Key** (the provider's `api_key_id`) and the **Secret Key** are also the S3 access key ID and secret access key. That includes the key this provider uses (it needs `S3:WRITE` to manage buckets), so one key can serve Terraform and an S3 client, as long as the key's owner is the owner of the project — see [Key owners and project owners](#key-owners-and-project-owners). A key generated without an `S3` permission is not accepted by the S3 endpoint, and the permission cannot be added to an existing key.
 
 Example with the AWS CLI:
 
 ```bash
+export AWS_ACCESS_KEY_ID=<Access Key>
+export AWS_SECRET_ACCESS_KEY=<Secret Key>
 aws --endpoint-url=https://storage.pro-data.tech \
     s3 cp ./file.txt s3://my-bucket/
 ```
 
 Object-level operations (upload, download, list, delete), object lifecycle rules, bucket policies, and CORS configuration are **not** managed by this Terraform provider — use any S3-compatible client.
+
+### Key owners and project owners
+
+An S3 key acts as its **owner**: the user the key was generated for. In the console only the organization's root user can generate keys, and it chooses that user in the required **Owner** field (also shown in the *Owner* column of the key list); a key generated through the API without an owner belongs to the user who generated it. Normally every user of an organization has their own S3 identity. A bucket created by this provider or in the console belongs to the identity of the **owner of the project** — the project's "canonical user" — whichever user or key made the request. The provider and the console reach the bucket on the project owner's behalf; an S3 client reaches it as the owner of its key. So:
+
+- **A key owned by another user of your organization** (for example, a sub-user created for automation) is accepted by the S3 endpoint but acts as that other user. `ListBuckets` returns none of the project's buckets — an S3 listing contains only the caller's own buckets — and access to one of them fails with `403 AccessDenied` unless the bucket's ACL or a bucket policy allows it.
+- **To work with the project's buckets over S3**, use a key whose owner is the project's owner (pick that user as **Owner** when generating the key). To let another user in, add a bucket policy that names that user's principal — over S3, with a key owned by the project's owner, since this provider does not manage bucket policies. The organization's root user finds a user's principal under **Account** → **User management** → **User Information** (the info button in the user's row), labelled *Principal for use when working with object storage*. A bucket shared this way still does not appear in the other user's `ListBuckets`; address it by name.
+- Over S3 only bucket policies and ACLs apply. Neither the project and role rules of the console nor the key's `READ`/`WRITE` level are enforced there (the levels govern the panel API that this provider uses): any key with an `S3` permission, including a read-only one, can read, overwrite and delete everything its owner's identity owns. Treat such a key as a full-access credential.
+- **A bucket created directly over S3** belongs to the identity of the key's owner and carries no project label, so neither the console nor this provider lists it at first. The platform assigns such a bucket to the **default project of the key's owner** periodically, within about an hour of its creation. If that is not the project Terraform is configured for, set `project_tag` to the owner's default project to see the bucket — the key the provider uses must belong to a member of that project (the organization's root user is normally a member of every user's default project); `prodata_s3_buckets` for any other project does not return it.
 
 ## Schema
 

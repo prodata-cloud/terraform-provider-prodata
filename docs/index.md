@@ -63,7 +63,9 @@ Obtain API credentials from the ProData Cloud console:
 1. Log in to your ProData Cloud console
 2. Navigate to **Account** > **Access Keys**
 3. Click **Generate Key**
-4. Save the API Key ID and Secret Key (shown only once)
+4. Save the Access Key (the provider's `api_key_id`) and the Secret Key (shown only once)
+
+~> **Note:** A key generated with an `S3` permission is also an S3 key, acting as the user it belongs to. See [Accessing the bucket](resources/s3_bucket.md#accessing-the-bucket) for which key sees which buckets.
 
 ## Sensitive data and Terraform state
 

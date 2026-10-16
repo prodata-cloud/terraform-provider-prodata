@@ -9,6 +9,8 @@ description: |-
 
 Look up a single ProData S3 (Ceph RGW) bucket by name. The bucket must belong to the project resolved from `project_tag` (or the provider default); a bucket that exists in another project surfaces as a clear error, not a silent empty result.
 
+~> **Note:** A bucket created directly over S3 (with an S3 client rather than the console or this provider) is not part of any project until the platform assigns it to the default project of the key's owner, within about an hour. See [Key owners and project owners](../resources/s3_bucket.md#key-owners-and-project-owners).
+
 ~> **Note:** `acl` is intentionally not exposed by the data source. The S3 ACL API exposes grants, not canned ACLs, and the canned value cannot be reliably round-tripped from grants. Use the [`prodata_s3_bucket`](../resources/s3_bucket.md) resource if you need to manage ACLs.
 
 ## Example Usage

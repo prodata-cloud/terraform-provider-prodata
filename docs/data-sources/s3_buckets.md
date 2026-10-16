@@ -9,6 +9,8 @@ description: |-
 
 List all ProData S3 (Ceph RGW) buckets owned by the project resolved from `project_tag` (or the provider default). Pagination is handled internally — the provider follows the server's `continuationToken` until the listing is exhausted.
 
+~> **Note:** Only buckets that belong to the project are listed. A bucket created directly over S3 appears in the default project of the key's owner within about an hour — not necessarily in this project. See [Key owners and project owners](../resources/s3_bucket.md#key-owners-and-project-owners).
+
 ~> **Note:** Per-bucket `versioning` and `object_lock_enabled` are **not** fetched by this data source. Doing so would require an additional round-trip per bucket per refresh — wasteful for inventory-style queries. Use [`prodata_s3_bucket`](./s3_bucket.md) for the buckets where you need those fields.
 
 ## Example Usage
