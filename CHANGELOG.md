@@ -4,6 +4,88 @@ All notable changes to this provider are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.29.0] - Unreleased
+
+### Added
+
+- **`prodata_local_network_attachment`**: a new resource that attaches a VM to one more ProData local
+  network, as an additional network interface (a second NIC), and detaches it when destroyed. Until now
+  this could only be done in the console. `vm_id` and `network_id` are required; `ip` is optional and
+  validated as an IPv4 address at plan time (without it the platform assigns the next free address of the
+  network, and it is recorded in `ip`); `region` and `project_tag` work as in the neighboring resources.
+  `interface_id` is the ID of the interface itself, not of the network: it is what a detach and an import
+  use. `mac_address` is the MAC address of the interface. A VM has one interface per network, so the
+  network the VM was created in cannot be attached again; the VM's main interface is not managed by the
+  resource and is never detached, and `prodata_vm.private_ip` and `local_network_id` go on describing it.
+  Changing `vm_id`, `network_id`, `ip`, `region` or `project_tag` replaces the attachment;
+  `reboot_after_attach` and `timeouts` can be changed in place, where the change is only recorded.
+- `prodata_local_network_attachment`: **`reboot_after_attach`** (optional boolean, no default: unset is not the
+  same as `false`), with the semantics of the argument of the same name of `prodata_public_ip_attachment`.
+  The platform does not restart a running VM when an interface is added, and whether the guest picks the
+  interface and its address up without a restart depends on the VM. With `reboot_after_attach = true` the
+  provider restarts a running VM during `apply` — the platform's stop, then its start — and the create
+  finishes only once the VM is `RUNNING` again; a VM that is not running is left alone. **The platform's stop
+  is not a clean shutdown of the guest operating system**, so do not use the flag for a VM that needs one (a
+  database, an NFS server). If the argument is not set and the VM is running, `apply` ends with a warning
+  that the interface may work only after a restart; `false` silences it. If the restart fails, the
+  attachment is kept in the state and marked as tainted.
+- `prodata_local_network_attachment`: a **warning** when the VM has no cloud-init, because nothing then sets
+  the address up inside the guest: it names the address and the MAC address of the interface.
+- `prodata_local_network_attachment`: **`timeouts`** with `create` (default `15m`), a ceiling for the whole
+  create, and `delete` (default `10m`), the longest a detach waits for a VM that is neither `RUNNING` nor
+  `STOPPED`. A VM that is starting, stopping or rebooting is waited for and the call repeated; a call
+  refused because another operation on the VM is in progress (code 961) is repeated at growing intervals for
+  up to about two minutes, and then fails with the platform's answer. A VM that the
+  platform shows as `STOPPED` but that is paused or hibernated is refused all the same (code 959): after
+  three refusals in a row the provider stops and says so, instead of asking until the timeout. The VM is
+  never stopped or restarted by a destroy.
+- `prodata_local_network_attachment`: a refresh removes the attachment from the state only when the platform
+  answers that the VM (633) or the interface (703) does not exist, or the interface now belongs to another
+  network; any other error, a plain HTTP 404 page included, is reported and the state is kept. A destroy
+  treats those two answers as "already gone" in the same way. An address changed outside Terraform is
+  reported as a warning and leaves the state and the plan as they are, so an explicit `ip` does not turn
+  into a replacement of a live interface; the warning says how to keep the address of the panel (`terraform
+  state rm`, then `terraform import`; setting `ip` alone would plan a replacement) or to get the configured
+  one back (`-replace`).
+- `prodata_local_network_attachment`: an apply that was cut short after the attach request had gone out (an
+  interruption, the `create` timeout, a lost connection) may have created an interface that Terraform did
+  not record. The provider does not repeat such an attach. The error, of the attach that got no answer or of
+  the next apply, which the platform refuses with 955, names the interface the VM has in that network and
+  the `terraform import` command that takes it over.
+- `prodata_local_network_attachment`: import with `vm_id:interface_id`. A primary interface cannot be imported.
+- A detach refused with the generic "platform error" (627) is explained in the error, with the causes in the
+  order to try them: a passing failure of the platform or of Proxmox (run `terraform destroy` again, at no
+  cost to the VM); a removal that Proxmox has queued, because the VM does not hot-unplug network devices or
+  the guest did not release the device, which takes effect only after the VM has been stopped and started
+  again (a reboot from inside the guest is not enough); an interface that was only waiting for a restart to
+  appear (stop and start once more; only if it was attached without `reboot_after_attach` to a VM that does
+  not hot-plug network devices, and the VM has not been restarted since). Only if it still fails after that
+  is it a question for support, and not for the console. The error also warns against `terraform state rm` in the meantime.
+- `prodata_local_network_attachment`: an attach refused with 955, or one that got no answer, for a network in
+  which the VM has only a primary interface does not offer to import it as it is: the resource does not
+  manage a primary interface, and an import refuses one. The platform treats as primary both the interface in
+  the network the VM was created in and any interface that carries a default gateway, and the list does not say
+  which of the two an interface is. The VM's own interface usually carries a gateway too, so the message then
+  names both possibilities: if the network is the VM's own, choose another one; if it is not, and the
+  interface does not need to carry the gateway, move the gateway to the interface that is to carry the VM's
+  default route, and import the interface then. Only an interface with no gateway on it is known to be the
+  VM's own, and the message says so. The same advice comes with an import of such an interface, with a detach
+  refused as primary (958), and with the warning about an address changed outside Terraform on an interface
+  that has become primary (editing an address in the console can give an interface the gateway of the VM).
+  It warns that the console's No gateway clears the gateway of every interface of the VM, not only of the one it
+  is chosen on, and the documentation has the steps. On a primary interface that lists no gateway the warning
+  about a changed address gives no such advice, because moving a gateway would change nothing for it: it says
+  to ask support why the platform treats the interface as primary. When old data holds two interfaces of the
+  VM in one network, the one that is not primary is the one named, and of two primary ones the one that
+  carries a gateway.
+- `prodata_local_network_attachment`: a `create` or `delete` timeout that runs out while another operation
+  holds the VM (code 961) says so, and names that answer; a timeout that runs out while the VM is neither
+  `RUNNING` nor `STOPPED` (code 959) says that. A paused or hibernated VM is recognized after three
+  refusals in a row even if the status endpoint fails now and then.
+- `docs/resources/local_network_attachment.md`: what the platform allows, how to configure the guest, when to
+  restart the VM, in what order to destroy the attachments and the network, what a "platform error" on a
+  detach means, how to get out of a drifted address, and what to do after an apply that was cut short.
+
 ## [0.28.1] - 2026-10-16
 
 ### Changed
