@@ -14,6 +14,7 @@ the [Terraform Registry](https://registry.terraform.io/providers/prodata-cloud/p
 - `prodata_volume` / `prodata_volume_attachment` — block volumes and their attachment to a VM
 - `prodata_public_ip` / `prodata_public_ip_attachment` — public IPs and their attachment to a VM
 - `prodata_local_network` — local (private) network
+- `prodata_local_network_attachment` — an additional network interface of a VM in another local network
 - `prodata_s3_bucket` — S3-compatible object-storage bucket
 - `prodata_lb` — L4 (TCP/UDP) load balancer
 - `prodata_kubernetes_cluster` / `prodata_kubernetes_node_pool` — Managed Kubernetes
