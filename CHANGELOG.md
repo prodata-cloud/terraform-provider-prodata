@@ -4,6 +4,73 @@ All notable changes to this provider are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.30.0] - Unreleased
+
+### Changed
+
+- **`prodata_vm`: changing `local_network_id` no longer replaces the VM. It moves the main network
+  interface of the VM to the other network in place.** The VM keeps its `id`, its disks, its public IP and
+  its other interfaces. A running VM is **stopped (powered off: the guest is not shut down) and started
+  again**; a stopped VM stays stopped. The VM gets a new address in the new network, `private_ip` if it is
+  set (change it together with the network) and otherwise the next free one, shown as `known after apply`;
+  **the old address is released at once** and may be given to another VM. The default gateway and the
+  security group of the interface move with it, and the public IP is not touched. The platform checks the
+  move first and refuses it, before anything is changed, for a VM that is a backend of a load balancer,
+  a member of an auto scaling group or the holder of a role the platform manages, that already has an
+  interface in the new network, that carries a gateway while the new network has none, or that has more than
+  one security group on the interface or a group without rules. `terraform apply` checks, renames, stops,
+  resizes, moves and starts, in that order. A step that fails is named in the error, and a VM that the
+  provider stopped is started again; applying again finishes a move that was cut short, or takes it back,
+  and so repairs an apply that was interrupted. When the platform cannot tell the main interface of the VM
+  from the others (966), the error names the likely cause, another interface of the VM that carries a default
+  gateway, and what to do about it. `private_ip` changed **alone** still replaces the VM. The
+  plan carries a warning that the VM is moved and stopped. The move needs a panel that has
+  `PUT /api/v2/vms/{id}/primary-local-network`; on an older one the apply stops before anything is changed,
+  and `terraform apply -replace=prodata_vm.<name>` gives the old behaviour (it deletes the disks). See
+  "Moving a VM to another network" in the documentation of `prodata_vm`.
+- `prodata_vm`: `status` is `known after apply` in a plan that stops and starts the VM (a change of
+  `cpu_cores`, `ram`, `disk_size`, `disk_type` or `local_network_id`), instead of promising the status of the
+  state, which a start that fails would contradict.
+- `prodata_vm`: an update is bounded as a whole by `timeouts.update` (default `30m`), which it had no bound of
+  its own before. The provider returns as soon as the work is done. A VM that the update stopped, or may have
+  stopped because the platform's answer to the stop did not say, is started again however the update ended, even
+  when the ceiling has run out (or the apply is interrupted): that can take a few minutes beyond it. When the
+  update did its work the provider waits for the VM to be running; when a step failed, the start is handed to the
+  platform. A stop that the platform refuses for good leaves the VM as it was. A VM that still reads as running
+  after a stop whose outcome is not known is looked at for a few minutes before it is taken to be up, because the
+  platform's view of a VM can lag behind. A start that fails in a way that may pass, as it can while the platform
+  is still busy with a step that was cut short, is tried again for a few minutes, and an error of a step that was
+  cut short says what became of the VM.
+- `prodata_vm`: `private_ip` has to be an IPv4 address when it is set, which is checked when the configuration
+  is validated. An empty string used to pass the validation and to fail with "inconsistent result after apply"
+  once the platform had picked an address.
+- `prodata_local_network`: a network that has VMs in it can no longer be replaced together with them. A change
+  of its `cidr` or `gateway` destroys the network before the VMs that refer to it are updated, and the platform
+  refuses to delete a network that VMs are in, so the apply stops and nothing is moved. (The VMs used to be
+  replaced first, with their disks.) Move the VMs to another network in an apply of their own first. See
+  "Moving a VM to another network" in the documentation of `prodata_vm`.
+- `prodata_local_network_attachment`: the messages and the documentation call the network of the VM's main
+  interface "the VM's own network" instead of "the network the VM was created in", which is no longer true
+  once the VM has been moved. The refusal to import the main interface now says how to put the VM in another
+  network: change `local_network_id` of its `prodata_vm`.
+
+### Added
+
+- `prodata_vm`: **`timeouts.update`**. A plan that moves the VM to another network is refused when it is
+  shorter than `20m`, because the check, the stop, the move and the start have to fit in it.
+- `prodata_vm`: a **warning** when the VM is moved and has no cloud-init, because nothing then sets the new
+  address up inside the guest: it names the address, the network whose mask applies and the gateway to set
+  inside the VM.
+- `docs/resources/vm.md`: "Moving a VM to another network": what a move does, what the platform refuses, the
+  downtime, the address that is released, the guest of a VM without cloud-init, and how to repeat a failed
+  apply.
+
+### Fixed
+
+- `docs/resources/vm.md` and `examples/resources/vm/main.tf` showed `timeouts` as a block
+  (`timeouts { create = "30m" }`), which Terraform rejects for `prodata_vm`. It is an attribute:
+  `timeouts = { create = "30m" }`.
+
 ## [0.29.0] - Unreleased
 
 ### Added

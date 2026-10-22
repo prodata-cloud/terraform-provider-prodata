@@ -101,7 +101,8 @@ func (r *LocalNetworkAttachmentResource) Schema(ctx context.Context, req resourc
 	resp.Schema = schema.Schema{
 		MarkdownDescription: "Attaches a virtual machine to one more ProData local network, as an additional network interface. " +
 			"Destroying this resource detaches the interface from the VM. " +
-			"The VM's main interface, the one in the network the VM was created in, is not managed by this resource and cannot be detached.",
+			"The VM's main interface, the one in the VM's own network (the `local_network_id` of its `prodata_vm`), is not managed by this resource and cannot be detached. " +
+			"To move the VM itself to another network, change that `local_network_id`.",
 
 		Attributes: map[string]schema.Attribute{
 			"vm_id": schema.Int64Attribute{
@@ -113,7 +114,7 @@ func (r *LocalNetworkAttachmentResource) Schema(ctx context.Context, req resourc
 			},
 			"network_id": schema.Int64Attribute{
 				MarkdownDescription: "The ID of the local network to attach the VM to. A VM can have only one interface in a network, " +
-					"and cannot be attached to the network it was created in a second time.",
+					"and cannot be attached to its own network, the one of its main interface, a second time.",
 				Required: true,
 				PlanModifiers: []planmodifier.Int64{
 					int64planmodifier.RequiresReplace(),
@@ -583,10 +584,15 @@ func (r *LocalNetworkAttachmentResource) ImportState(ctx context.Context, req re
 		return
 	}
 	if nic.Primary {
-		detail := fmt.Sprintf("Interface %d is the primary interface of VM %d: the one in the network the VM was created in, or one with a default gateway. "+
+		detail := fmt.Sprintf("Interface %d is the primary interface of VM %d: the one in the VM's own network, or one with a default gateway. "+
 			"It cannot be detached, so it is not managed by this resource.", interfaceID, vmID)
 		if hasGateway(nic) {
-			detail += " If it is primary only because it carries the gateway of the VM, " + moveGatewayAdvice + ". " + consoleGatewayNote + " Import it then."
+			// The list does not say whether the gateway is what makes the interface primary: the advice to move the VM
+			// is given for the case that it is the VM's own, and the gateway is the way out of the other.
+			detail += " If it is primary only because it carries the gateway of the VM, " + moveGatewayAdvice + ". " + consoleGatewayNote +
+				" Import it then. " + moveVMAdviceIfOwn
+		} else {
+			detail += " " + moveVMAdvice
 		}
 		resp.Diagnostics.AddError("Primary Interface Cannot Be Imported", detail)
 		return
@@ -813,6 +819,20 @@ func attachOutcomeUnknown(last error) bool {
 // interface that is to carry the VM's default route. It continues a sentence.
 const moveGatewayAdvice = "move the gateway to the interface that is to carry the VM's default route, and leave this one without it"
 
+// moveVMAdvice is what to do for a VM that is to be in another network, which is what detaching its main interface
+// would be for: prodata_vm moves the main interface in place. It is a sentence of its own. It is not given as it is
+// where the interface carries a gateway, because it may be primary only for that: a VM with two such interfaces is
+// refused the move (the panel cannot tell which is the main one), so the gateway has to be put right first. That
+// interface gets moveVMAdviceIfOwn.
+const moveVMAdvice = "To put the VM itself in another network, do not detach its main interface: change local_network_id of its prodata_vm, " +
+	"which moves the interface in place (see \"Moving a VM to another network\" in the documentation of prodata_vm)."
+
+// moveVMAdviceIfOwn is moveVMAdvice for an interface that carries a gateway, which is the VM's own interface or a
+// second one that only carries the gateway: it holds for the first, and says what the move needs of the second.
+const moveVMAdviceIfOwn = "If it is the VM's own interface and the VM is to be in another network, do not detach it: change local_network_id of its " +
+	"prodata_vm, which moves the interface in place, as long as no other interface of the VM carries a gateway " +
+	"(see \"Moving a VM to another network\" in the documentation of prodata_vm)."
+
 // consoleGatewayNote says what to know about doing that in the console, which is what makes it easy to get wrong: the
 // Gateway settings are offered only for a VM without a public IP, and No gateway clears the gateway of every interface
 // of the VM, whichever one it is chosen on, and leaves the VM without a default gateway. The steps are in the
@@ -829,10 +849,10 @@ func (r *LocalNetworkAttachmentResource) takeOver(ctx context.Context, vmID, net
 	nic, listed := r.interfaceInNetwork(ctx, vmID, networkID, opts)
 	switch {
 	case nic != nil && nic.Primary && hasGateway(nic):
-		// The platform treats as primary the interface of the network the VM was created in, and any
+		// The platform treats as primary the interface of the VM's own network, and any
 		// interface that carries a gateway, and the list does not say which of the two this is. Nothing
 		// here may tell the user to remove the gateway of the VM's own interface.
-		return fmt.Sprintf("VM %d has interface %d in network %d, and the platform treats it as primary: network %d is the one the VM was created in, "+
+		return fmt.Sprintf("VM %d has interface %d in network %d, and the platform treats it as primary: network %d is the VM's own network, "+
 			"or the interface carries a default gateway. This resource does not manage a primary interface and the platform does not detach it. "+
 			"If network %d is the VM's own network, choose another network. If it is not, and the interface does not need to carry the gateway, "+
 			moveGatewayAdvice+". "+consoleGatewayNote+

@@ -34,7 +34,7 @@ resource "prodata_vm" "bootstrapped" {
 
   # The 30m create default covers the in-guest cloud-init run, including
   # slower Windows guests.
-  timeouts {
+  timeouts = {
     create = "30m"
   }
 }

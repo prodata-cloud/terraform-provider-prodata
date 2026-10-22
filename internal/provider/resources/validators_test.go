@@ -59,6 +59,44 @@ func TestIPv4Address_NamesTheAttributeAndTheValue(t *testing.T) {
 	wantInText(t, d.Detail(), "ip", `"nope"`)
 }
 
+// The private_ip of a VM must carry the validator too: an empty string in the config would otherwise be
+// planned as it is, the panel would pick an address all the same, and the apply would fail after the VM was made.
+func TestVmSchema_PrivateIPUsesIPv4Address(t *testing.T) {
+	var sresp resource.SchemaResponse
+	NewVmResource().Schema(context.Background(), resource.SchemaRequest{}, &sresp)
+	attr, ok := sresp.Schema.Attributes["private_ip"]
+	if !ok {
+		t.Fatal("private_ip missing from schema")
+	}
+	sa, ok := attr.(interface {
+		StringValidators() []validator.String
+	})
+	if !ok {
+		t.Fatalf("private_ip is %T, want a string attribute", attr)
+	}
+	for _, tc := range []struct {
+		name    string
+		value   types.String
+		wantErr bool
+	}{
+		{"an address", types.StringValue("192.168.0.9"), false},
+		{"not set", types.StringNull(), false},
+		{"not known yet", types.StringUnknown(), false},
+		{"empty", types.StringValue(""), true},
+		{"a name", types.StringValue("not-an-address"), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var vresp validator.StringResponse
+			for _, v := range sa.StringValidators() {
+				v.ValidateString(context.Background(), validator.StringRequest{Path: path.Root("private_ip"), ConfigValue: tc.value}, &vresp)
+			}
+			if got := vresp.Diagnostics.HasError(); got != tc.wantErr {
+				t.Errorf("HasError = %v, want %v (%v)", got, tc.wantErr, vresp.Diagnostics)
+			}
+		})
+	}
+}
+
 // The ip attribute must actually carry the validator — a unit test of the validator alone would
 // stay green if someone dropped it from the schema.
 func TestLocalNetworkAttachmentSchema_IPUsesIPv4Address(t *testing.T) {

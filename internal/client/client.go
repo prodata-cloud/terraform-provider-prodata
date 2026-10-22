@@ -1087,13 +1087,18 @@ func (c *Client) StartVm(ctx context.Context, id int64, opts *RequestOpts) error
 	return nil
 }
 
+// vmStatusPollInterval is how often WaitForVmStatus reads the status of the VM.
+const vmStatusPollInterval = 5 * time.Second
+
 // WaitForVmStatus polls the VM until it reaches targetStatus or timeout.
 // Tolerates up to 3 consecutive transient errors during polling.
 func (c *Client) WaitForVmStatus(ctx context.Context, vmID int64, targetStatus string, timeout time.Duration, opts *RequestOpts) error {
-	const (
-		pollInterval       = 5 * time.Second
-		maxConsecutiveErrs = 3
-	)
+	return c.WaitForVmStatusEvery(ctx, vmID, targetStatus, timeout, vmStatusPollInterval, opts)
+}
+
+// WaitForVmStatusEvery is WaitForVmStatus with the interval between the reads of the status given.
+func (c *Client) WaitForVmStatusEvery(ctx context.Context, vmID int64, targetStatus string, timeout, pollInterval time.Duration, opts *RequestOpts) error {
+	const maxConsecutiveErrs = 3
 
 	deadline := time.Now().Add(timeout)
 	consecutiveErrs := 0

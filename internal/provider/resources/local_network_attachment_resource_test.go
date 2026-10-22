@@ -1304,7 +1304,7 @@ func TestLocalNetworkAttachmentCreate_APrimaryInterfaceThatCarriesAGatewayIsNotC
 			[]string{"default gateway", "move the gateway", "No gateway"}},
 		{"one recorded", ptr("192.168.20.1"),
 			[]string{"VM 7 has interface 9071 in network 412, and the platform treats it as primary",
-				"network 412 is the one the VM was created in, or the interface carries a default gateway",
+				"network 412 is the VM's own network, or the interface carries a default gateway",
 				"This resource does not manage a primary interface and the platform does not detach it. " +
 					"If network 412 is the VM's own network, choose another network. " +
 					"If it is not, and the interface does not need to carry the gateway, " + lnaMoveGateway +
@@ -2228,19 +2228,32 @@ func TestLocalNetworkAttachmentImportState_SetsTheIdentityAndTheProviderScope(t 
 }
 
 func TestLocalNetworkAttachmentImportState_APrimaryInterfaceIsRefused(t *testing.T) {
-	// The advice on the gateway comes only with a gateway: the VM's own interface has none to move.
-	const refusal = "Interface 9071 is the primary interface of VM 7: the one in the network the VM was created in, or one with a default gateway. " +
-		"It cannot be detached, so it is not managed by this resource."
+	// The advice on the gateway comes only with a gateway: the VM's own interface has none to move. Without a gateway
+	// the interface is the VM's own, and the advice to move the VM is given as it is; with one it may be a second
+	// interface that only carries the gateway, and a VM with two of those is refused the move: the advice is given for
+	// the case that the interface is the VM's own, and says what the move needs.
+	const (
+		primary = "Interface 9071 is the primary interface of VM 7: the one in the VM's own network, or one with a default gateway. " +
+			"It cannot be detached, so it is not managed by this resource."
+		moveTheVM = "To put the VM itself in another network, do not detach its main interface: change local_network_id of its prodata_vm, " +
+			"which moves the interface in place (see \"Moving a VM to another network\" in the documentation of prodata_vm)."
+		moveTheVMIfOwn = "If it is the VM's own interface and the VM is to be in another network, do not detach it: change local_network_id of its " +
+			"prodata_vm, which moves the interface in place, as long as no other interface of the VM carries a gateway " +
+			"(see \"Moving a VM to another network\" in the documentation of prodata_vm)."
+	)
 	for _, tc := range []struct {
 		name    string
 		gateway *string
 		want    []string
 		wantNot []string
 	}{
-		{"none recorded", nil, []string{refusal}, []string{"move the gateway", "No gateway", "Import it then"}},
-		{"an empty one recorded", ptr(""), []string{refusal}, []string{"move the gateway", "No gateway", "Import it then"}},
+		{"none recorded", nil, []string{primary + " " + moveTheVM},
+			[]string{"move the gateway", "No gateway", "Import it then", "If it is the VM's own interface"}},
+		{"an empty one recorded", ptr(""), []string{primary + " " + moveTheVM},
+			[]string{"move the gateway", "No gateway", "Import it then", "If it is the VM's own interface"}},
 		{"one recorded", ptr("192.168.20.1"),
-			[]string{refusal + " If it is primary only because it carries the gateway of the VM, " + lnaMoveGateway + " Import it then."}, nil},
+			[]string{primary + " If it is primary only because it carries the gateway of the VM, " + lnaMoveGateway + " Import it then. " + moveTheVMIfOwn},
+			[]string{moveTheVM}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c, p := newNICPanel(t, "RUNNING")

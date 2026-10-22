@@ -13,6 +13,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework-timeouts/resource/timeouts"
 	"github.com/hashicorp/terraform-plugin-framework-validators/int64validator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
+	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -33,6 +34,28 @@ var (
 
 type VmResource struct {
 	client *client.Client
+
+	// poll, moveOptions and settledAsk replace the pace of the waits for a VM, of the repeats of a
+	// move and the bound of the question settledMove asks again in tests; zero values are the real ones.
+	poll        time.Duration
+	moveOptions []client.MoveOption
+	settledAsk  time.Duration
+}
+
+// pollInterval is the interval between VM status reads while a VM is stopped and started.
+func (r *VmResource) pollInterval() time.Duration {
+	if r.poll > 0 {
+		return r.poll
+	}
+	return vmRestartPollInterval
+}
+
+// settledAskTime is how long settledMove waits for the answer to the question it asks again.
+func (r *VmResource) settledAskTime() time.Duration {
+	if r.settledAsk > 0 {
+		return r.settledAsk
+	}
+	return vmSettledAskTime
 }
 
 type VmResourceModel struct {
@@ -166,19 +189,24 @@ func (r *VmResource) Schema(ctx context.Context, req resource.SchemaRequest, res
 				Required:            true,
 			},
 			"local_network_id": schema.Int64Attribute{
-				MarkdownDescription: "The ID of the local network to attach the VM to.",
-				Required:            true,
-				PlanModifiers: []planmodifier.Int64{
-					int64planmodifier.RequiresReplace(),
-				},
+				MarkdownDescription: "The ID of the local network of the VM's main network interface. " +
+					"Changing it moves the interface to another network in place: the VM is not recreated, " +
+					"a running VM is stopped (powered off) and started again, and the VM gets a new address " +
+					"(see `private_ip`). See \"Moving a VM to another network\" below.",
+				Required: true,
 			},
 			"private_ip": schema.StringAttribute{
-				MarkdownDescription: "The private IP address for the virtual machine. If not specified, an available IP will be auto-assigned from the local network.",
-				Optional:            true,
-				Computed:            true,
+				MarkdownDescription: "The private IP address of the virtual machine in its local network. If not " +
+					"specified, an available IP is auto-assigned from the local network. Changing it together with " +
+					"`local_network_id` sets the address in the new network; changing it alone forces a new resource.",
+				Optional: true,
+				Computed: true,
+				Validators: []validator.String{
+					IPv4Address(),
+				},
 				PlanModifiers: []planmodifier.String{
-					stringplanmodifier.RequiresReplace(),
-					stringplanmodifier.UseStateForUnknown(),
+					privateIPReplace(),
+					privateIPFromState(),
 				},
 			},
 			"public_ip_id": schema.Int64Attribute{
@@ -244,6 +272,7 @@ func (r *VmResource) Schema(ctx context.Context, req resource.SchemaRequest, res
 			},
 			"timeouts": timeouts.Attributes(ctx, timeouts.Opts{
 				Create: true,
+				Update: true,
 			}),
 		},
 	}
@@ -306,30 +335,50 @@ func (r *VmResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequ
 	}
 
 	// Determine whether ANY attribute forces replacement, to warn about the
-	// create_before_destroy + same-name uniqueness constraint. The image/network/etc.
-	// replacements are driven by their own RequiresReplace plan modifiers; we mirror the
-	// readable ones here (write-only password/ssh are null in state post-import, so are
-	// excluded) plus the user_data signal computed above.
+	// create_before_destroy + same-name uniqueness constraint. The image/etc. replacements are
+	// driven by their own RequiresReplace plan modifiers; we mirror the readable ones here
+	// (write-only password/ssh are null in state post-import, so are excluded) plus the user_data
+	// signal computed above. A new private_ip replaces the VM only while the network stays: with a
+	// new network it is part of the move (privateIPReplaces is what the attribute's modifier
+	// decides on, too).
 	requiresReplace := userDataReplace ||
 		!stateData.ImageID.Equal(planData.ImageID) ||
-		!stateData.LocalNetworkID.Equal(planData.LocalNetworkID) ||
-		!stateData.PrivateIP.Equal(planData.PrivateIP) ||
+		privateIPReplaces(&stateData, &planData) ||
 		!stateData.Region.Equal(planData.Region) ||
 		!stateData.ProjectTag.Equal(planData.ProjectTag) ||
 		!stateData.Description.Equal(planData.Description) ||
 		(!stateData.PublicIPID.IsNull() && !stateData.PublicIPID.Equal(planData.PublicIPID))
-	if !requiresReplace {
+	if requiresReplace {
+		// Warn that create_before_destroy will fail due to VM name uniqueness constraint.
+		if stateData.Name.Equal(planData.Name) {
+			resp.Diagnostics.AddWarning(
+				"Resource replacement with same name",
+				"This VM is being replaced but the name is unchanged. If you are using "+
+					"lifecycle { create_before_destroy = true }, the existing VM will be automatically "+
+					"renamed to allow the new VM to be created with the original name.",
+			)
+		}
 		return
 	}
 
-	// Warn that create_before_destroy will fail due to VM name uniqueness constraint.
-	if stateData.Name.Equal(planData.Name) {
-		resp.Diagnostics.AddWarning(
-			"Resource replacement with same name",
-			"This VM is being replaced but the name is unchanged. If you are using "+
-				"lifecycle { create_before_destroy = true }, the existing VM will be automatically "+
-				"renamed to allow the new VM to be created with the original name.",
-		)
+	// An update in place. A change of the network is a move of the main interface, which stops a
+	// running VM: this warning is the only place the user sees it before apply.
+	move := networkChangeOf(stateData.LocalNetworkID, planData.LocalNetworkID)
+	if move.moves() {
+		summary, detail := moveWarning(move)
+		resp.Diagnostics.AddWarning(summary, detail)
+		resp.Diagnostics.Append(checkMoveTimeout(ctx, planData.Timeouts)...)
+	}
+
+	// Whatever stops and starts the VM leaves its status for apply to say: the plan is made from a
+	// state that may be behind the VM, and a start that fails would otherwise contradict a status
+	// the plan promised.
+	if move.moves() ||
+		!stateData.CPUCores.Equal(planData.CPUCores) ||
+		!stateData.RAM.Equal(planData.RAM) ||
+		!stateData.DiskSize.Equal(planData.DiskSize) ||
+		!stateData.DiskType.Equal(planData.DiskType) {
+		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("status"), types.StringUnknown())...)
 	}
 }
 
@@ -807,6 +856,16 @@ func (r *VmResource) Update(ctx context.Context, req resource.UpdateRequest, res
 		return
 	}
 
+	// timeouts.update is the ceiling of the whole of Update: the rename, the resize and the move of
+	// the network.
+	updateTimeout, diags := plan.Timeouts.Update(ctx, vmDefaultUpdateTime)
+	resp.Diagnostics.Append(diags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, updateTimeout)
+	defer cancel()
+
 	opts := &client.RequestOpts{}
 	if !state.Region.IsNull() && !state.Region.IsUnknown() {
 		opts.Region = state.Region.ValueString()
@@ -816,6 +875,34 @@ func (r *VmResource) Update(ctx context.Context, req resource.UpdateRequest, res
 	}
 
 	vmID := state.ID.ValueInt64()
+
+	cpuChanged := !state.CPUCores.Equal(plan.CPUCores)
+	ramChanged := !state.RAM.Equal(plan.RAM)
+	diskSizeChanged := !state.DiskSize.Equal(plan.DiskSize)
+	diskTypeChanged := !state.DiskType.Equal(plan.DiskType)
+
+	// Validate disk size before anything is done to the VM
+	if diskSizeChanged && plan.DiskSize.ValueInt64() < state.DiskSize.ValueInt64() {
+		resp.Diagnostics.AddError(
+			"Invalid Disk Size",
+			fmt.Sprintf("Disk size can only be increased. Current: %d GB, requested: %d GB.",
+				state.DiskSize.ValueInt64(), plan.DiskSize.ValueInt64()),
+		)
+		return
+	}
+
+	// A move of the main network is checked by the panel before the VM is touched, the rename
+	// included: a refusal leaves everything as it was.
+	var forecast *client.MovedPrimaryLocalNetwork
+	if wantsMove(&state, &plan) {
+		var err error
+		forecast, err = r.client.MovePrimaryLocalNetwork(ctx, vmID, r.moveRequest(&plan, true), opts)
+		if err != nil {
+			summary, detail := moveRefusal(err, plan.LocalNetworkID.ValueInt64())
+			resp.Diagnostics.AddError(summary, detail)
+			return
+		}
+	}
 
 	// Rename VM if name changed
 	if !state.Name.Equal(plan.Name) {
@@ -834,116 +921,63 @@ func (r *VmResource) Update(ctx context.Context, req resource.UpdateRequest, res
 		}
 	}
 
-	cpuChanged := !state.CPUCores.Equal(plan.CPUCores)
-	ramChanged := !state.RAM.Equal(plan.RAM)
-	diskSizeChanged := !state.DiskSize.Equal(plan.DiskSize)
-	diskTypeChanged := !state.DiskType.Equal(plan.DiskType)
-
-	// Validate disk size before stopping the VM
-	if diskSizeChanged && plan.DiskSize.ValueInt64() < state.DiskSize.ValueInt64() {
-		resp.Diagnostics.AddError(
-			"Invalid Disk Size",
-			fmt.Sprintf("Disk size can only be increased. Current: %d GB, requested: %d GB.",
-				state.DiskSize.ValueInt64(), plan.DiskSize.ValueInt64()),
-		)
-		return
-	}
-
 	needsUpdate := cpuChanged || ramChanged || diskSizeChanged || diskTypeChanged
 
-	if needsUpdate {
-		// Stop once before all updates
-		needsRestart, err := r.stopIfRunning(ctx, vmID, opts)
-		if err != nil {
-			resp.Diagnostics.AddError("Unable to Stop VM for update", err.Error())
+	// moved is the panel's answer to a move that was made: the guest may have to be configured.
+	var moved *client.MovedPrimaryLocalNetwork
+	switch {
+	case forecast != nil && (forecast.Changed || forecast.PendingRecovery):
+		// The main interface moves, and the VM has to be stopped for it. What else changes with it
+		// is done in the same stop. A VM with an earlier move that was never settled has no forecast
+		// (the panel answers changed=false and pendingRecovery=true): whether it has to move is
+		// found out by the move itself, which settles the earlier one first, and it needs the VM
+		// stopped if it goes on.
+		moved = r.updateWithMove(ctx, &resp.Diagnostics, vmID, &state, &plan, opts, forecast)
+	case forecast != nil:
+		// The interface is in the network already and only the panel's record of it is off: the
+		// record is put right, and the VM is not stopped for that.
+		if _, err := r.movePrimaryNetwork(ctx, vmID, &plan, opts, forecast); err != nil {
+			summary, detail := moveRefusal(err, plan.LocalNetworkID.ValueInt64())
+			resp.Diagnostics.AddError(summary, detail)
 			return
 		}
-
-		// Apply CPU/RAM update
-		if cpuChanged || ramChanged {
-			tflog.Info(ctx, "Updating VM resources", map[string]any{
-				"id":      vmID,
-				"old_cpu": state.CPUCores.ValueInt64(),
-				"new_cpu": plan.CPUCores.ValueInt64(),
-				"old_ram": state.RAM.ValueInt64(),
-				"new_ram": plan.RAM.ValueInt64(),
-			})
-
-			updateReq := client.UpdateVmResourcesRequest{
-				CPUCores: plan.CPUCores.ValueInt64(),
-				RAM:      plan.RAM.ValueInt64(),
-			}
-
-			if err := r.client.UpdateVmResources(ctx, vmID, updateReq, opts); err != nil {
-				if needsRestart {
-					tflog.Warn(ctx, "Resource update failed, attempting to restart VM", map[string]any{"id": vmID})
-					_ = r.client.StartVm(ctx, vmID, opts)
-				}
-				resp.Diagnostics.AddError("Unable to Update VM Resources", err.Error())
-				return
-			}
-
-			tflog.Info(ctx, "VM resources updated", map[string]any{
-				"id":        vmID,
-				"cpu_cores": plan.CPUCores.ValueInt64(),
-				"ram":       plan.RAM.ValueInt64(),
-			})
+		if needsUpdate {
+			resp.Diagnostics.Append(r.updateWithoutMove(ctx, vmID, &state, &plan, opts)...)
 		}
-
-		// Apply disk update
-		if diskSizeChanged || diskTypeChanged {
-			tflog.Info(ctx, "Updating VM disk", map[string]any{
-				"id":            vmID,
-				"old_disk_size": state.DiskSize.ValueInt64(),
-				"new_disk_size": plan.DiskSize.ValueInt64(),
-				"old_disk_type": state.DiskType.ValueString(),
-				"new_disk_type": plan.DiskType.ValueString(),
-			})
-
-			updateReq := client.UpdateVmDiskRequest{}
-			if diskSizeChanged {
-				size := plan.DiskSize.ValueInt64()
-				updateReq.DiskSize = &size
-			}
-			if diskTypeChanged {
-				dt := plan.DiskType.ValueString()
-				updateReq.DiskType = &dt
-			}
-
-			if err := r.client.UpdateVmDisk(ctx, vmID, updateReq, opts); err != nil {
-				if needsRestart {
-					tflog.Warn(ctx, "Disk update failed, attempting to restart VM", map[string]any{"id": vmID})
-					_ = r.client.StartVm(ctx, vmID, opts)
-				}
-				resp.Diagnostics.AddError("Unable to Update VM Disk", err.Error())
-				return
-			}
-
-			tflog.Info(ctx, "VM disk updated", map[string]any{
-				"id":        vmID,
-				"disk_size": plan.DiskSize.ValueInt64(),
-				"disk_type": plan.DiskType.ValueString(),
-			})
-		}
-
-		// Start once after all updates
-		if needsRestart {
-			if err := r.startAndWait(ctx, vmID, opts); err != nil {
-				resp.Diagnostics.AddWarning(
-					"VM updated but not restarted",
-					fmt.Sprintf("Changes were applied, but the VM failed to restart: %s", err.Error()),
-				)
-			}
-		}
+	case needsUpdate:
+		resp.Diagnostics.Append(r.updateWithoutMove(ctx, vmID, &state, &plan, opts)...)
+	}
+	if resp.Diagnostics.HasError() {
+		return
 	}
 
 	// Read back the current VM state. Use GetVmStatus (not GetVm): the /status endpoint
 	// includes VMs in ERROR status, so a VM that errored mid-update is still read and its
 	// partially-applied state persisted, instead of failing the read and losing state.
-	vm, err := r.client.GetVmStatus(ctx, state.ID.ValueInt64(), opts)
+	readCtx, cancelRead := readBackContext(ctx)
+	defer cancelRead()
+	vm, err := r.client.GetVmStatus(readCtx, state.ID.ValueInt64(), opts)
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to Read Virtual Machine after update", err.Error())
 		return
+	}
+
+	// The plan promised the network; Terraform would report a different one as an inconsistent
+	// result, which says nothing of what happened.
+	if forecast != nil && vm.LocalNetworkID != plan.LocalNetworkID.ValueInt64() {
+		resp.Diagnostics.AddError(
+			"The virtual machine is not in the network it was moved to",
+			fmt.Sprintf("The panel accepted the move of VM %d to network %d, but it reports the VM in network %d. "+
+				"Run terraform plan to see where the VM is, and apply again. If it happens again, contact support.",
+				vmID, plan.LocalNetworkID.ValueInt64(), vm.LocalNetworkID),
+		)
+		return
+	}
+	// moved comes only from a move that was due: the panel says changed=false to a request that is
+	// repeated after a reply that was lost, and the VM was moved all the same.
+	if moved != nil && moved.RequiresGuestConfiguration {
+		summary, detail := guestConfigurationWarning(moved)
+		resp.Diagnostics.AddWarning(summary, detail)
 	}
 
 	plan.ID = state.ID
@@ -998,6 +1032,123 @@ func (r *VmResource) Update(ctx context.Context, req resource.UpdateRequest, res
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
+// updateWithoutMove changes cpu, ram and disk of a VM whose network stays: a running VM is stopped
+// once for all of it and started once afterwards. The ceiling of the update (timeouts.update), or an
+// interruption, can end ctx at any step: a VM that the update stopped is started on a context of
+// its own (see reserveContext), however the update ended.
+func (r *VmResource) updateWithoutMove(ctx context.Context, vmID int64, state, plan *VmResourceModel, opts *client.RequestOpts) diag.Diagnostics {
+	var diags diag.Diagnostics
+
+	// Stop once before all updates
+	needsRestart, err := r.stopIfRunning(ctx, vmID, opts)
+	if err != nil {
+		diags.AddError("Unable to Stop VM for update", err.Error())
+		return diags
+	}
+
+	if failed := r.updateStopped(ctx, vmID, state, plan, opts); failed != nil {
+		detail := failed.err.Error()
+		if needsRestart {
+			tflog.Warn(ctx, "VM update failed, attempting to restart VM", map[string]any{"id": vmID, "step": failed.summary})
+			startCtx, cancel := reserveContext(ctx)
+			defer cancel()
+			if err := r.startUpdatedVM(startCtx, vmID, opts); err != nil {
+				detail += fmt.Sprintf(" The VM could not be started again: %s", err)
+			} else {
+				detail += " The VM was started again."
+			}
+		}
+		diags.AddError(failed.summary, detail)
+		return diags
+	}
+
+	// Start once after all updates
+	if needsRestart {
+		startCtx, cancel := reserveContext(ctx)
+		defer cancel()
+		if err := r.startAndWait(startCtx, vmID, opts); err != nil {
+			diags.AddWarning(
+				"VM updated but not restarted",
+				fmt.Sprintf("Changes were applied, but the VM failed to restart: %s", err.Error()),
+			)
+		}
+	}
+	return diags
+}
+
+// updateStopped applies the changes of cpu, ram and disk that the plan asks for to a VM that is
+// stopped, in this order. It does not start the VM, whatever happens.
+func (r *VmResource) updateStopped(ctx context.Context, vmID int64, state, plan *VmResourceModel, opts *client.RequestOpts) *updateStepError {
+	if !state.CPUCores.Equal(plan.CPUCores) || !state.RAM.Equal(plan.RAM) {
+		if err := r.updateResources(ctx, vmID, state, plan, opts); err != nil {
+			return &updateStepError{"Unable to Update VM Resources", err}
+		}
+	}
+	if !state.DiskSize.Equal(plan.DiskSize) || !state.DiskType.Equal(plan.DiskType) {
+		if err := r.updateDisk(ctx, vmID, state, plan, opts); err != nil {
+			return &updateStepError{"Unable to Update VM Disk", err}
+		}
+	}
+	return nil
+}
+
+// updateResources applies the new cpu and ram to a stopped VM.
+func (r *VmResource) updateResources(ctx context.Context, vmID int64, state, plan *VmResourceModel, opts *client.RequestOpts) error {
+	tflog.Info(ctx, "Updating VM resources", map[string]any{
+		"id":      vmID,
+		"old_cpu": state.CPUCores.ValueInt64(),
+		"new_cpu": plan.CPUCores.ValueInt64(),
+		"old_ram": state.RAM.ValueInt64(),
+		"new_ram": plan.RAM.ValueInt64(),
+	})
+
+	updateReq := client.UpdateVmResourcesRequest{
+		CPUCores: plan.CPUCores.ValueInt64(),
+		RAM:      plan.RAM.ValueInt64(),
+	}
+	if err := r.client.UpdateVmResources(ctx, vmID, updateReq, opts); err != nil {
+		return err
+	}
+
+	tflog.Info(ctx, "VM resources updated", map[string]any{
+		"id":        vmID,
+		"cpu_cores": plan.CPUCores.ValueInt64(),
+		"ram":       plan.RAM.ValueInt64(),
+	})
+	return nil
+}
+
+// updateDisk applies the new disk size and type to a stopped VM.
+func (r *VmResource) updateDisk(ctx context.Context, vmID int64, state, plan *VmResourceModel, opts *client.RequestOpts) error {
+	tflog.Info(ctx, "Updating VM disk", map[string]any{
+		"id":            vmID,
+		"old_disk_size": state.DiskSize.ValueInt64(),
+		"new_disk_size": plan.DiskSize.ValueInt64(),
+		"old_disk_type": state.DiskType.ValueString(),
+		"new_disk_type": plan.DiskType.ValueString(),
+	})
+
+	updateReq := client.UpdateVmDiskRequest{}
+	if !state.DiskSize.Equal(plan.DiskSize) {
+		size := plan.DiskSize.ValueInt64()
+		updateReq.DiskSize = &size
+	}
+	if !state.DiskType.Equal(plan.DiskType) {
+		dt := plan.DiskType.ValueString()
+		updateReq.DiskType = &dt
+	}
+	if err := r.client.UpdateVmDisk(ctx, vmID, updateReq, opts); err != nil {
+		return err
+	}
+
+	tflog.Info(ctx, "VM disk updated", map[string]any{
+		"id":        vmID,
+		"disk_size": plan.DiskSize.ValueInt64(),
+		"disk_type": plan.DiskType.ValueString(),
+	})
+	return nil
+}
+
 func (r *VmResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
 	id, err := strconv.ParseInt(req.ID, 10, 64)
 	if err != nil {
@@ -1049,7 +1200,11 @@ func (r *VmResource) Delete(ctx context.Context, req resource.DeleteRequest, res
 }
 
 // stopIfRunning stops the VM if it is RUNNING and waits for STOPPED state.
-// Returns true if the VM was stopped (and should be restarted after the operation).
+// Returns true if the VM was stopped (and should be restarted after the operation). When the update
+// goes no further and the VM is off or on its way to it because of this stop, as it may be after a
+// stop whose answer says nothing final, after a wait that fails and after ctx ends, nothing else was
+// done to the VM: it is started again, and the error says what became of it. A stop that the panel
+// refuses for good leaves the VM as it was, and the error is the refusal.
 func (r *VmResource) stopIfRunning(ctx context.Context, vmID int64, opts *client.RequestOpts) (bool, error) {
 	// GetVmStatus (not GetVm) so an ERROR-status VM is still readable here and treated
 	// as not-running, rather than failing the read on a VM the plain endpoint omits.
@@ -1064,19 +1219,54 @@ func (r *VmResource) stopIfRunning(ctx context.Context, vmID int64, opts *client
 	tflog.Info(ctx, "VM is running, stopping before update", map[string]any{"id": vmID})
 
 	if err := r.client.StopVm(ctx, vmID, opts); err != nil {
-		return false, fmt.Errorf("stop VM: %w", err)
+		stopErr := fmt.Errorf("stop VM: %w", err)
+		if !inconclusive(err) {
+			return false, stopErr
+		}
+		// Carried out, perhaps, although the answer says nothing final or did not come. A call that
+		// ctx cut short fails that way too (it is no answer of the panel); an answer that is final is
+		// the panel's last word, whether or not ctx ended as it was read.
+		return false, r.startedAgainAfter(ctx, vmID, opts, stopErr)
 	}
-	if err := r.client.WaitForVmStatus(ctx, vmID, "STOPPED", 5*time.Minute, opts); err != nil {
-		return false, err
+	if err := r.client.WaitForVmStatusEvery(ctx, vmID, "STOPPED", 5*time.Minute, r.pollInterval(), opts); err != nil {
+		return false, r.startedAgainAfter(ctx, vmID, opts, err)
 	}
 	return true, nil
+}
+
+// startedAgainAfter adds to err what became of a VM that a stop of ours has stopped, or may have
+// stopped, when the update goes no further: the stop that was accepted goes on after the wait for it
+// is given up, and one that failed without saying may have been carried out. The VM is looked at and
+// started again on a context of its own (see reserveContext). Neither kind of stop shows in the
+// status at once, so a VM that reads RUNNING is looked at for as long as a lag of the panel's view
+// can last before it is taken for up (see startAgain).
+func (r *VmResource) startedAgainAfter(ctx context.Context, vmID int64, opts *client.RequestOpts, err error) error {
+	return fmt.Errorf("%w; %s", err, startAfterInterruption(ctx, r.client, vmID, opts, r.pollInterval(), true))
 }
 
 // startAndWait starts the VM and waits for RUNNING state.
 func (r *VmResource) startAndWait(ctx context.Context, vmID int64, opts *client.RequestOpts) error {
 	tflog.Info(ctx, "Restarting VM after update", map[string]any{"id": vmID})
-	if err := r.client.StartVm(ctx, vmID, opts); err != nil {
+	if err := r.startUpdatedVM(ctx, vmID, opts); err != nil {
 		return fmt.Errorf("start VM: %w", err)
 	}
-	return r.client.WaitForVmStatus(ctx, vmID, "RUNNING", 5*time.Minute, opts)
+	return r.client.WaitForVmStatusEvery(ctx, vmID, "RUNNING", 5*time.Minute, r.pollInterval(), opts)
+}
+
+// startUpdatedVM starts a VM that the update stopped. An answer that says nothing final (see
+// inconclusive) does not end it: the start may have been carried out although its reply did not come,
+// and the panel may still be busy with the step that the VM was stopped for, as it is with a step that
+// the ceiling of the update cut short. The VM is then looked at and started until it is up, for as long
+// as a start after an interruption of the restart cycle is (see startAgain). An answer that is final,
+// such as a refusal, is the result at once. ctx is one the VM can still be started on (see
+// reserveContext).
+func (r *VmResource) startUpdatedVM(ctx context.Context, vmID int64, opts *client.RequestOpts) error {
+	err := r.client.StartVm(ctx, vmID, opts)
+	if err == nil || !inconclusive(err) {
+		return err
+	}
+	if up, said := startAgain(ctx, r.client, vmID, opts, r.pollInterval(), false); !up {
+		return fmt.Errorf("%w; %s", err, said)
+	}
+	return nil
 }

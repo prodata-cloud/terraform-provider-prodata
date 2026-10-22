@@ -117,7 +117,7 @@ func TestAccLocalNetworkAttachment_rebootAfterAttach(t *testing.T) {
 			{
 				Config: testAccLocalNetworkAttachmentConfig(name, imageID, "b", "  reboot_after_attach = true\n"),
 				Check: resource.ComposeAggregateTestCheckFunc(
-					testAccCheckVMStatus("prodata_vm.test", "RUNNING"),
+					testAccCheckVMRunning("prodata_vm.test"),
 					testAccCheckLocalNetworkAttachmentListed(resourceName, "prodata_local_network.b"),
 				),
 				ConfigPlanChecks: resource.ConfigPlanChecks{
@@ -269,7 +269,8 @@ func testAccCheckVMStaysInNetwork(vmAddress, networkAddress string) resource.Tes
 	}
 }
 
-func testAccCheckVMStatus(vmAddress, want string) resource.TestCheckFunc {
+// testAccCheckVMRunning confirms the panel reports the VM RUNNING.
+func testAccCheckVMRunning(vmAddress string) resource.TestCheckFunc {
 	return func(s *terraform.State) error {
 		vm, attrs, err := accIDs(s, vmAddress, "id")
 		if err != nil {
@@ -284,8 +285,8 @@ func testAccCheckVMStatus(vmAddress, want string) resource.TestCheckFunc {
 		if err != nil {
 			return fmt.Errorf("read status of VM %d: %w", vm["id"], err)
 		}
-		if got.Status != want {
-			return fmt.Errorf("VM %d is %s, want %s", vm["id"], got.Status, want)
+		if got.Status != "RUNNING" {
+			return fmt.Errorf("VM %d is %s, want RUNNING", vm["id"], got.Status)
 		}
 		return nil
 	}
