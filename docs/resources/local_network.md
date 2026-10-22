@@ -9,7 +9,7 @@ description: |-
 
 Manages a ProData local network.
 
-~> **Note:** Only the `name` attribute can be updated in-place. Changing `cidr`, `gateway`, `region`, or `project_tag` will force the creation of a new local network (destroy and recreate).
+~> **Note:** Only the `name` attribute can be updated in-place. Changing `cidr`, `gateway`, `region`, or `project_tag` will force the creation of a new local network (destroy and recreate). The platform refuses to delete a network that has VMs in it, so move the VMs to another network first: see [Moving a VM to another network](vm.md#moving-a-vm-to-another-network).
 
 ## Example Usage
 

@@ -40,6 +40,9 @@ type vmPanel struct {
 	refusalAnswer map[string]answer
 	// broken maps an operation to an error it always answers with instead: its HTTP status and code.
 	broken map[string][2]int
+	// brokenAfter maps an operation to an error it answers with instead once the panel has been asked
+	// for it a number of times: the calls before that are served as they would be.
+	brokenAfter map[string]brokenFrom
 	// lostReplies maps an operation ("stop", "start") to the number of calls the panel carries out
 	// and then answers with 627 all the same, as it does when a hop behind it times out or when it
 	// fails after the hypervisor call, or with lostAnswer when that has an entry for the operation;
@@ -63,11 +66,24 @@ type vmPanel struct {
 
 	// The VM's status at the moment a stop, a start or an attach was accepted.
 	statusAtStop, statusAtStart, statusAtAttach string
+
+	// extra serves the requests the power and attach calls do not cover, for the tests of more than
+	// the restart: it answers and returns true, or returns false for a request it does not know. It
+	// runs with the panel's lock held. bodyExtra adds fields to the VM that the status reads report.
+	extra     func(w http.ResponseWriter, r *http.Request) bool
+	bodyExtra func(body map[string]any)
 }
 
 // answer is a failure the panel answers with: an HTTP status and a panel error code. Code 0 is a
 // bare gateway page with no panel envelope in it, and status 0 a connection that is dropped.
 type answer struct{ status, code int }
+
+// brokenFrom is the failure an operation gets from its call number calls+1 on.
+type brokenFrom struct {
+	calls  int
+	status int
+	code   int
+}
 
 var (
 	panelRefusal   = answer{http.StatusInternalServerError, 627}
@@ -92,6 +108,7 @@ func newVMPanel(t *testing.T, status string) (*client.Client, *vmPanel) {
 		refusals:      map[string]int{},
 		refusalAnswer: map[string]answer{},
 		broken:        map[string][2]int{},
+		brokenAfter:   map[string]brokenFrom{},
 		lostReplies:   map[string]int{},
 		lostAnswer:    map[string]answer{},
 		lostPending:   map[string]bool{},
@@ -180,6 +197,9 @@ func (p *vmPanel) serve(t *testing.T, w http.ResponseWriter, r *http.Request) {
 		p.ok(w, nil)
 
 	default:
+		if p.extra != nil && p.extra(w, r) {
+			return
+		}
 		t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
 		http.NotFound(w, r)
 	}
@@ -189,6 +209,10 @@ func (p *vmPanel) serve(t *testing.T, w http.ResponseWriter, r *http.Request) {
 func (p *vmPanel) refused(w http.ResponseWriter, op string) bool {
 	if e, ok := p.broken[op]; ok {
 		p.fail(w, e[0], e[1])
+		return true
+	}
+	if e, ok := p.brokenAfter[op]; ok && p.callsMade(op) > e.calls {
+		p.fail(w, e.status, e.code)
 		return true
 	}
 	if n := p.refusals[op]; n != 0 {
@@ -254,6 +278,9 @@ func (p *vmPanel) vmBody() map[string]any {
 	if p.publicIPID != 0 {
 		body["publicIp"], body["publicIpId"] = vmPanelAddress, p.publicIPID
 	}
+	if p.bodyExtra != nil {
+		p.bodyExtra(body)
+	}
 	return body
 }
 
@@ -307,6 +334,19 @@ func (p *vmPanel) posts() []string {
 	return out
 }
 
+// statusReads is how many times the panel was asked for the status of the VM.
+func (p *vmPanel) statusReads() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	n := 0
+	for _, request := range p.requests {
+		if request == "GET /api/v2/vms/7/status" {
+			n++
+		}
+	}
+	return n
+}
+
 func (p *vmPanel) setScript(status string, script ...string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -352,6 +392,27 @@ func (p *vmPanel) breakCall(op string, httpStatus, code int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.broken[op] = [2]int{httpStatus, code}
+}
+
+// breakCallsAfter lets the first n calls of op ("stop" or "start") be served as they would be and
+// answers every later one, before it is carried out, with the status and code given: the panel's last
+// word on a call that came after one that was carried out.
+func (p *vmPanel) breakCallsAfter(op string, n, httpStatus, code int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.brokenAfter[op] = brokenFrom{calls: n, status: httpStatus, code: code}
+}
+
+// callsMade is how many calls of op ("stop" or "start") the panel has been asked for, the one being
+// served included. The panel's lock must be held.
+func (p *vmPanel) callsMade(op string) int {
+	n := 0
+	for _, request := range p.requests {
+		if request == "POST /api/v2/vms/7/"+op {
+			n++
+		}
+	}
+	return n
 }
 
 // failNextReads makes the next n status reads fail.
@@ -1064,6 +1125,20 @@ func TestRestartRunningVM_StartThatDoesNotTakeHoldFailsWithoutWaitingForTheDeadl
 	_, err := p.restartWithin(t, c, 5*time.Second)
 	if err == nil || !strings.Contains(err.Error(), "STOPPED again after it was seen starting") || errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err = %v, want the start that did not take hold, not a timeout", err)
+	}
+	wantCalls(t, p.posts(), []string{"stop", "start"})
+}
+
+// The limit is the number of reads of STOPPED in a row that ends the wait, not one more: a start that
+// has read STOPPED that many times is called failed, though the next read would show RUNNING. One
+// fewer is tolerated (see the test below), so the two pin the boundary.
+func TestRestartRunningVM_AStartThatReadsStoppedTheLimitInARowDidNotTakeHold(t *testing.T) {
+	c, p := newVMPanel(t, "RUNNING")
+	p.setSteps(nil, append(slices.Repeat([]string{"STOPPED"}, vmRestartMaxStoppedPolls), "RUNNING"))
+
+	cycled, err := p.restartWithin(t, c, 5*time.Second)
+	if err == nil || !strings.Contains(err.Error(), "the start did not take hold") {
+		t.Fatalf("restartRunningVM = %v, %v; want the start that did not take hold", cycled, err)
 	}
 	wantCalls(t, p.posts(), []string{"stop", "start"})
 }

@@ -22,8 +22,8 @@ type VmLocalNetwork struct {
 	IP          *string `json:"ip"`
 	MAC         *string `json:"mac"`
 	Gateway     *string `json:"gateway"`
-	// Primary marks an interface that cannot be detached through the API: the one in the network
-	// the VM was created in, and any interface with a gateway.
+	// Primary marks an interface that cannot be detached through the API: the one in the VM's own
+	// network (the network of its main interface), and any interface with a gateway.
 	Primary bool `json:"primary"`
 }
 
