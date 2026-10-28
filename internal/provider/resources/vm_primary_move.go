@@ -260,7 +260,7 @@ func wantsMove(state, plan *VmResourceModel) bool {
 // restartRunningVMWith and the work is done in its hook, with the VM stopped: cpu and ram, the
 // disk, the move (see runMove). It returns the answer of the panel to the move, and nil when the VM
 // was not moved: diags then says why.
-func (r *VmResource) updateWithMove(ctx context.Context, diags *diag.Diagnostics, vmID int64, state, plan *VmResourceModel, opts *client.RequestOpts, forecast *client.MovedPrimaryLocalNetwork) *client.MovedPrimaryLocalNetwork {
+func (r *VmResource) updateWithMove(ctx context.Context, diags *diag.Diagnostics, vmID int64, state, plan *VmResourceModel, opts *client.RequestOpts, forecast *client.MovedPrimaryLocalNetwork, restartPending *bool) *client.MovedPrimaryLocalNetwork {
 	var work moveOutcome
 	cycle, err := restartRunningVMWith(ctx, r.client, vmID, opts, r.pollInterval(), func(hookCtx context.Context) error {
 		return r.runMove(hookCtx, vmID, state, plan, opts, forecast, &work)
@@ -287,6 +287,9 @@ func (r *VmResource) updateWithMove(ctx context.Context, diags *diag.Diagnostics
 		detail := failed.err.Error()
 		if err != nil {
 			detail += fmt.Sprintf(" The VM could not be started again: %s", err)
+			if managedDNSChanged(state.DNS, plan.DNS) {
+				*restartPending = true
+			}
 		} else {
 			detail += " The VM was started again."
 		}
@@ -295,6 +298,11 @@ func (r *VmResource) updateWithMove(ctx context.Context, diags *diag.Diagnostics
 
 	case cycle.hookRan:
 		if err != nil {
+			if managedDNSChanged(state.DNS, plan.DNS) {
+				*restartPending = true
+				diags.AddError("VM updated but not restarted", fmt.Sprintf("Changes were applied, but the VM failed to restart: %s. The next apply will retry the restart.", err))
+				return work.moved
+			}
 			diags.AddWarning(
 				"VM updated but not restarted",
 				fmt.Sprintf("Changes were applied, but the VM failed to restart: %s", err.Error()),

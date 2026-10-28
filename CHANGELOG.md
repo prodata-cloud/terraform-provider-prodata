@@ -4,6 +4,17 @@ All notable changes to this provider are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `prodata_vm_gateway` manages a VM's IPv4 default gateway on a selected local interface, with conditional deletion tied to the last managed gateway and interface. A route can move from a public interface, and a running VM is powered off and started again.
+- `prodata_vm.dns` optionally manages one to four IPv4 nameservers at creation and on update. Omitting it leaves DNS under platform control.
+
+### Changed
+
+- `prodata_vm`: after deleting a VM, the provider verifies its absence from the panel and keeps Terraform state if deletion cannot be confirmed.
+
 ## [0.30.0] - Unreleased
 
 ### Changed

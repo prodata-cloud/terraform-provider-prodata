@@ -17,6 +17,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
@@ -59,25 +60,28 @@ func (r *VmResource) settledAskTime() time.Duration {
 }
 
 type VmResourceModel struct {
-	ID             types.Int64  `tfsdk:"id"`
-	Guid           types.String `tfsdk:"guid"`
-	Region         types.String `tfsdk:"region"`
-	ProjectTag     types.String `tfsdk:"project_tag"`
-	Name           types.String `tfsdk:"name"`
-	ImageID        types.Int64  `tfsdk:"image_id"`
-	ImageName      types.String `tfsdk:"image_name"`
-	ImageSlug      types.String `tfsdk:"image_slug"`
-	CPUCores       types.Int64  `tfsdk:"cpu_cores"`
-	RAM            types.Int64  `tfsdk:"ram"`
-	DiskSize       types.Int64  `tfsdk:"disk_size"`
-	DiskType       types.String `tfsdk:"disk_type"`
-	LocalNetworkID types.Int64  `tfsdk:"local_network_id"`
-	PrivateIP      types.String `tfsdk:"private_ip"`
-	PublicIPID     types.Int64  `tfsdk:"public_ip_id"`
-	PublicIP       types.String `tfsdk:"public_ip"`
-	Password       types.String `tfsdk:"password"`
-	SSHPublicKey   types.String `tfsdk:"ssh_public_key"`
-	Description    types.String `tfsdk:"description"`
+	ID                     types.Int64  `tfsdk:"id"`
+	Guid                   types.String `tfsdk:"guid"`
+	Region                 types.String `tfsdk:"region"`
+	ProjectTag             types.String `tfsdk:"project_tag"`
+	Name                   types.String `tfsdk:"name"`
+	ImageID                types.Int64  `tfsdk:"image_id"`
+	ImageName              types.String `tfsdk:"image_name"`
+	ImageSlug              types.String `tfsdk:"image_slug"`
+	CPUCores               types.Int64  `tfsdk:"cpu_cores"`
+	RAM                    types.Int64  `tfsdk:"ram"`
+	DiskSize               types.Int64  `tfsdk:"disk_size"`
+	DiskType               types.String `tfsdk:"disk_type"`
+	LocalNetworkID         types.Int64  `tfsdk:"local_network_id"`
+	PrivateIP              types.String `tfsdk:"private_ip"`
+	PublicIPID             types.Int64  `tfsdk:"public_ip_id"`
+	PublicIP               types.String `tfsdk:"public_ip"`
+	Password               types.String `tfsdk:"password"`
+	SSHPublicKey           types.String `tfsdk:"ssh_public_key"`
+	Description            types.String `tfsdk:"description"`
+	DNS                    types.String `tfsdk:"dns"`
+	RestartPending         types.Bool   `tfsdk:"restart_pending"`
+	DNSConfirmationPending types.Bool   `tfsdk:"dns_confirmation_pending"`
 	// UserData is write-only: read from config at create, never stored in state. Change
 	// detection is provider-computed (sha256 in private state), so there is no hash field.
 	UserData types.String   `tfsdk:"user_data"`
@@ -247,6 +251,21 @@ func (r *VmResource) Schema(ctx context.Context, req resource.SchemaRequest, res
 					stringplanmodifier.RequiresReplace(),
 				},
 			},
+			"dns": schema.StringAttribute{
+				MarkdownDescription: "One to four IPv4 DNS servers separated by single spaces. If omitted, the platform chooses the DNS at creation and Terraform does not manage it. Changing DNS on a running VM powers it off and starts it again. The configured value is a cloud-init setting and does not prove the guest applied it.",
+				Optional:            true,
+				Validators:          []validator.String{DNSNameservers()},
+			},
+			"restart_pending": schema.BoolAttribute{
+				Computed:            true,
+				MarkdownDescription: "A previous network update stopped a running VM but could not confirm its restart. The next apply attempts to restore it.",
+				PlanModifiers:       []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()},
+			},
+			"dns_confirmation_pending": schema.BoolAttribute{
+				Computed:            true,
+				MarkdownDescription: "The VM was created but its requested DNS could not be confirmed. Deletion is blocked until the creation is recovered.",
+				PlanModifiers:       []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()},
+			},
 			"user_data": schema.StringAttribute{
 				MarkdownDescription: "Cloud-init user data applied at first boot via a NoCloud ISO. " +
 					"Must begin with `#cloud-config` or a shebang (`#!`) and not exceed 64 KiB. " +
@@ -360,6 +379,14 @@ func (r *VmResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequ
 		}
 		return
 	}
+	if stateData.RestartPending.ValueBool() {
+		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("restart_pending"), types.BoolUnknown())...)
+		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("status"), types.StringUnknown())...)
+	}
+	if stateData.DNSConfirmationPending.ValueBool() {
+		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("dns_confirmation_pending"), types.BoolUnknown())...)
+		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("status"), types.StringUnknown())...)
+	}
 
 	// An update in place. A change of the network is a move of the main interface, which stops a
 	// running VM: this warning is the only place the user sees it before apply.
@@ -369,11 +396,16 @@ func (r *VmResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequ
 		resp.Diagnostics.AddWarning(summary, detail)
 		resp.Diagnostics.Append(checkMoveTimeout(ctx, planData.Timeouts)...)
 	}
+	if managedDNSChanged(stateData.DNS, planData.DNS) {
+		resp.Diagnostics.AddWarning("DNS change powers off the virtual machine",
+			"If the VM is running, the provider stops it and starts it again after changing DNS. The stop may be an immediate power-off; the guest may require its own DNS configuration. Depending on the image and cloud-init configuration, the changed data may be treated as a new instance, regenerating SSH host keys and rerunning once-per-instance scripts.")
+	}
 
 	// Whatever stops and starts the VM leaves its status for apply to say: the plan is made from a
 	// state that may be behind the VM, and a start that fails would otherwise contradict a status
 	// the plan promised.
 	if move.moves() ||
+		managedDNSChanged(stateData.DNS, planData.DNS) ||
 		!stateData.CPUCores.Equal(planData.CPUCores) ||
 		!stateData.RAM.Equal(planData.RAM) ||
 		!stateData.DiskSize.Equal(planData.DiskSize) ||
@@ -557,6 +589,10 @@ func (r *VmResource) Create(ctx context.Context, req resource.CreateRequest, res
 		desc := data.Description.ValueString()
 		createReq.Description = &desc
 	}
+	if !data.DNS.IsNull() && !data.DNS.IsUnknown() {
+		dns := data.DNS.ValueString()
+		createReq.DNS = &dns
+	}
 
 	// user_data is write-only: it is null in the plan, so read it from the config and
 	// forward it. It is never written back to state (enforced before State.Set below).
@@ -710,6 +746,8 @@ func (r *VmResource) Create(ctx context.Context, req resource.CreateRequest, res
 	// user_data is write-only — guarantee the raw payload never reaches state, on the
 	// success path and the error path below.
 	data.UserData = types.StringNull()
+	data.RestartPending = types.BoolValue(false)
+	data.DNSConfirmationPending = types.BoolValue(!data.DNS.IsNull() && !data.DNS.IsUnknown())
 
 	// Save state BEFORE returning error — prevents desync on retry
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
@@ -737,6 +775,18 @@ func (r *VmResource) Create(ctx context.Context, req resource.CreateRequest, res
 			fmt.Sprintf("VM was created (id=%d) but failed to reach a ready state: %s", resultVm.ID, waitErr.Error()),
 		)
 		return
+	}
+	if !data.DNS.IsNull() && !data.DNS.IsUnknown() {
+		dns, err := r.client.GetVmDNS(ctx, resultVm.ID, &client.RequestOpts{Region: region, ProjectTag: projectTag})
+		if err != nil || dns.Pending || dns.ReconcileRequired || dns.Nameserver == nil || *dns.Nameserver != data.DNS.ValueString() {
+			resp.Diagnostics.AddError("Unable to Confirm VM DNS", fmt.Sprintf("VM %d was created, but its DNS could not be confirmed (error: %v). Terraform may mark it tainted. Verify the VM and DNS, run terraform untaint for this resource, then apply again to confirm it. Deletion is blocked until recovery completes.", resultVm.ID, err))
+			return
+		}
+		if dns.RequiresGuestConfiguration {
+			resp.Diagnostics.AddWarning("Guest DNS needs configuration", "The VM has no cloud-init; configure DNS inside the guest as well.")
+		}
+		data.DNSConfirmationPending = types.BoolValue(false)
+		resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 	}
 
 	tflog.Info(ctx, "Virtual machine is ready", map[string]any{
@@ -774,15 +824,41 @@ func (r *VmResource) Read(ctx context.Context, req resource.ReadRequest, resp *r
 		"project_tag": opts.ProjectTag,
 	})
 
-	vm, err := r.client.GetVm(ctx, vmID, opts)
+	recoveryPending := data.DNSConfirmationPending.ValueBool() || data.RestartPending.ValueBool()
+	// The ordinary VM endpoint hides failed creations. Always use the status endpoint so a
+	// refresh does not remove an ERROR-status VM from state before it can be cleaned up.
+	vm, err := r.client.GetVmStatus(ctx, vmID, opts)
 	if err != nil {
 		if client.IsNotFound(err) {
+			if recoveryPending {
+				resp.Diagnostics.AddError("VM recovery requires verification", fmt.Sprintf("VM %d could not be found while network recovery is pending. Verify its actual state before removing it from Terraform state or creating a replacement.", vmID))
+				return
+			}
 			tflog.Warn(ctx, "VM not found, removing from state", map[string]any{"id": vmID})
 			resp.State.RemoveResource(ctx)
 			return
 		}
 		resp.Diagnostics.AddError("Unable to Read Virtual Machine", err.Error())
 		return
+	}
+
+	// A null state means DNS is not managed: preserve compatibility with older panels and with
+	// configurations that leave the platform default alone.
+	if !data.DNS.IsNull() && !data.DNS.IsUnknown() {
+		dns, err := r.client.GetVmDNS(ctx, vmID, opts)
+		if err != nil {
+			resp.Diagnostics.AddError("Unable to Read VM DNS", err.Error())
+			return
+		}
+		if dns.Pending {
+			resp.Diagnostics.AddError("VM DNS has a pending change", "The hypervisor reports a pending DNS change. Resolve it before applying again.")
+			return
+		}
+		if dns.Nameserver == nil || dns.ReconcileRequired {
+			data.DNS = types.StringNull()
+		} else {
+			data.DNS = types.StringValue(*dns.Nameserver)
+		}
 	}
 
 	data.Guid = tfutil.StringOrNull(vm.Guid)
@@ -875,11 +951,34 @@ func (r *VmResource) Update(ctx context.Context, req resource.UpdateRequest, res
 	}
 
 	vmID := state.ID.ValueInt64()
+	if state.RestartPending.ValueBool() {
+		if err := resumePendingVM(ctx, r.client, vmID, opts, r.pollInterval()); err != nil {
+			resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
+			resp.Diagnostics.AddError("Unable to Restore VM After Network Update", err.Error())
+			return
+		}
+		state.RestartPending = types.BoolValue(false)
+		resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
+		plan.RestartPending = types.BoolValue(false)
+	}
+	if state.DNSConfirmationPending.ValueBool() {
+		dns, err := r.client.GetVmDNS(ctx, vmID, opts)
+		if err != nil || dns.Pending || dns.ReconcileRequired || dns.Nameserver == nil {
+			resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
+			resp.Diagnostics.AddError("Unable to Confirm VM DNS", fmt.Sprintf("VM %d still needs DNS confirmation (error: %v).", vmID, err))
+			return
+		}
+		// The saved value came from the create plan, not a confirmed read. Compare the
+		// actual value to the current plan even when refresh was disabled.
+		state.DNS = types.StringValue(*dns.Nameserver)
+		plan.DNSConfirmationPending = types.BoolValue(false)
+	}
 
 	cpuChanged := !state.CPUCores.Equal(plan.CPUCores)
 	ramChanged := !state.RAM.Equal(plan.RAM)
 	diskSizeChanged := !state.DiskSize.Equal(plan.DiskSize)
 	diskTypeChanged := !state.DiskType.Equal(plan.DiskType)
+	dnsChanged := managedDNSChanged(state.DNS, plan.DNS)
 
 	// Validate disk size before anything is done to the VM
 	if diskSizeChanged && plan.DiskSize.ValueInt64() < state.DiskSize.ValueInt64() {
@@ -903,6 +1002,15 @@ func (r *VmResource) Update(ctx context.Context, req resource.UpdateRequest, res
 			return
 		}
 	}
+	var dnsForecast *client.ChangedVmDNS
+	if dnsChanged {
+		var err error
+		dnsForecast, err = r.client.ChangeVmDNS(ctx, vmID, plan.DNS.ValueString(), true, opts)
+		if err != nil {
+			resp.Diagnostics.AddError("Unable to Check VM DNS", err.Error())
+			return
+		}
+	}
 
 	// Rename VM if name changed
 	if !state.Name.Equal(plan.Name) {
@@ -921,10 +1029,11 @@ func (r *VmResource) Update(ctx context.Context, req resource.UpdateRequest, res
 		}
 	}
 
-	needsUpdate := cpuChanged || ramChanged || diskSizeChanged || diskTypeChanged
+	needsUpdate := cpuChanged || ramChanged || diskSizeChanged || diskTypeChanged || dnsChanged
 
 	// moved is the panel's answer to a move that was made: the guest may have to be configured.
 	var moved *client.MovedPrimaryLocalNetwork
+	restartPending := false
 	switch {
 	case forecast != nil && (forecast.Changed || forecast.PendingRecovery):
 		// The main interface moves, and the VM has to be stopped for it. What else changes with it
@@ -932,7 +1041,7 @@ func (r *VmResource) Update(ctx context.Context, req resource.UpdateRequest, res
 		// (the panel answers changed=false and pendingRecovery=true): whether it has to move is
 		// found out by the move itself, which settles the earlier one first, and it needs the VM
 		// stopped if it goes on.
-		moved = r.updateWithMove(ctx, &resp.Diagnostics, vmID, &state, &plan, opts, forecast)
+		moved = r.updateWithMove(ctx, &resp.Diagnostics, vmID, &state, &plan, opts, forecast, &restartPending)
 	case forecast != nil:
 		// The interface is in the network already and only the panel's record of it is off: the
 		// record is put right, and the VM is not stopped for that.
@@ -942,12 +1051,16 @@ func (r *VmResource) Update(ctx context.Context, req resource.UpdateRequest, res
 			return
 		}
 		if needsUpdate {
-			resp.Diagnostics.Append(r.updateWithoutMove(ctx, vmID, &state, &plan, opts)...)
+			resp.Diagnostics.Append(r.updateWithoutMove(ctx, vmID, &state, &plan, opts, &restartPending)...)
 		}
 	case needsUpdate:
-		resp.Diagnostics.Append(r.updateWithoutMove(ctx, vmID, &state, &plan, opts)...)
+		resp.Diagnostics.Append(r.updateWithoutMove(ctx, vmID, &state, &plan, opts, &restartPending)...)
 	}
 	if resp.Diagnostics.HasError() {
+		if restartPending {
+			state.RestartPending = types.BoolValue(true)
+			resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
+		}
 		return
 	}
 
@@ -978,6 +1091,9 @@ func (r *VmResource) Update(ctx context.Context, req resource.UpdateRequest, res
 	if moved != nil && moved.RequiresGuestConfiguration {
 		summary, detail := guestConfigurationWarning(moved)
 		resp.Diagnostics.AddWarning(summary, detail)
+	}
+	if dnsForecast != nil && dnsForecast.RequiresGuestConfiguration {
+		resp.Diagnostics.AddWarning("Guest DNS needs configuration", "The VM has no cloud-init; configure DNS inside the guest as well.")
 	}
 
 	plan.ID = state.ID
@@ -1036,7 +1152,7 @@ func (r *VmResource) Update(ctx context.Context, req resource.UpdateRequest, res
 // once for all of it and started once afterwards. The ceiling of the update (timeouts.update), or an
 // interruption, can end ctx at any step: a VM that the update stopped is started on a context of
 // its own (see reserveContext), however the update ended.
-func (r *VmResource) updateWithoutMove(ctx context.Context, vmID int64, state, plan *VmResourceModel, opts *client.RequestOpts) diag.Diagnostics {
+func (r *VmResource) updateWithoutMove(ctx context.Context, vmID int64, state, plan *VmResourceModel, opts *client.RequestOpts, restartPending *bool) diag.Diagnostics {
 	var diags diag.Diagnostics
 
 	// Stop once before all updates
@@ -1054,6 +1170,9 @@ func (r *VmResource) updateWithoutMove(ctx context.Context, vmID int64, state, p
 			defer cancel()
 			if err := r.startUpdatedVM(startCtx, vmID, opts); err != nil {
 				detail += fmt.Sprintf(" The VM could not be started again: %s", err)
+				if managedDNSChanged(state.DNS, plan.DNS) {
+					*restartPending = true
+				}
 			} else {
 				detail += " The VM was started again."
 			}
@@ -1067,10 +1186,15 @@ func (r *VmResource) updateWithoutMove(ctx context.Context, vmID int64, state, p
 		startCtx, cancel := reserveContext(ctx)
 		defer cancel()
 		if err := r.startAndWait(startCtx, vmID, opts); err != nil {
-			diags.AddWarning(
-				"VM updated but not restarted",
-				fmt.Sprintf("Changes were applied, but the VM failed to restart: %s", err.Error()),
-			)
+			if managedDNSChanged(state.DNS, plan.DNS) {
+				*restartPending = true
+				diags.AddError("VM updated but not restarted", fmt.Sprintf("Changes were applied, but the VM failed to restart: %s. The next apply will retry the restart.", err))
+			} else {
+				diags.AddWarning(
+					"VM updated but not restarted",
+					fmt.Sprintf("Changes were applied, but the VM failed to restart: %s", err.Error()),
+				)
+			}
 		}
 	}
 	return diags
@@ -1089,7 +1213,16 @@ func (r *VmResource) updateStopped(ctx context.Context, vmID int64, state, plan 
 			return &updateStepError{"Unable to Update VM Disk", err}
 		}
 	}
+	if managedDNSChanged(state.DNS, plan.DNS) {
+		if _, err := r.client.ChangeVmDNS(ctx, vmID, plan.DNS.ValueString(), false, opts); err != nil {
+			return &updateStepError{"Unable to Update VM DNS", err}
+		}
+	}
 	return nil
+}
+
+func managedDNSChanged(state, plan types.String) bool {
+	return !plan.IsNull() && !plan.IsUnknown() && !state.Equal(plan)
 }
 
 // updateResources applies the new cpu and ram to a stopped VM.
@@ -1174,6 +1307,14 @@ func (r *VmResource) Delete(ctx context.Context, req resource.DeleteRequest, res
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	if data.DNSConfirmationPending.ValueBool() {
+		resp.Diagnostics.AddError("VM DNS creation needs recovery", "This VM was created but its DNS was not confirmed. Deletion is blocked to protect it from a tainted replacement. Verify the VM, restore its resource configuration if it was removed or changed to require replacement, run terraform untaint for this resource, and apply again to confirm DNS before deleting or replacing it.")
+		return
+	}
+	if data.RestartPending.ValueBool() {
+		resp.Diagnostics.AddError("VM restart needs recovery", "A network update could not confirm the VM's restart. Restore the previous resource configuration if it was removed or changed to require replacement, then apply to restore the VM before deleting or replacing it.")
+		return
+	}
 
 	opts := &client.RequestOpts{}
 	if !data.Region.IsNull() && !data.Region.IsUnknown() {
@@ -1188,15 +1329,27 @@ func (r *VmResource) Delete(ctx context.Context, req resource.DeleteRequest, res
 	tflog.Debug(ctx, "Deleting virtual machine", map[string]any{"id": vmID})
 
 	err := r.client.DeleteVm(ctx, vmID, opts)
-	if err != nil {
-		if client.IsNotFound(err) {
-			return // already gone
-		}
+	if err != nil && !client.IsAPIError(err, 601) {
 		resp.Diagnostics.AddError("Unable to Delete Virtual Machine", err.Error())
 		return
 	}
 
-	tflog.Debug(ctx, "Deleted virtual machine", map[string]any{"id": vmID})
+	// Some panel versions return success without deleting an ERROR-status VM. Keep the
+	// Terraform state until the panel's status endpoint explicitly reports this VM absent.
+	// A transport failure or a generic HTTP 404 is not evidence that this VM is gone.
+	vm, verifyErr := r.client.GetVmStatus(ctx, vmID, opts)
+	if verifyErr == nil {
+		resp.Diagnostics.AddError("VM deletion was not confirmed",
+			fmt.Sprintf("The panel still reports VM %d with status %s after the delete request. Terraform retains its state; verify and retry deletion.", vmID, vm.Status))
+		return
+	}
+	if !client.IsAPIError(verifyErr, 601) {
+		resp.Diagnostics.AddError("VM deletion was not confirmed",
+			fmt.Sprintf("Unable to verify that VM %d is absent from the panel: %s. Terraform retains its state; verify and retry deletion.", vmID, verifyErr))
+		return
+	}
+
+	tflog.Debug(ctx, "Virtual machine no longer visible in panel", map[string]any{"id": vmID})
 }
 
 // stopIfRunning stops the VM if it is RUNNING and waits for STOPPED state.

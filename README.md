@@ -10,7 +10,8 @@ the [Terraform Registry](https://registry.terraform.io/providers/prodata-cloud/p
 
 **Resources**
 
-- `prodata_vm` — virtual machine (with optional cloud-init `user_data`)
+- `prodata_vm` — virtual machine (with optional cloud-init `user_data` and DNS)
+- `prodata_vm_gateway` — default gateway on an attached local interface
 - `prodata_volume` / `prodata_volume_attachment` — block volumes and their attachment to a VM
 - `prodata_public_ip` / `prodata_public_ip_attachment` — public IPs and their attachment to a VM
 - `prodata_local_network` — local (private) network
