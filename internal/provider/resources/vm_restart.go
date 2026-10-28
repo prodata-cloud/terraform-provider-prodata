@@ -137,6 +137,28 @@ func restartRunningVM(ctx context.Context, c *client.Client, vmID int64, opts *c
 	return out.cycled, err
 }
 
+// Resume only a VM that an earlier failed network update recorded as needing a restart. A start
+// failure is not retried blindly: its outcome may be unknown, and the panel's guard must settle it.
+func resumePendingVM(ctx context.Context, c *client.Client, vmID int64, opts *client.RequestOpts, poll time.Duration) error {
+	vm, err := c.GetVmStatus(ctx, vmID, opts)
+	if err != nil {
+		return fmt.Errorf("read VM %d status: %w", vmID, err)
+	}
+	switch vm.Status {
+	case "RUNNING":
+		return nil
+	case "STOPPED":
+		if err := c.StartVm(ctx, vmID, opts); err != nil {
+			return fmt.Errorf("start VM %d: %w", vmID, err)
+		}
+	case "STARTING", "REBOOTING":
+		// A previously accepted start is already progressing.
+	default:
+		return fmt.Errorf("VM %d is in status %s; wait for a stable state before retrying", vmID, vm.Status)
+	}
+	return c.WaitForVmStatusEvery(ctx, vmID, "RUNNING", 5*time.Minute, poll, opts)
+}
+
 // restartRunningVMWith is restartRunningVM with a hook: whileStopped is called, at most once,
 // when the VM that this cycle stopped is seen STOPPED and before it is started again, and the VM
 // is started again however the hook ends. A VM that was stopped to begin with is not cycled and

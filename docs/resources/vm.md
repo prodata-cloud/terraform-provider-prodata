@@ -9,9 +9,11 @@ description: |-
 
 Manages a ProData virtual machine.
 
-~> **Note:** Most attributes require resource replacement when changed (destroy and recreate). The `name`, `cpu_cores`, `ram`, `disk_size`, and `disk_type` attributes can be updated in-place — changing them forces a VM reboot but not a full replacement. So does `local_network_id`: the VM is moved to another network without being recreated, which stops and starts it — see [Moving a VM to another network](#moving-a-vm-to-another-network).
+~> **Note:** Most attributes require resource replacement when changed (destroy and recreate). The `name`, `cpu_cores`, `ram`, `disk_size`, `disk_type`, and `dns` attributes can be updated in-place — changing them forces a VM reboot but not a full replacement. So does `local_network_id`: the VM is moved to another network without being recreated, which stops and starts it — see [Moving a VM to another network](#moving-a-vm-to-another-network).
 
 ~> **Note:** The platform applies the network configuration of a public IP only when the VM starts, so a public IP attached to a running VM (via `prodata_public_ip_attachment`) becomes active only after the VM has been stopped and started again. Set `reboot_after_attach = true` on the attachment to have the provider do that during `apply`.
+
+~> **Note:** After a delete request, the provider checks that the VM is absent from the panel. If the panel still reports it, or its absence cannot be confirmed, Terraform keeps the VM in state and reports an error. The platform may finish hypervisor deletion asynchronously.
 
 ## Example Usage
 
@@ -100,6 +102,22 @@ inside the guest is **not** reported back — a VM whose cloud-init failed still
 `RUNNING`. A successful `apply` therefore does not by itself prove the `user_data` script ran
 without errors; verify on the guest if that matters.
 
+## Changing DNS
+
+Changing `dns` on a running VM stops and starts it. Depending on the image and cloud-init
+configuration, the changed data may be treated as a new instance: SSH host keys can be regenerated
+and once-per-instance scripts can run again. A VM without cloud-init needs DNS configured in the
+guest separately. If the restart cannot be confirmed, apply returns an error and records
+`restart_pending`; the next apply attempts to restore the VM.
+Deletion or replacement is blocked until that restart has been recovered. If the resource was
+removed from configuration or a replacement was requested, restore its previous configuration and
+apply to recover it before deleting or replacing it.
+
+If a VM was created but DNS confirmation failed, `dns_confirmation_pending` protects it from
+deletion during Terraform's automatic replacement of a tainted resource. Verify the VM and DNS,
+run `terraform untaint` for that resource, and apply again to confirm or reconcile DNS before
+attempting deletion or replacement.
+
 ## Moving a VM to another network
 
 Changing `local_network_id` moves the main network interface of the VM to the other network. The VM is **not** recreated: it keeps its `id`, its disks, its public IP and its other interfaces. (Earlier versions of the provider replaced the VM on this change. To get that replacement now, run `terraform apply -replace=prodata_vm.<name>`; it deletes the disks.)
@@ -177,6 +195,7 @@ Things to know:
 - `public_ip_id` (Number) The ID of a public IP to attach to the VM at creation time. If not specified, no public IP is attached. Changing this forces a new resource.
 - `ssh_public_key` (String) SSH public key for authentication. Changing this forces a new resource.
 - `description` (String) Description of the virtual machine. Changing this forces a new resource.
+- `dns` (String) One to four IPv4 nameservers separated by single spaces, for example `"1.1.1.1 8.8.8.8"`. If omitted at creation, the platform chooses its default and Terraform does not manage DNS. Removing the attribute stops managing DNS without clearing the configured value. A change to DNS stops and starts a running VM; the stop may immediately power it off. DNS is a cloud-init configuration and does not prove the guest applied it. A guest without cloud-init needs its own DNS configuration. A panel with the VM network-settings API is required.
 - `user_data` (String, Write-only) Cloud-init user data applied at first boot via a NoCloud ISO. Must begin with `#cloud-config` or a shebang (`#!`) and not exceed 64 KiB (65536 bytes). Write-only: never stored in state nor shown in a plan (requires Terraform >= 1.11). The provider hashes the payload (sha256) and forces a new resource when it changes, to re-run cloud-init.
 - `timeouts` (Object) See [Timeouts](#timeouts) below.
 
@@ -184,10 +203,12 @@ Things to know:
 
 - `id` (Number) The unique identifier of the virtual machine.
 - `guid` (String) The VM's globally-unique identifier assigned by the panel. Use this to reference the VM as a load balancer backend (`prodata_lb.backend_group.vm_ids`).
-- `status` (String) The current status of the virtual machine (CREATING, RUNNING, STOPPED, etc.). A plan that stops and starts the VM (a change of `cpu_cores`, `ram`, `disk_size`, `disk_type` or `local_network_id`) shows it as `known after apply`.
+- `status` (String) The current status of the virtual machine (CREATING, RUNNING, STOPPED, etc.). A plan that stops and starts the VM (a change of `cpu_cores`, `ram`, `disk_size`, `disk_type`, `dns` or `local_network_id`) shows it as `known after apply`.
 - `public_ip` (String) The public IP address assigned to the virtual machine (if any).
 - `image_name` (String) The name of the OS image (e.g. `Ubuntu 22.04`). Populated from the API.
 - `image_slug` (String) The slug of the OS template (e.g. `ubuntu-22.04`). Null for custom images and for VMs created before this feature.
+- `restart_pending` (Boolean) A network update stopped a running VM but its restart was not confirmed.
+- `dns_confirmation_pending` (Boolean) DNS requested at creation has not yet been confirmed; VM deletion is blocked until recovery.
 
 ### Timeouts
 
@@ -203,7 +224,7 @@ resource "prodata_vm" "example" {
 ```
 
 - `create` (String) Default `30m`. Time to wait for the VM (including the in-guest cloud-init run) to become ready. A ceiling, not a fixed wait: the provider returns as soon as the VM is reported ready.
-- `update` (String) Default `30m`. The ceiling of the whole update: the rename, the stop, the resize, the move to another network and the start. A ceiling, not a fixed wait: the provider returns as soon as the work is done. A plan that moves the VM to another network is refused when `update` is shorter than `20m`. A VM that the update stopped, or may have stopped because the platform's answer to the stop did not say, is started again however the update ended, even when the ceiling has run out: that can take a few minutes beyond it. When the update did its work, the provider waits for the VM to be running; when a step failed, the start is handed to the platform, and the VM may still be starting when the error is reported. A stop that the platform refuses for good leaves the VM as it was. A VM that still reads as running after a stop whose outcome is not known is looked at for a few minutes before it is taken to be up, because the platform's view of a VM can lag behind. A start that fails in a way that may pass is tried again for a few minutes.
+- `update` (String) Default `30m`. The ceiling of the whole update: the rename, the stop, the resize, the DNS change, the move to another network and the start. A ceiling, not a fixed wait: the provider returns as soon as the work is done. A plan that moves the VM to another network is refused when `update` is shorter than `20m`. A VM that the update stopped, or may have stopped because the platform's answer to the stop did not say, is started again however the update ended, even when the ceiling has run out: that can take a few minutes beyond it. When the update did its work, the provider waits for the VM to be running; when a step failed, the start is handed to the platform, and the VM may still be starting when the error is reported. If a network-settings request has an unresolved outcome, the platform blocks start until support has checked it; the VM may remain stopped. A stop that the platform refuses for good leaves the VM as it was. A VM that still reads as running after a stop whose outcome is not known is looked at for a few minutes before it is taken to be up, because the platform's view of a VM can lag behind. A start that fails in a way that may pass is tried again for a few minutes.
 
 ## Import
 
@@ -222,3 +243,10 @@ terraform import prodata_vm.example 123
 ~> **Note:** The `password` and `ssh_public_key` attributes are write-only and cannot be read back from the API. After import, these attributes will be empty in state. If your configuration specifies them, Terraform will show a diff but no replacement will be forced.
 
 ~> **Note:** `user_data` is write-only and is empty in state after import. Because the change-detection hash lives in private state (seeded only when the VM is created by Terraform), an **imported** VM is not tracked for `user_data` changes until it is next replaced — editing `user_data` on an imported VM will not, on its own, trigger a replacement.
+
+### Deletion confirmation
+
+On compatible panels, VM deletion waits for the hypervisor task to finish. The provider polls the
+panel's explicit deletion-pending response for up to 10 minutes. Cancellation, a network failure,
+or an unconfirmed result retains Terraform state. Resolve the outstanding operation before retrying;
+an arbitrary error is not automatically retried as a safe deletion.

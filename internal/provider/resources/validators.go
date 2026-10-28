@@ -73,3 +73,31 @@ func (v ipv4AddressValidator) ValidateString(
 		resp.Diagnostics.AddAttributeError(req.Path, "Invalid IPv4 address", fmt.Sprintf("%s: %s.", req.Path, err))
 	}
 }
+
+// DNSNameservers accepts the same canonical, space-separated IPv4 list as the panel's update API.
+func DNSNameservers() validator.String { return dnsNameserversValidator{} }
+
+type dnsNameserversValidator struct{}
+
+func (v dnsNameserversValidator) Description(context.Context) string {
+	return "must be one to four IPv4 addresses separated by single spaces"
+}
+func (v dnsNameserversValidator) MarkdownDescription(ctx context.Context) string {
+	return v.Description(ctx)
+}
+func (v dnsNameserversValidator) ValidateString(ctx context.Context, req validator.StringRequest, resp *validator.StringResponse) {
+	if req.ConfigValue.IsNull() || req.ConfigValue.IsUnknown() {
+		return
+	}
+	parts := strings.Split(req.ConfigValue.ValueString(), " ")
+	if len(parts) == 0 || len(parts) > 4 {
+		resp.Diagnostics.AddAttributeError(req.Path, "Invalid DNS nameservers", v.Description(ctx))
+		return
+	}
+	for _, part := range parts {
+		if _, err := parseIPv4(part); err != nil {
+			resp.Diagnostics.AddAttributeError(req.Path, "Invalid DNS nameservers", v.Description(ctx))
+			return
+		}
+	}
+}

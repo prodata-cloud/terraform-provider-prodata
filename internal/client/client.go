@@ -769,6 +769,7 @@ type CreateVmRequest struct {
 	Password       string  `json:"password"`
 	SSHPublicKey   *string `json:"sshPublicKey,omitempty"`
 	Description    *string `json:"description,omitempty"`
+	DNS            *string `json:"dns,omitempty"`
 	// UserData is cloud-init user-data applied at first boot. Plain (not base64);
 	// the backend requires it to start with "#cloud-config" or "#!".
 	UserData *string `json:"userData,omitempty"`
@@ -1041,7 +1042,9 @@ func (c *Client) DeleteVm(ctx context.Context, id int64, opts *RequestOpts) erro
 		path = path + "?" + params.Encode()
 	}
 
-	if err := c.Do(ctx, http.MethodDelete, path, nil, nil, opts); err != nil {
+	if err := pollVmDeletion(ctx, func(pollCtx context.Context) error {
+		return c.Do(pollCtx, http.MethodDelete, path, nil, nil, opts)
+	}); err != nil {
 		return err
 	}
 	return nil
