@@ -257,17 +257,20 @@ func gatewaySchema(t *testing.T) (tftypes.Object, resource.SchemaResponse) {
 	if response.Diagnostics.HasError() {
 		t.Fatal(response.Diagnostics)
 	}
-	obj := response.Schema.Type().TerraformType(context.Background()).(tftypes.Object)
+	obj, ok := response.Schema.Type().TerraformType(context.Background()).(tftypes.Object)
+	if !ok {
+		t.Fatal("gateway schema is not an object")
+	}
 	return obj, response
 }
-func gatewayState(t *testing.T, gateway, owned string, interfaceID int64) tfsdk.State {
+func gatewayState(t *testing.T, gateway, owned string) tfsdk.State {
 	t.Helper()
 	obj, sch := gatewaySchema(t)
 	values := map[string]tftypes.Value{}
 	for name, typ := range obj.AttributeTypes {
 		values[name] = tftypes.NewValue(typ, nil)
 	}
-	values["vm_id"], values["network_id"], values["interface_id"] = vmNum(7), vmNum(42), vmNum(interfaceID)
+	values["vm_id"], values["network_id"], values["interface_id"] = vmNum(7), vmNum(42), vmNum(91)
 	values["gateway"], values["owned_gateway"] = vmStr(gateway), vmStr(owned)
 	values["region"], values["project_tag"] = vmStr("TEST"), vmStr("proj")
 	return tfsdk.State{Schema: sch.Schema, Raw: tftypes.NewValue(obj, values)}
@@ -333,7 +336,7 @@ func TestVmGatewayReadAndDeleteDoNotAdoptOrClearSomeoneElsesRoute(t *testing.T) 
 	foreign := "192.0.2.2"
 	c, panel := newGatewayTestPanel(t, "RUNNING", &foreign)
 	r := &VmGatewayResource{client: c, poll: time.Millisecond}
-	state := gatewayState(t, "192.0.2.1", "192.0.2.1", 91)
+	state := gatewayState(t, "192.0.2.1", "192.0.2.1")
 	read := resource.ReadResponse{State: state}
 	r.Read(context.Background(), resource.ReadRequest{State: state}, &read)
 	if read.Diagnostics.HasError() {
@@ -364,7 +367,7 @@ func TestVmGatewayDeleteReconcilesPanelWithoutClearingForeignRoute(t *testing.T)
 	c, panel := newGatewayTestPanel(t, "STOPPED", &foreign)
 	panel.reconcile = true
 	r := &VmGatewayResource{client: c, poll: time.Millisecond}
-	state := gatewayState(t, "192.0.2.1", "192.0.2.1", 91)
+	state := gatewayState(t, "192.0.2.1", "192.0.2.1")
 	deleted := resource.DeleteResponse{State: state}
 	r.Delete(context.Background(), resource.DeleteRequest{State: state}, &deleted)
 	if deleted.Diagnostics.HasError() {
@@ -383,7 +386,7 @@ func TestVmGatewayReadRefusesAReplacedInterface(t *testing.T) {
 	c, panel := newGatewayTestPanel(t, "STOPPED", &gateway)
 	panel.interfaceID = 92
 	r := &VmGatewayResource{client: c, poll: time.Millisecond}
-	state := gatewayState(t, gateway, gateway, 91)
+	state := gatewayState(t, gateway, gateway)
 	resp := resource.ReadResponse{State: state}
 	r.Read(context.Background(), resource.ReadRequest{State: state}, &resp)
 	if !resp.Diagnostics.HasError() {
@@ -402,7 +405,7 @@ func TestVmGatewayReadDoesNotForgetPendingRestartWhenInterfaceIsMissing(t *testi
 		return false
 	}
 	r := &VmGatewayResource{client: c}
-	state := gatewayState(t, gateway, gateway, 91)
+	state := gatewayState(t, gateway, gateway)
 	if d := state.SetAttribute(context.Background(), path.Root("restart_pending"), true); d.HasError() {
 		t.Fatal(d)
 	}
@@ -428,7 +431,7 @@ func TestVmGatewayPreflightFailureDoesNotStopVm(t *testing.T) {
 	}
 }
 
-func gatewayRaw(t *testing.T, overrides map[string]tftypes.Value) (tftypes.Value, tfsdk.Plan, tfsdk.State) {
+func gatewayRaw(t *testing.T, overrides map[string]tftypes.Value) (tfsdk.Plan, tfsdk.State) {
 	t.Helper()
 	obj, sch := gatewaySchema(t)
 	values := map[string]tftypes.Value{}
@@ -442,13 +445,13 @@ func gatewayRaw(t *testing.T, overrides map[string]tftypes.Value) (tftypes.Value
 		values[k] = v
 	}
 	raw := tftypes.NewValue(obj, values)
-	return raw, tfsdk.Plan{Schema: sch.Schema, Raw: raw}, tfsdk.State{Schema: sch.Schema, Raw: tftypes.NewValue(obj, nil)}
+	return tfsdk.Plan{Schema: sch.Schema, Raw: raw}, tfsdk.State{Schema: sch.Schema, Raw: tftypes.NewValue(obj, nil)}
 }
 
 func TestVmGatewayCreate_RecordsOwnershipAndInterface(t *testing.T) {
 	c, panel := newGatewayTestPanel(t, "STOPPED", nil)
 	r := &VmGatewayResource{client: c, poll: time.Millisecond}
-	_, plan, empty := gatewayRaw(t, nil)
+	plan, empty := gatewayRaw(t, nil)
 	resp := resource.CreateResponse{State: empty}
 	r.Create(context.Background(), resource.CreateRequest{Plan: plan}, &resp)
 	if resp.Diagnostics.HasError() {
@@ -470,7 +473,7 @@ func TestVmGatewayCreate_RestartFailureKeepsStateAndBlocksTaintedDelete(t *testi
 	c, panel := newGatewayTestPanel(t, "RUNNING", nil)
 	panel.vm.broken["start"] = [2]int{http.StatusForbidden, 714}
 	r := &VmGatewayResource{client: c, poll: time.Millisecond}
-	_, plan, empty := gatewayRaw(t, nil)
+	plan, empty := gatewayRaw(t, nil)
 	created := resource.CreateResponse{State: empty}
 	r.Create(context.Background(), resource.CreateRequest{Plan: plan}, &created)
 	if !created.Diagnostics.HasError() {
@@ -486,7 +489,7 @@ func TestVmGatewayCreate_RestartFailureKeepsStateAndBlocksTaintedDelete(t *testi
 		t.Fatalf("pending recovery must prevent route deletion: %+v", deleted.Diagnostics)
 	}
 	delete(panel.vm.broken, "start")
-	_, recoverPlan, _ := gatewayRaw(t, map[string]tftypes.Value{
+	recoverPlan, _ := gatewayRaw(t, map[string]tftypes.Value{
 		"interface_id": vmNum(91), "owned_gateway": vmStr("192.0.2.1"),
 		"restart_pending": tftypes.NewValue(tftypes.Bool, tftypes.UnknownValue),
 	})
@@ -503,8 +506,8 @@ func TestVmGatewayCreate_RestartFailureKeepsStateAndBlocksTaintedDelete(t *testi
 func TestVmGatewayUpdate_PlanLeavesNewOwnershipForApply(t *testing.T) {
 	c, _ := newGatewayTestPanel(t, "STOPPED", nil)
 	r := &VmGatewayResource{client: c, poll: time.Millisecond}
-	state := gatewayState(t, "192.0.2.1", "192.0.2.1", 91)
-	_, plan, _ := gatewayRaw(t, map[string]tftypes.Value{"gateway": vmStr("192.0.2.2"), "interface_id": vmNum(91), "owned_gateway": vmStr("192.0.2.1")})
+	state := gatewayState(t, "192.0.2.1", "192.0.2.1")
+	plan, _ := gatewayRaw(t, map[string]tftypes.Value{"gateway": vmStr("192.0.2.2"), "interface_id": vmNum(91), "owned_gateway": vmStr("192.0.2.1")})
 	resp := resource.ModifyPlanResponse{Plan: plan}
 	r.ModifyPlan(context.Background(), resource.ModifyPlanRequest{Plan: plan, State: state}, &resp)
 	if resp.Diagnostics.HasError() {
@@ -521,8 +524,8 @@ func TestVmGatewayUpdate_PlanLeavesNewOwnershipForApply(t *testing.T) {
 
 func TestVmGatewayDestroyPlanWarnsAboutCloudInitAndTheRestart(t *testing.T) {
 	r := &VmGatewayResource{}
-	state := gatewayState(t, "192.0.2.1", "192.0.2.1", 91)
-	_, plan, empty := gatewayRaw(t, nil)
+	state := gatewayState(t, "192.0.2.1", "192.0.2.1")
+	plan, empty := gatewayRaw(t, nil)
 	plan.Raw = empty.Raw
 	resp := resource.ModifyPlanResponse{Plan: plan}
 	r.ModifyPlan(context.Background(), resource.ModifyPlanRequest{Plan: plan, State: state}, &resp)
@@ -536,7 +539,7 @@ func TestVmGatewayDelete_ClearsOnlyTheOwnedGateway(t *testing.T) {
 	gateway := "192.0.2.1"
 	c, panel := newGatewayTestPanel(t, "RUNNING", &gateway)
 	r := &VmGatewayResource{client: c, poll: time.Millisecond}
-	state := gatewayState(t, gateway, gateway, 91)
+	state := gatewayState(t, gateway, gateway)
 	resp := resource.DeleteResponse{State: state}
 	r.Delete(context.Background(), resource.DeleteRequest{State: state}, &resp)
 	if resp.Diagnostics.HasError() {
@@ -574,7 +577,7 @@ func TestVmGatewayCreate_UnknownWriteAndFailedRestartCanRecoverWithoutAdoptingFo
 	panel.failWrite = true
 	panel.vm.broken["start"] = [2]int{http.StatusConflict, 370970}
 	r := &VmGatewayResource{client: c, poll: time.Millisecond}
-	_, plan, empty := gatewayRaw(t, nil)
+	plan, empty := gatewayRaw(t, nil)
 	created := resource.CreateResponse{State: empty}
 	r.Create(context.Background(), resource.CreateRequest{Plan: plan}, &created)
 	var state VmGatewayResourceModel
@@ -602,7 +605,7 @@ func TestVmGatewayCreate_UnknownWriteAndFailedRestartCanRecoverWithoutAdoptingFo
 	if d := read.State.Get(context.Background(), &state); d.HasError() || !state.OwnedGateway.IsNull() || !state.Gateway.IsNull() {
 		t.Fatalf("refresh adopted a foreign route: state=%+v diagnostics=%v", state, d)
 	}
-	_, recoverPlan, _ := gatewayRaw(t, map[string]tftypes.Value{
+	recoverPlan, _ := gatewayRaw(t, map[string]tftypes.Value{
 		"interface_id": vmNum(91), "restart_pending": tftypes.NewValue(tftypes.Bool, tftypes.UnknownValue),
 	})
 	recovered := resource.UpdateResponse{State: read.State}
