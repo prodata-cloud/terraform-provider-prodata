@@ -44,8 +44,8 @@ Name, CPU, RAM and description update the same VM in place. CPU/RAM changes stop
 ### Optional
 
 - `description` (String) VM description. Updated in place.
-- `region` (String) Source backup's region; defaults to the provider. Updated in place.
-- `project_tag` (String) Source backup's project; defaults to the provider. Updated in place.
+- `region` (String) Source backup's region; defaults to the provider. Changes replace the VM.
+- `project_tag` (String) Source backup's project; defaults to the provider. Changes replace the VM.
 - `timeouts` (Object) `create` and `delete` default to `60m`, `read` to `5m`, `update` to `30m`.
 
 ### Read-Only

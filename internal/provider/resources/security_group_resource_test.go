@@ -179,7 +179,7 @@ func TestSecurityGroupValidateConfigWaitsForUnknownProtocolAndRules(t *testing.T
 			m := SecurityGroupModel{Rules: rules}
 			state := securityGroupState(t, r, &m)
 			var resp resource.ValidateConfigResponse
-			r.ValidateConfig(context.Background(), resource.ValidateConfigRequest{Config: tfsdk.Config{Schema: state.Schema, Raw: state.Raw}}, &resp)
+			r.ValidateConfig(context.Background(), resource.ValidateConfigRequest{Config: tfsdk.Config(state)}, &resp)
 			if resp.Diagnostics.HasError() != tc.wantError {
 				t.Fatalf("diagnostics: %v", resp.Diagnostics)
 			}
