@@ -4,6 +4,12 @@ All notable changes to this provider are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- `prodata_local_network`: creating a network with a name that is already in use now reports API error `614` and leaves it outside Terraform state. Existing networks require an explicit import, even when their CIDR and gateway match the configuration.
+
 ## [0.31.1] - 2026-11-06
 
 ### Fixed

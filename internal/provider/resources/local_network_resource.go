@@ -162,40 +162,17 @@ func (r *LocalNetworkResource) Create(ctx context.Context, req resource.CreateRe
 		return r.client.CreateLocalNetwork(ctx, createReq)
 	})
 	if err != nil {
-		// Error 614: network with this name already exists — adopt it into state.
-		// This happens when a previous create succeeded on the server but Terraform
-		// lost track of the state (e.g., timeout, interrupted apply).
 		if client.IsAPIError(err, 614) {
-			existing, adoptErr := r.findLocalNetworkByName(ctx, createReq.Name, createReq.Region, createReq.ProjectTag)
-			if adoptErr != nil {
-				resp.Diagnostics.AddError("Unable to Create Local Network",
-					fmt.Sprintf("network %q already exists but failed to look it up: %s (original error: %s)", createReq.Name, adoptErr, err))
-				return
-			}
-			// cidr and gateway are Required + RequiresReplace. Adopting a network whose
-			// CIDR/gateway differ from config would write the server's values into state,
-			// so every subsequent plan would force a destroy/recreate (which hits 614
-			// again) — a permanent diff / adoption loop. Refuse to adopt a mismatch.
-			if existing.CIDR != createReq.CIDR || existing.Gateway != createReq.Gateway {
-				resp.Diagnostics.AddError(
-					"Conflicting Local Network",
-					fmt.Sprintf("a local network named %q already exists with cidr %q and gateway %q, "+
-						"which differ from the configured cidr %q and gateway %q. Import the existing "+
-						"network (terraform import) or choose a different name — refusing to adopt a "+
-						"mismatched network, which would force a destroy/recreate on every apply.",
-						createReq.Name, existing.CIDR, existing.Gateway, createReq.CIDR, createReq.Gateway),
-				)
-				return
-			}
-			tflog.Info(ctx, "Local network already exists, adopting into state", map[string]any{
-				"id":   existing.ID,
-				"name": existing.Name,
-			})
-			network = existing
+			// Matching name, CIDR and gateway do not establish ownership. Only an
+			// explicit import may bring a pre-existing network under management.
+			resp.Diagnostics.AddError("Unable to Create Local Network",
+				fmt.Sprintf("The name %q is already in use. Choose a different name, or use "+
+					"terraform import to explicitly manage the existing local network after verifying its ID. "+
+					"No existing network was added to state. Original error: %s", createReq.Name, err))
 		} else {
 			resp.Diagnostics.AddError("Unable to Create Local Network", err.Error())
-			return
 		}
+		return
 	}
 
 	data.ID = types.Int64Value(network.ID)
@@ -211,24 +188,6 @@ func (r *LocalNetworkResource) Create(ctx context.Context, req resource.CreateRe
 	})
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
-}
-
-// findLocalNetworkByName looks up an existing local network by name.
-func (r *LocalNetworkResource) findLocalNetworkByName(ctx context.Context, name, region, projectTag string) (*client.LocalNetwork, error) {
-	opts := &client.RequestOpts{
-		Region:     region,
-		ProjectTag: projectTag,
-	}
-	networks, err := r.client.GetLocalNetworks(ctx, opts)
-	if err != nil {
-		return nil, fmt.Errorf("failed to list local networks: %w", err)
-	}
-	for i := range networks {
-		if networks[i].Name == name {
-			return &networks[i], nil
-		}
-	}
-	return nil, fmt.Errorf("local network %q not found in list", name)
 }
 
 func (r *LocalNetworkResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
