@@ -55,7 +55,7 @@ func (r *S3BucketResource) Metadata(_ context.Context, req resource.MetadataRequ
 func (r *S3BucketResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
 		MarkdownDescription: "Manages a ProData S3 (Ceph RGW) bucket. " +
-			"Buckets are scoped to a single project; cross-project name conflicts surface as a clear error. " +
+			"Buckets are scoped to a single project; name conflicts require explicit import or a different name. " +
 			"ACL is trust-state (no drift detection — cannot round-trip canned ACL through S3 grants); " +
 			"`versioning` and `object_lock_enabled` are drift-detected.",
 		Attributes: map[string]schema.Attribute{
@@ -208,81 +208,11 @@ func (r *S3BucketResource) Create(ctx context.Context, req resource.CreateReques
 
 	err := r.c.CreateBucket(ctx, createReq, opts)
 	if err != nil && client.IsAPIError(err, 626) {
-		// 626 = name conflict. Verify ownership before adopting: same-project → adopt,
-		// other-project → loud error (never silent-drop someone else's bucket).
-		tflog.Info(ctx, "Bucket name conflict (626), checking ownership for adoption", map[string]any{"name": name})
-		existing, getErr := r.c.GetBucket(ctx, name, opts)
-		if getErr != nil {
-			if client.IsAPIError(getErr, 712) {
-				resp.Diagnostics.AddError(
-					"Bucket name taken by another project",
-					fmt.Sprintf("A bucket named %q already exists but belongs to a different project. Choose a different name.", name),
-				)
-				return
-			}
-			resp.Diagnostics.AddError(
-				"Unable to verify bucket conflict",
-				fmt.Sprintf("CreateBucket returned 626 but verifying ownership failed: %s", getErr.Error()),
-			)
-			return
-		}
-		tflog.Info(ctx, "Adopting pre-existing bucket in same project", map[string]any{"name": name})
-
-		// Capture the configured (desired) settings before refreshFromServer overwrites
-		// the versioning/object-lock fields with the adopted bucket's actual values.
-		desiredVersioning := plan.Versioning.ValueBool()
-		desiredObjectLock := plan.ObjectLockEnabled.ValueBool()
-		desiredACL := plan.Acl.ValueString()
-
-		if rfErr := r.refreshFromServer(ctx, &plan, existing, opts); rfErr != nil {
-			resp.Diagnostics.AddError("Unable to read adopted Bucket configuration", rfErr.Error())
-			return
-		}
-
-		// object_lock_enabled is create-only (RequiresReplace). If the existing bucket's
-		// value differs from config, adoption cannot reconcile it without a destroy/recreate
-		// that would delete bucket data — refuse rather than silently adopting a mismatch
-		// (which would otherwise force a replace on the next plan).
-		if plan.ObjectLockEnabled.ValueBool() != desiredObjectLock {
-			resp.Diagnostics.AddError(
-				"Cannot adopt bucket with mismatched object_lock_enabled",
-				fmt.Sprintf("A bucket named %q already exists with object_lock_enabled=%t, but the configuration requests %t. "+
-					"Object lock can only be set at creation, so adoption cannot change it. Use a different name or align the configuration.",
-					name, plan.ObjectLockEnabled.ValueBool(), desiredObjectLock),
-			)
-			return
-		}
-
-		// Reconcile the mutable settings to the configured values so the adopted bucket
-		// actually matches the plan. acl is trust-state-only (never read back), so without
-		// this the state would claim an acl the bucket may not have; versioning is applied
-		// directly instead of being deferred to a follow-up apply.
-		if aclEnum := aclToEnum(desiredACL); aclEnum != "" {
-			if err := r.c.PutBucketAcl(ctx, existing.Name, client.PutBucketAclRequest{Acl: aclEnum}, opts); err != nil {
-				resp.Diagnostics.AddError("Unable to apply ACL to adopted Bucket", err.Error())
-				return
-			}
-		}
-		if plan.Versioning.ValueBool() != desiredVersioning {
-			status := "SUSPENDED"
-			if desiredVersioning {
-				status = "ENABLED"
-			}
-			if err := r.c.PutBucketVersioning(ctx, existing.Name,
-				client.PutBucketVersioningRequest{VersioningConfiguration: &client.VersioningConfiguration{Status: status}}, opts); err != nil {
-				resp.Diagnostics.AddError("Unable to apply versioning to adopted Bucket", err.Error())
-				return
-			}
-			plan.Versioning = types.BoolValue(desiredVersioning)
-		}
-
-		plan.ID = types.StringValue(existing.Name)
-		plan.Name = types.StringValue(existing.Name)
-		plan.Region = types.StringValue(region)
-		plan.ProjectTag = types.StringValue(projectTag)
-		resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+		resp.Diagnostics.AddError("Bucket Name Already in Use",
+			fmt.Sprintf("A bucket named %q already exists. Choose a different name, or explicitly import the existing bucket after verifying its project and configuration. No existing bucket was added to state or reconfigured. Original error: %s", name, err))
 		return
 	}
+
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to Create Bucket", err.Error())
 		return
