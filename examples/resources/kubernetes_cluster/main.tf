@@ -1,3 +1,20 @@
+provider "prodata" {
+  region      = "UZ-5"
+  project_tag = "production-42" # Copy the tag from the project's settings.
+  # Set PRODATA_API_BASE_URL, PRODATA_API_KEY_ID and PRODATA_API_SECRET_KEY.
+}
+
+# The network, clusters, pools and data sources below share the provider's project.
+# To override it, set project_tag on each affected resource and data source:
+# project_tag = "another-project-43"
+# A pool does not inherit project/region from cluster_id alone.
+# Changing an existing resource's project_tag replaces it; it does not move it.
+resource "prodata_local_network" "k8s" {
+  name    = "k8s-network"
+  cidr    = "10.0.0.0/24"
+  gateway = "10.0.0.1"
+}
+
 # Pick the latest stable Kubernetes version.
 data "prodata_kubernetes_versions" "stable" {}
 

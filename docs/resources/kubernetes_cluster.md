@@ -28,6 +28,31 @@ Cluster creation is asynchronous; `terraform apply` blocks until the cluster rea
 
 ## Example Usage
 
+### Choosing a project
+
+Set the project's tag in the provider configuration (or `PRODATA_PROJECT_TAG`) so the network, cluster, worker pools, and data sources use the same project. For example, to create the resources below in a non-default project:
+
+```terraform
+provider "prodata" {
+  region      = "UZ-5"
+  project_tag = "production-42" # Copy the tag from the project's settings.
+  # API credentials are read from PRODATA_API_KEY_ID / PRODATA_API_SECRET_KEY.
+  # Set PRODATA_API_BASE_URL for your region.
+}
+
+resource "prodata_local_network" "k8s" {
+  name    = "k8s-network"
+  cidr    = "10.0.0.0/24"
+  gateway = "10.0.0.1"
+}
+```
+
+To override the provider's project for individual resources, set `project_tag = "production-42"` on the network, cluster, worker pool, and any data sources used with them. A reference such as `cluster_id = prodata_kubernetes_cluster.main.id` establishes a dependency; it does not make the pool inherit the cluster's project or region.
+
+Project selection does not move existing clusters between projects. Changing an existing resource's `project_tag` requires replacement; review `terraform plan` before applying.
+
+The panel API must honor `X-Project-Tag` when creating the cluster. Older servers can use the API key owner's current project instead; they require the panel's project-selection fix. Upgrading the provider alone does not correct that server behavior.
+
 ### Fixed-size, highly-available cluster
 
 ```terraform

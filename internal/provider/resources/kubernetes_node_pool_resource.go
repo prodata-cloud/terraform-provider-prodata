@@ -372,6 +372,11 @@ func (r *K8sNodePoolResource) Create(ctx context.Context, req resource.CreateReq
 	ctx, cancel := context.WithTimeout(ctx, createTimeout)
 	defer cancel()
 
+	if err := requireClusterInProject(ctx, r.c, clusterID, opts); err != nil {
+		resp.Diagnostics.AddError("Unable to verify node pool project", err.Error())
+		return
+	}
+
 	// ADR-K7: serialize per-cluster mutations within this process and refuse to act
 	// on a FAILed or in-flight (blocked) cluster. A pool create mutates the parent
 	// cluster, so it takes the same lock keyed by cluster id.

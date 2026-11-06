@@ -132,12 +132,11 @@ var kuberRequests = map[string]string{
 }
 
 // Every kuber method asks for English and keeps the region and project its call
-// is scoped to (the provider's for any that opts leaves unset). For API-key
-// callers the panel reads these headers only where it scopes a reply: the
-// cluster list by region and project, the master flavors by region. Permissions
-// are global to the key, and a cluster is created in the key owner's current
-// region and project. Every method is pinned anyway, so a call that drops its
-// scope is caught now rather than when the panel starts reading it.
+// is scoped to (the provider's for any that opts leaves unset). Project-aware
+// panel versions honor X-Project-Tag on create as well as listing; older API-key
+// endpoints created in the key owner's current project despite that header.
+// Cluster creation still uses the key owner's current region. Pin every method's
+// headers independently of which scope the server currently uses for that call.
 func TestKuberClient_SendsXLangEnglish(t *testing.T) {
 	checkSendsEnglishInScope(t, "doKuberV1", kuberRequests)
 }
