@@ -9,6 +9,7 @@ All notable changes to this provider are documented here. The format is based on
 ### Fixed
 
 - `prodata_local_network`: creating a network with a name that is already in use now reports API error `614` and leaves it outside Terraform state. Existing networks require an explicit import, even when their CIDR and gateway match the configuration.
+- `prodata_volume` and volume data sources use persistent volume identities across attach/detach. Refresh only removes a volume after the stable API explicitly confirms its absence; a missing endpoint, incomplete response, or attachment ID collision preserves state and reports an error. Renames and deletion use the same stable identity. Requires the matching panel API with `user-disk-v1` support; creation checks API support before allocating a volume.
 
 ## [0.31.1] - 2026-11-06
 

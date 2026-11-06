@@ -137,6 +137,10 @@ func (r *VolumeResource) Create(ctx context.Context, req resource.CreateRequest,
 		Type:       data.Type.ValueString(),
 		Size:       data.Size.ValueInt64(),
 	}
+	if err := r.client.CheckManagedVolumeAPI(ctx, &client.RequestOpts{Region: region, ProjectTag: projectTag}); err != nil {
+		resp.Diagnostics.AddError("Stable Volume API Required", err.Error())
+		return
+	}
 
 	tflog.Debug(ctx, "Creating volume", map[string]any{
 		"name":        createReq.Name,
@@ -193,35 +197,15 @@ func (r *VolumeResource) Read(ctx context.Context, req resource.ReadRequest, res
 		"project_tag": opts.ProjectTag,
 	})
 
-	volume, err := r.client.GetVolume(ctx, volumeID, opts)
+	volume, err := r.client.GetManagedVolume(ctx, volumeID, opts)
 	if err != nil {
-		if client.IsNotFound(err) {
-			tflog.Warn(ctx, "Volume not found, removing from state", map[string]any{"id": volumeID})
-			resp.State.RemoveResource(ctx)
-			return
-		}
 		resp.Diagnostics.AddError("Unable to Read Volume", err.Error())
 		return
 	}
-
-	// The by-id GET /volumes/{id} endpoint keeps returning soft-deleted volumes
-	// (success:true) after deletion, while the list endpoint drops them — so an
-	// out-of-band deletion would otherwise never be detected as drift. Confirm the
-	// volume is still live via the authoritative list. A transient list failure is
-	// NOT treated as deletion (keep prior state; a later refresh reconciles).
-	if volumes, lerr := r.client.GetVolumes(ctx, opts); lerr == nil {
-		stillPresent := false
-		for i := range volumes {
-			if volumes[i].ID == volumeID {
-				stillPresent = true
-				break
-			}
-		}
-		if !stillPresent {
-			tflog.Warn(ctx, "Volume absent from list (deleted out-of-band), removing from state", map[string]any{"id": volumeID})
-			resp.State.RemoveResource(ctx)
-			return
-		}
+	if !*volume.Exists {
+		tflog.Warn(ctx, "Stable API confirmed volume absence, removing from state", map[string]any{"id": volumeID})
+		resp.State.RemoveResource(ctx)
+		return
 	}
 
 	data.Name = types.StringValue(volume.Name)
@@ -265,7 +249,7 @@ func (r *VolumeResource) Update(ctx context.Context, req resource.UpdateRequest,
 		"project_tag": updateReq.ProjectTag,
 	})
 
-	volume, err := r.client.UpdateVolume(ctx, volumeID, updateReq)
+	volume, err := r.client.UpdateManagedVolume(ctx, volumeID, updateReq)
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to Update Volume", err.Error())
 		return
@@ -308,11 +292,8 @@ func (r *VolumeResource) Delete(ctx context.Context, req resource.DeleteRequest,
 		"project_tag": opts.ProjectTag,
 	})
 
-	err := r.client.DeleteVolume(ctx, volumeID, opts)
+	err := r.client.DeleteManagedVolume(ctx, volumeID, opts)
 	if err != nil {
-		if client.IsNotFound(err) {
-			return
-		}
 		resp.Diagnostics.AddError("Unable to Delete Volume", err.Error())
 		return
 	}

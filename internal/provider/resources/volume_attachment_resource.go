@@ -187,7 +187,7 @@ func (r *VolumeAttachmentResource) Read(ctx context.Context, req resource.ReadRe
 		// Only a genuinely-gone VM means the attachment is gone; a transient error
 		// must not silently drop the resource from state (it would be recreated and
 		// could double-attach on the next apply).
-		if client.IsNotFound(err) {
+		if client.IsAPIError(err, 601) {
 			tflog.Warn(ctx, "VM not found, removing volume attachment from state", map[string]any{
 				"vm_id": vmID,
 			})
@@ -291,7 +291,7 @@ func (r *VolumeAttachmentResource) Delete(ctx context.Context, req resource.Dele
 
 		vm, err := r.client.GetVmStatus(ctx, vmID, opts)
 		if err != nil {
-			if client.IsNotFound(err) {
+			if client.IsAPIError(err, 601) {
 				tflog.Info(ctx, "VM not found, volume attachment already gone", map[string]any{"vm_id": vmID})
 				return
 			}
@@ -303,7 +303,7 @@ func (r *VolumeAttachmentResource) Delete(ctx context.Context, req resource.Dele
 		case "STOPPED":
 			// VM is stopped — attempt detach
 			if err := r.client.DetachVolume(ctx, vmID, attachedVolumeID, opts); err != nil {
-				if client.IsNotFound(err) {
+				if client.IsAPIError(err, 601) {
 					tflog.Info(ctx, "Volume already detached", map[string]any{"vm_id": vmID, "attached_volume_id": attachedVolumeID})
 					goto detached
 				}
@@ -346,7 +346,7 @@ func (r *VolumeAttachmentResource) Delete(ctx context.Context, req resource.Dele
 		default:
 			tflog.Warn(ctx, "VM in unexpected status, attempting detach", map[string]any{"vm_id": vmID, "status": vm.Status})
 			if err := r.client.DetachVolume(ctx, vmID, attachedVolumeID, opts); err != nil {
-				if client.IsNotFound(err) {
+				if client.IsAPIError(err, 601) {
 					goto detached
 				}
 				resp.Diagnostics.AddError("Unable to Detach Volume", err.Error())

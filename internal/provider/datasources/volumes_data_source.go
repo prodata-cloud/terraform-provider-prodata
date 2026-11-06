@@ -22,9 +22,10 @@ type VolumesDataSource struct {
 }
 
 type VolumesDataSourceModel struct {
-	Region     types.String  `tfsdk:"region"`
-	ProjectTag types.String  `tfsdk:"project_tag"`
-	Volumes    []VolumeModel `tfsdk:"volumes"`
+	Region              types.String  `tfsdk:"region"`
+	ProjectTag          types.String  `tfsdk:"project_tag"`
+	Volumes             []VolumeModel `tfsdk:"volumes"`
+	UnverifiedVolumeIDs []types.Int64 `tfsdk:"unverified_volume_ids"`
 }
 
 type VolumeModel struct {
@@ -49,6 +50,11 @@ func (d *VolumesDataSource) Schema(ctx context.Context, req datasource.SchemaReq
 		MarkdownDescription: "List all available ProData volumes.",
 
 		Attributes: map[string]schema.Attribute{
+			"unverified_volume_ids": schema.ListAttribute{
+				MarkdownDescription: "Persistent IDs whose old platform records cannot prove whether the volume was deleted or lost its attachment. Inspect these records before managing them; they are not reported as deleted.",
+				Computed:            true,
+				ElementType:         types.Int64Type,
+			},
 			"region": schema.StringAttribute{
 				MarkdownDescription: "Region ID override. If not specified, uses the provider's default region.",
 				Optional:            true,
@@ -131,10 +137,15 @@ func (d *VolumesDataSource) Read(ctx context.Context, req datasource.ReadRequest
 		"project_tag": opts.ProjectTag,
 	})
 
-	volumes, err := d.client.GetVolumes(ctx, opts)
+	inventory, err := d.client.GetManagedVolumeInventory(ctx, opts)
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to List Volumes", err.Error())
 		return
+	}
+	volumes := inventory.Volumes
+	data.UnverifiedVolumeIDs = make([]types.Int64, len(inventory.UnverifiedVolumeIDs))
+	for i, id := range inventory.UnverifiedVolumeIDs {
+		data.UnverifiedVolumeIDs[i] = types.Int64Value(id)
 	}
 
 	data.Volumes = make([]VolumeModel, len(volumes))
