@@ -118,6 +118,23 @@ State versions written before you opt out still contain the credentials. See
 - `region` (String) Default region ID (e.g., `UZ-5`, `UZ-3`, `KZ-1`). Can also be set via `PRODATA_REGION` environment variable.
 - `project_tag` (String) Default project tag. Can also be set via `PRODATA_PROJECT_TAG` environment variable. The tag is shown on the project's settings page in the ProData Console; if you need to construct it manually, the format is `lowercase(name).replace(' ', '-') + '-' + id` — for example, a project named "My Project" with numeric id `42` has tag `my-project-42`.
 
+## Selecting a project
+
+Set `project_tag` in the provider configuration, or set `PRODATA_PROJECT_TAG`, to choose the default project for resources and data sources. A resource's own `project_tag` overrides that default. Copy the tag from the project's information page in the console.
+
+```terraform
+provider "prodata" {
+  project_tag = "production-42"
+  # Set the API credentials, base URL, and region as shown above.
+}
+```
+
+Use the same project for related resources. A reference such as `cluster_id = prodata_kubernetes_cluster.main.id` establishes a Terraform dependency; it does not set the node pool's `project_tag`. A node pool, or a load balancer backed by a node pool, must use the project of its parent cluster. The provider verifies that the cluster is listed in the selected project before creating either resource and stops if it cannot confirm that scope.
+
+Kubernetes cluster creation also requires a panel API that honors `X-Project-Tag` on create. Older servers can create a cluster in the API key owner's current project despite the configured tag; the panel's project-selection fix must be deployed to correct that behavior.
+
+Changing `project_tag` on an existing resource requires replacement. Neither a provider upgrade nor a panel upgrade moves existing resources between projects.
+
 ## Regional API URLs
 
 | Region     | Base URL                     |

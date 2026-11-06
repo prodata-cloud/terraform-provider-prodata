@@ -448,6 +448,18 @@ func (r *LbResource) Create(ctx context.Context, req resource.CreateRequest, res
 			resp.Diagnostics.AddError("Invalid port configuration", perr.Error())
 			return
 		}
+		if projectTag != "" {
+			pool, err := r.c.GetNodePool(ctx, plan.BackendGroup.NodePoolID.ValueInt64(), opts)
+			if err != nil {
+				resp.Diagnostics.AddError("Unable to verify load balancer project",
+					client.KuberErrorDetail(err)+". Verify Kubernetes read permissions for the API key before retrying.")
+				return
+			}
+			if err := requireClusterInProject(ctx, r.c, pool.ClusterID, opts); err != nil {
+				resp.Diagnostics.AddError("Unable to verify load balancer project", err.Error())
+				return
+			}
+		}
 		wire := client.CreateLoadBalancerCCMRequest{
 			Name:       plan.Name.ValueString(),
 			NodePoolID: plan.BackendGroup.NodePoolID.ValueInt64(),

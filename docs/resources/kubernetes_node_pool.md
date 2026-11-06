@@ -11,6 +11,8 @@ Manages a worker node pool on a ProData Managed Kubernetes cluster. The cluster 
 
 Pool creation and scaling are asynchronous; `terraform apply` blocks until the pool converges or the timeout elapses.
 
+~> **Note:** The pool's `project_tag` (or the provider default) must match its parent cluster's project. The provider checks the cluster listing in that project before creating the pool and fails if the parent is absent or the listing cannot be read. Referencing `cluster_id` does not make the pool inherit the cluster's project; configure both resources for the same project.
+
 ~> **Note:** Sizing (`vcpu`, `ram`, `disk_size`) and `name` are immutable — changing them forces a new resource. Only `node_count` and `autoscaling` are updated in place.
 
 ## Example Usage

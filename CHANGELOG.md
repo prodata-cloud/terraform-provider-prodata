@@ -4,6 +4,16 @@ All notable changes to this provider are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.31.1-rc.1] - 2026-11-06
+
+### Fixed
+
+- Kubernetes node pools and load balancers backed by a node pool verify that their parent cluster is visible in the selected project before creating anything. A mismatched `project_tag` or an unavailable project listing now fails before provisioning, including against older APIs that otherwise create the resource in the parent's project and silently ignore the requested tag.
+
+### Documentation
+
+- Clarify project selection, the matching scope required by dependent resources, and the replacement behavior of `project_tag`, with an explicit non-default project example. Kubernetes cluster creation requires the corresponding project-selection fix in the panel API; upgrading only the provider does not change older servers' behavior.
+
 ## [0.31.0] - 2026-10-28
 
 ### Added

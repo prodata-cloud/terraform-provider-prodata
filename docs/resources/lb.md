@@ -16,6 +16,10 @@ A balancer can dispatch traffic to either:
 
 Switching between the two backend modes forces resource replacement; same-mode content changes (renaming, port edits, swapping VM members in/out, adjusting `description`) are applied in place.
 
+~> **Note:** A load balancer backed by `backend_group.node_pool_id` belongs to that pool's cluster project. Its `project_tag` (or the provider default) must match that project. The provider reads the pool and checks that its cluster is listed in the selected project before creating the balancer; a missing parent or an unreadable listing stops creation.
+
+For this node-pool mode, the API key needs Kubernetes **read** permission to verify the parent, in addition to its load-balancer permissions. VM-backed balancers do not perform this Kubernetes lookup.
+
 ~> **Note:** Creating a load balancer requires at least **three** free IPs in `network_id` (one VIP plus two for the hidden nginx VMs). The server returns error code 737 ("Insufficient free IPs in network for load balancer.") when the network does not have enough; the provider surfaces this as a clear plan/apply error.
 
 ~> **Note:** `name`, `description`, `port`, and `backend_group` content (VM members) are updated in place. Changing `region`, `project_tag`, `type`, `protocol`, `network_id`, or switching backend modes forces a new resource. The hidden nginx VMs are not re-provisioned on in-place updates.
