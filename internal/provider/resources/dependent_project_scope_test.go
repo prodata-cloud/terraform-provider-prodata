@@ -187,6 +187,7 @@ func dependentProjectPlan(t *testing.T, r resource.Resource, kind, resourceTag s
 		}
 		values["backend_group"] = tftypes.NewValue(group, map[string]tftypes.Value{
 			"node_pool_id": nirNum(7), "vm_ids": tftypes.NewValue(group.AttributeTypes["vm_ids"], nil),
+			"asg_id": tftypes.NewValue(tftypes.Number, nil),
 		})
 		ports, ok := obj.AttributeTypes["port"].(tftypes.Set)
 		if !ok {

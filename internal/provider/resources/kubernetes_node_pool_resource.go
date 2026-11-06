@@ -86,9 +86,9 @@ func (r *K8sNodePoolResource) Metadata(_ context.Context, req resource.MetadataR
 
 func (r *K8sNodePoolResource) Schema(ctx context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		MarkdownDescription: "Manages an additional worker node pool on a ProData Managed Kubernetes cluster. " +
-			"The cluster's first (default) worker pool is managed inline by the `prodata_kubernetes_cluster` " +
-			"resource; use this resource for every pool beyond it. Pool creation and scaling are asynchronous; " +
+		MarkdownDescription: "Manages a worker node pool on a ProData Managed Kubernetes cluster. " +
+			"The cluster is control-plane-only; use this resource for every worker pool, including the first. " +
+			"Pool creation and scaling are asynchronous; " +
 			"`terraform apply` blocks until the pool converges or the timeout elapses.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.Int64Attribute{
@@ -138,21 +138,18 @@ func (r *K8sNodePoolResource) Schema(ctx context.Context, _ resource.SchemaReque
 				},
 			},
 			"vcpu": schema.Int64Attribute{
-				MarkdownDescription: "vCPUs per worker node. Changing it forces a new resource.",
+				MarkdownDescription: "vCPUs per worker node. Updated by rolling the workers while preserving the pool ID.",
 				Required:            true,
-				PlanModifiers:       []planmodifier.Int64{int64planmodifier.RequiresReplace()},
 				Validators:          []validator.Int64{int64validator.AtLeast(1)},
 			},
 			"ram": schema.Int64Attribute{
-				MarkdownDescription: "RAM per worker node, in GB. Changing it forces a new resource.",
+				MarkdownDescription: "RAM per worker node, in GB. Updated by rolling the workers while preserving the pool ID.",
 				Required:            true,
-				PlanModifiers:       []planmodifier.Int64{int64planmodifier.RequiresReplace()},
 				Validators:          []validator.Int64{int64validator.AtLeast(1)},
 			},
 			"disk_size": schema.Int64Attribute{
-				MarkdownDescription: "Disk size per worker node, in GB. Changing it forces a new resource.",
+				MarkdownDescription: "Disk size per worker node, in GB. Increases roll the workers while preserving the pool ID. Shrinking is not supported.",
 				Required:            true,
-				PlanModifiers:       []planmodifier.Int64{int64planmodifier.RequiresReplace()},
 				Validators:          []validator.Int64{int64validator.AtLeast(1)},
 			},
 			"node_count": schema.Int64Attribute{
@@ -315,7 +312,14 @@ func (r *K8sNodePoolResource) ModifyPlan(ctx context.Context, req resource.Modif
 		return
 	}
 
-	if !nodePoolChanged(&state, &plan) {
+	if !plan.DiskSize.IsUnknown() && !state.DiskSize.IsNull() && plan.DiskSize.ValueInt64() < state.DiskSize.ValueInt64() {
+		resp.Diagnostics.AddAttributeError(path.Root("disk_size"), "Worker disk shrinking is not supported", "Increase disk_size, or create a separate pool and migrate workloads explicitly.")
+		return
+	}
+	if nodePoolHardwareChanged(&state, &plan) {
+		resp.Diagnostics.AddWarning("Worker machines will be replaced gradually", "The node pool keeps its ID. Worker machines are drained and replaced one at a time; local ephemeral data on their boot disks is lost. Application data must use storage with suitable retention. The update requires a compatible panel API and Kubernetes service.")
+	}
+	if !nodePoolChanged(&state, &plan) && !nodePoolHardwareChanged(&state, &plan) {
 		return
 	}
 
@@ -520,6 +524,17 @@ func (r *K8sNodePoolResource) Read(ctx context.Context, req resource.ReadRequest
 	region := valueOrDefault(data.Region, r.c.Region)
 	projectTag := valueOrDefault(data.ProjectTag, r.c.ProjectTag)
 	r.applyServerState(&data, pool, region, projectTag, true)
+	if hardware, err := r.c.NodePoolHardware(ctx, id, opts); err == nil {
+		data.VCPU = types.Int64Value(hardware.VCPU)
+		data.RAM = types.Int64Value(hardware.RAM)
+		data.DiskSize = types.Int64Value(hardware.DiskSize)
+		if !*hardware.Ready {
+			data.Status = types.StringValue("PROCESSING")
+		}
+	} else if !client.IsNotFound(err) {
+		resp.Diagnostics.AddError("Unable to verify worker hardware", err.Error())
+		return
+	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
 
@@ -552,6 +567,13 @@ func (r *K8sNodePoolResource) Update(ctx context.Context, req resource.UpdateReq
 	if err := r.ensureClusterMutable(ctx, clusterID, opts); err != nil {
 		resp.Diagnostics.AddError("Cluster is not in a modifiable state", client.KuberErrorDetail(err))
 		return
+	}
+
+	if nodePoolHardwareChanged(&state, &plan) {
+		if err := r.resizePoolHardware(ctx, poolID, &state, &plan, opts); err != nil {
+			resp.Diagnostics.AddError("Unable to update worker hardware", err.Error())
+			return
+		}
 	}
 
 	changed, err := r.reconcilePool(ctx, clusterID, poolID, &state, &plan, opts)
@@ -590,6 +612,41 @@ func (r *K8sNodePoolResource) Update(ctx context.Context, req resource.UpdateReq
 		plan.NodeCount = state.NodeCount
 	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+}
+
+func nodePoolHardwareChanged(state, plan *K8sNodePoolModel) bool {
+	return !state.VCPU.Equal(plan.VCPU) || !state.RAM.Equal(plan.RAM) || !state.DiskSize.Equal(plan.DiskSize)
+}
+
+func (r *K8sNodePoolResource) resizePoolHardware(ctx context.Context, id int64, state, plan *K8sNodePoolModel, opts *client.RequestOpts) error {
+	if plan.VCPU.IsUnknown() || plan.RAM.IsUnknown() || plan.DiskSize.IsUnknown() || plan.VCPU.ValueInt64() < 1 || plan.RAM.ValueInt64() < 1 {
+		return fmt.Errorf("worker hardware must be known and positive before updating")
+	}
+	if plan.DiskSize.ValueInt64() < state.DiskSize.ValueInt64() {
+		return fmt.Errorf("shrinking worker disks is not supported")
+	}
+	order := client.NodePoolHardwareRequest{VCPU: plan.VCPU.ValueInt64(), RAM: plan.RAM.ValueInt64(), DiskSize: plan.DiskSize.ValueInt64()}
+	view, err := r.c.ResizeNodePoolHardware(ctx, id, order, opts)
+	if err != nil {
+		return err
+	}
+	for {
+		if view.VCPU != order.VCPU || view.RAM != order.RAM || view.DiskSize != order.DiskSize {
+			return fmt.Errorf("worker hardware readback does not match the requested configuration; refresh and retry")
+		}
+		if *view.Ready {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(k8sPollInterval):
+		}
+		view, err = r.c.NodePoolHardware(ctx, id, opts)
+		if err != nil {
+			return err
+		}
+	}
 }
 
 // reconcilePool applies node_count / autoscaling changes, choosing the right

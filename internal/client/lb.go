@@ -45,29 +45,38 @@ const (
 
 // LoadBalancer is the decoded, flattened form of panel-main's LoadBalancerDTO.
 type LoadBalancer struct {
-	ID          int64
-	Name        string
-	Description string
-	Type        string // "external" | "internal"
-	Source      string // "FRONTEND" | "CCM" — empty for legacy LBs created before sourcing
-	Status      string // NEW | PROCESSING | SUCCESS | DELETED | FAIL
-	Protocol    string
-	NetworkID   int64
-	PublicIP    string // provisioned public IP; empty for internal LBs or while NEW
-	PrivateIP   string // VIP inside the local network; may be empty while NEW
-	DateCreated string
-	Backends    []LbBackend
-	Ports       []LbPort
-	Region      string
-	ProjectTag  string
+	ID            int64
+	Name          string
+	Description   string
+	Type          string // "external" | "internal"
+	Source        string // "FRONTEND" | "CCM" — empty for legacy LBs created before sourcing
+	Status        string // NEW | PROCESSING | SUCCESS | DELETED | FAIL
+	ErrorMessage  string
+	Protocol      string
+	NetworkID     int64
+	PublicIP      string // provisioned public IP; empty for internal LBs or while NEW
+	PrivateIP     string // VIP inside the local network; may be empty while NEW
+	DateCreated   string
+	Backends      []LbBackend
+	BackendGroups []LbBackendGroup
+	Ports         []LbPort
+	Region        string
+	ProjectTag    string
+}
+
+type LbBackendGroup struct {
+	Kind       string `json:"kind"`
+	ASGID      int64  `json:"asgId"`
+	NodePoolID int64  `json:"nodePoolId"`
 }
 
 // LbBackend is one backend member of a load balancer. Backends are identified by
 // VM guid (see prodata_vm's computed `guid` attribute).
 type LbBackend struct {
-	Guid   string
-	Status string
-	IP     string
+	Guid           string
+	Status         string
+	IP             string
+	ManagedByGroup bool
 }
 
 // LbPort is one port mapping: traffic to Port on the balancer is forwarded to
@@ -79,7 +88,8 @@ type LbPort struct {
 
 // LbBackendRef references a backend VM by its guid in a create/configure request.
 type LbBackendRef struct {
-	UserVmID string `json:"userVmId"`
+	UserVmID string `json:"userVmId,omitempty"`
+	ASGID    int64  `json:"asgId,omitempty"`
 }
 
 // LbPortReq is a port mapping in a create/configure request.
@@ -118,21 +128,23 @@ type CreateLoadBalancerCCMRequest struct {
 // ---- wire types: mirror panel-main's LoadBalancerDTO exactly ----
 
 type lbDTO struct {
-	ID                   int64          `json:"id"`
-	Name                 string         `json:"name"`
-	Description          string         `json:"description"`
-	IsPublic             bool           `json:"isPublic"`
-	Status               lbStatusDTO    `json:"status"`
-	UserNet              int64          `json:"userNet"`
-	DateCreated          string         `json:"dateCreated"`
-	LocalUserVip         string         `json:"localUserVip"`
-	ProvisioningPublicIP string         `json:"provisioningPublicIp"`
-	Protocol             string         `json:"protocol"`
-	Backends             []lbBackendDTO `json:"backends"`
-	Ports                []lbPortDTO    `json:"ports"`
-	Source               string         `json:"source"`
-	Region               string         `json:"region"`
-	ProjectTag           string         `json:"projectTag"`
+	ID                   int64            `json:"id"`
+	Name                 string           `json:"name"`
+	Description          string           `json:"description"`
+	IsPublic             bool             `json:"isPublic"`
+	Status               lbStatusDTO      `json:"status"`
+	ErrorMessage         string           `json:"errMessage"`
+	UserNet              int64            `json:"userNet"`
+	DateCreated          string           `json:"dateCreated"`
+	LocalUserVip         string           `json:"localUserVip"`
+	ProvisioningPublicIP string           `json:"provisioningPublicIp"`
+	Protocol             string           `json:"protocol"`
+	Backends             []lbBackendDTO   `json:"backends"`
+	BackendGroups        []LbBackendGroup `json:"backendGroups"`
+	Ports                []lbPortDTO      `json:"ports"`
+	Source               string           `json:"source"`
+	Region               string           `json:"region"`
+	ProjectTag           string           `json:"projectTag"`
 }
 
 type lbStatusDTO struct {
@@ -140,9 +152,10 @@ type lbStatusDTO struct {
 }
 
 type lbBackendDTO struct {
-	IP     string         `json:"ip"`
-	Status lbStatusDTO    `json:"status"`
-	UserVM lbBackendVMDTO `json:"userVM"`
+	IP             string         `json:"ip"`
+	Status         lbStatusDTO    `json:"status"`
+	UserVM         lbBackendVMDTO `json:"userVM"`
+	ManagedByGroup bool           `json:"managedByGroup"`
 }
 
 type lbBackendVMDTO struct {
@@ -160,25 +173,28 @@ func (d *lbDTO) toLoadBalancer() *LoadBalancer {
 	// the schema's stringvalidator.OneOf("TCP","UDP") and trigger a spurious
 	// RequiresReplace destroy+recreate on the next plan.
 	lb := &LoadBalancer{
-		ID:          d.ID,
-		Name:        d.Name,
-		Description: d.Description,
-		Type:        lbTypeFromIsPublic(d.IsPublic),
-		Source:      d.Source,
-		Status:      d.Status.Name,
-		Protocol:    strings.ToUpper(d.Protocol),
-		NetworkID:   d.UserNet,
-		PublicIP:    d.ProvisioningPublicIP,
-		PrivateIP:   d.LocalUserVip,
-		DateCreated: d.DateCreated,
-		Region:      d.Region,
-		ProjectTag:  d.ProjectTag,
+		ID:            d.ID,
+		Name:          d.Name,
+		Description:   d.Description,
+		Type:          lbTypeFromIsPublic(d.IsPublic),
+		Source:        d.Source,
+		Status:        d.Status.Name,
+		ErrorMessage:  d.ErrorMessage,
+		Protocol:      strings.ToUpper(d.Protocol),
+		NetworkID:     d.UserNet,
+		PublicIP:      d.ProvisioningPublicIP,
+		PrivateIP:     d.LocalUserVip,
+		DateCreated:   d.DateCreated,
+		Region:        d.Region,
+		ProjectTag:    d.ProjectTag,
+		BackendGroups: d.BackendGroups,
 	}
 	for _, b := range d.Backends {
 		lb.Backends = append(lb.Backends, LbBackend{
-			Guid:   b.UserVM.Guid,
-			Status: b.Status.Name,
-			IP:     b.IP,
+			Guid:           b.UserVM.Guid,
+			Status:         b.Status.Name,
+			IP:             b.IP,
+			ManagedByGroup: b.ManagedByGroup,
 		})
 	}
 	for _, p := range d.Ports {

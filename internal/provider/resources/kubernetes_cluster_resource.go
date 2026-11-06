@@ -370,14 +370,11 @@ func (r *K8sClusterResource) Schema(ctx context.Context, _ resource.SchemaReques
 				MarkdownDescription: "Master node configuration (flavor) ID, from the " +
 					"`prodata_kubernetes_flavors` data source. Mutually exclusive with " +
 					"`control_plane_size` — set exactly one. When you set `control_plane_size` instead, " +
-					"this is resolved and exported as a computed value. Changing it forces a new resource: " +
-					"resizing the control plane in place is not yet supported, so a different master " +
-					"flavor recreates the cluster.",
+					"this is resolved and exported as a computed value. Changing it rolls the control-plane machines while preserving the cluster ID. Disk shrinking is not supported.",
 				Optional:   true,
 				Computed:   true,
 				Validators: []validator.Int64{int64validator.AtLeast(1)},
 				PlanModifiers: []planmodifier.Int64{
-					int64planmodifier.RequiresReplace(),
 					int64planmodifier.UseStateForUnknown(),
 				},
 			},
@@ -386,12 +383,11 @@ func (r *K8sClusterResource) Schema(ctx context.Context, _ resource.SchemaReques
 					"convenience alias that selects the master flavor for you based on " +
 					"`high_availability` (the provider maps the size onto the region's master-flavor " +
 					"catalog by capacity). Mutually exclusive with `master_flavor_id` — set exactly one. " +
-					"Changing it forces a new resource.",
+					"Changing it rolls the control-plane machines while preserving the cluster ID.",
 				Optional: true,
 				Validators: []validator.String{
 					stringvalidator.OneOf("small", "medium", "large"),
 				},
-				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
 			},
 			"exclude_credentials_from_state": schema.BoolAttribute{
 				MarkdownDescription: "Keep the cluster's credentials out of Terraform state. When `true`, `kube_config` " +
@@ -622,15 +618,21 @@ func (r *K8sClusterResource) ModifyPlan(ctx context.Context, req resource.Modify
 	r.planNodeIPRange(ctx, cfg, plan, &state, &resp.Diagnostics)
 
 	versionChanged := !plan.KubernetesVersion.Equal(state.KubernetesVersion)
+	hardwareChanged := !plan.MasterFlavorID.Equal(state.MasterFlavorID) || !plan.ControlPlaneSize.Equal(state.ControlPlaneSize)
+	if hardwareChanged {
+		resp.Diagnostics.AddWarning("Control-plane resizing uses a gradual replacement", "Changing the selected master flavor rolls control-plane machines one at a time while the cluster keeps its ID, requiring capacity and one spare node IP for a surge machine. The update requires a compatible panel and Kubernetes service. Disk shrinking is refused.")
+		if cfg.MasterFlavorID.IsNull() && !plan.ControlPlaneSize.IsNull() && !plan.ControlPlaneSize.Equal(state.ControlPlaneSize) {
+			resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("master_flavor_id"), types.Int64Unknown())...)
+		}
+	}
 
 	// ADR-K3: a version upgrade rolls the control plane and can rewrite the kubeconfig /
 	// api_endpoint (and the credentials), and transits the cluster through
 	// PROCESSING / blocked, so those and the volatile status/count fields must be
 	// unknown in the plan — otherwise Terraform's "provider produced inconsistent
 	// result after apply" check fails. kube_config is a nested object, blanked as a
-	// whole ObjectUnknown. (A master-flavor change forces replacement, so the
-	// framework handles it, not here.)
-	if versionChanged {
+	// whole ObjectUnknown. Hardware changes roll the control plane too, so the same volatile fields are reopened.
+	if versionChanged || hardwareChanged {
 		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("kube_config"), types.ObjectUnknown(kubeConfigAttrTypes()))...)
 		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("api_endpoint"), types.StringUnknown())...)
 		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("ssh_key_encoded"), types.StringUnknown())...)
@@ -660,7 +662,7 @@ func (r *K8sClusterResource) ModifyPlan(ctx context.Context, req resource.Modify
 //     right before Create;
 //   - configured, create plan or the range / network_id changes: preflight against the
 //     network. Terraform core re-plans every replacement with a null prior state, so a
-//     replacement for ANY reason (name, pod_cidr, flavor, -replace, …) also arrives here
+//     replacement for ANY reason (name, pod_cidr, -replace, …) also arrives here
 //     as a create plan and is checked (only its errors reach the user, see ModifyPlan);
 //   - configured but identical to state with the same network (or network_id merely
 //     adopted after an import): NOT checked. An in-place update and a plain destroy of an
@@ -1008,6 +1010,31 @@ func (r *K8sClusterResource) Update(ctx context.Context, req resource.UpdateRequ
 	}
 	ctx, cancel := context.WithTimeout(ctx, updateTimeout)
 	defer cancel()
+	hardwareChanged := !plan.MasterFlavorID.Equal(state.MasterFlavorID) || !plan.ControlPlaneSize.Equal(state.ControlPlaneSize)
+	// Adding the size alias after an import may select the very same flavor. Resolve
+	// it before requiring a mutable cluster so this state-only adoption remains possible.
+	if hardwareChanged && !plan.ControlPlaneSize.IsNull() && !plan.ControlPlaneSize.IsUnknown() {
+		catalog, err := r.c.GetMasterNodeConfigs(ctx, plan.HighAvailability.ValueBool(), opts)
+		if err != nil {
+			resp.Diagnostics.AddError("Unable to resolve control_plane_size", err.Error())
+			return
+		}
+		flavorID, ok := client.FlavorIDBySize(catalog, plan.ControlPlaneSize.ValueString())
+		if !ok {
+			resp.Diagnostics.AddError("Unable to resolve control_plane_size", "The selected region/HA catalog does not map this size alias.")
+			return
+		}
+		plan.MasterFlavorID = types.Int64Value(flavorID)
+		hardwareChanged = flavorID != state.MasterFlavorID.ValueInt64()
+	}
+	if hardwareChanged || !plan.KubernetesVersion.Equal(state.KubernetesVersion) {
+		unlock := lockCluster(id)
+		defer unlock()
+		if err := r.ensureMutable(ctx, id, opts); err != nil {
+			resp.Diagnostics.AddError("Cluster is not in a modifiable state", client.KuberErrorDetail(err))
+			return
+		}
+	}
 
 	// Kubernetes version upgrade (in-place, async) — the only change that calls the cluster.
 	// Every other in-place change (exclude_credentials_from_state, timeouts) only rewrites
@@ -1017,13 +1044,6 @@ func (r *K8sClusterResource) Update(ctx context.Context, req resource.UpdateRequ
 		// ADR-K7: serialize per-cluster mutations within this process and refuse to
 		// act on a FAILed or in-flight (blocked) cluster. The lock is held through the
 		// read-back below.
-		unlock := lockCluster(id)
-		defer unlock()
-		if err := r.ensureMutable(ctx, id, opts); err != nil {
-			resp.Diagnostics.AddError("Cluster is not in a modifiable state", client.KuberErrorDetail(err))
-			return
-		}
-
 		if _, err := r.c.UpdateClusterVersion(ctx, id, plan.KubernetesVersion.ValueString(), opts); err != nil {
 			resp.Diagnostics.AddError("Unable to upgrade Kubernetes version", client.KuberErrorDetail(err))
 			return
@@ -1031,6 +1051,12 @@ func (r *K8sClusterResource) Update(ctx context.Context, req resource.UpdateRequ
 		if _, waitErr := r.waitForClusterReady(ctx, id, plan.KubernetesVersion.ValueString(), opts); waitErr != nil {
 			resp.Diagnostics.AddError("Cluster did not stabilize after version upgrade",
 				fmt.Sprintf("cluster %d: %s", id, waitErr.Error()))
+			return
+		}
+	}
+	if hardwareChanged {
+		if err := r.resizeControlPlane(ctx, id, &state, &plan, opts); err != nil {
+			resp.Diagnostics.AddError("Unable to update control-plane hardware", err.Error())
 			return
 		}
 	}
@@ -1046,16 +1072,73 @@ func (r *K8sClusterResource) Update(ctx context.Context, req resource.UpdateRequ
 		if !plan.KubernetesVersion.Equal(state.KubernetesVersion) {
 			next = "The version upgrade itself succeeded; run `terraform refresh` to reconcile Terraform state."
 		}
+		if hardwareChanged {
+			next = "The control-plane hardware operation was accepted; run terraform refresh to reconcile state."
+		}
 		resp.Diagnostics.AddError(
 			"Unable to read the cluster back after the update",
 			fmt.Sprintf("Reading cluster %d back failed: %s. %s", id, client.KuberErrorDetail(readErr), next),
 		)
 		return
 	}
+	if hardwareChanged && (final.MasterNodeConfig == nil || final.MasterNodeConfig.ID != plan.MasterFlavorID.ValueInt64()) {
+		resp.Diagnostics.AddError("Control-plane readback is stale", "The hardware operation completed, but the cluster readback does not yet report the requested master flavor. Refresh and retry.")
+		return
+	}
 	region := valueOrDefault(state.Region, r.c.Region)
 	projectTag := valueOrDefault(state.ProjectTag, r.c.ProjectTag)
 	r.applyServerState(ctx, &plan, final, region, projectTag)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+}
+
+func (r *K8sClusterResource) resizeControlPlane(ctx context.Context, id int64, state, plan *K8sClusterModel, opts *client.RequestOpts) error {
+	flavors, err := r.c.GetMasterNodeConfigs(ctx, plan.HighAvailability.ValueBool(), opts)
+	if err != nil {
+		return err
+	}
+	flavorID := plan.MasterFlavorID.ValueInt64()
+	if !plan.ControlPlaneSize.IsNull() && !plan.ControlPlaneSize.IsUnknown() {
+		var ok bool
+		flavorID, ok = client.FlavorIDBySize(flavors, plan.ControlPlaneSize.ValueString())
+		if !ok {
+			return fmt.Errorf("cannot resolve control_plane_size from the region's HA-filtered master catalog")
+		}
+	}
+	var selected *client.MasterNodeConfig
+	for i := range flavors {
+		if flavors[i].ID == flavorID {
+			selected = &flavors[i]
+			break
+		}
+	}
+	if selected == nil {
+		return fmt.Errorf("master_flavor_id is unavailable for the selected region and HA mode")
+	}
+	plan.MasterFlavorID = types.Int64Value(flavorID)
+	if flavorID == state.MasterFlavorID.ValueInt64() {
+		return nil
+	}
+	view, err := r.c.ResizeControlPlaneHardware(ctx, id, flavorID, opts)
+	if err != nil {
+		return err
+	}
+	for {
+		if view.MasterFlavorID != flavorID || view.VCPU != int64(selected.CPU) || view.RAM != int64(selected.RAM) || view.DiskSize != int64(selected.SSD) {
+			return fmt.Errorf("control-plane hardware readback differs from the requested master flavor; refresh and retry")
+		}
+		if *view.Ready {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(k8sPollInterval):
+		}
+		view, err = r.c.ControlPlaneHardware(ctx, id, opts)
+		if err != nil {
+			return err
+		}
+	}
 }
 
 // ---- Delete ----

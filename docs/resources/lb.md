@@ -14,7 +14,7 @@ A balancer can dispatch traffic to either:
 - a set of ProData VMs (`backend_group.vm_ids`) — referred to as `FRONTEND` source on the server, or
 - an entire Kubernetes node pool (`backend_group.node_pool_id`) — `CCM` source.
 
-Switching between the two backend modes forces resource replacement; same-mode content changes (renaming, port edits, swapping VM members in/out, adjusting `description`) are applied in place.
+An auto scaling group can also supply the backends through `backend_group.asg_id`. The platform keeps its current members synchronized, including when the group scales to zero. Switching between individual VMs and an ASG, or changing the ASG, updates the existing load balancer in place. Switching to or from the CCM node-pool mode requires resource replacement.
 
 ~> **Note:** A load balancer backed by `backend_group.node_pool_id` belongs to that pool's cluster project. Its `project_tag` (or the provider default) must match that project. The provider reads the pool and checks that its cluster is listed in the selected project before creating the balancer; a missing parent or an unreadable listing stops creation.
 
@@ -22,7 +22,7 @@ For this node-pool mode, the API key needs Kubernetes **read** permission to ver
 
 ~> **Note:** Creating a load balancer requires at least **three** free IPs in `network_id` (one VIP plus two for the hidden nginx VMs). The server returns error code 737 ("Insufficient free IPs in network for load balancer.") when the network does not have enough; the provider surfaces this as a clear plan/apply error.
 
-~> **Note:** `name`, `description`, `port`, and `backend_group` content (VM members) are updated in place. Changing `region`, `project_tag`, `type`, `protocol`, `network_id`, or switching backend modes forces a new resource. The hidden nginx VMs are not re-provisioned on in-place updates.
+~> **Note:** `name`, `description`, `port`, and `backend_group` content (VM members or an ASG selector) are updated in place. Changing `region`, `project_tag`, `type`, `protocol`, `network_id`, or switching to/from CCM node-pool mode forces a new resource. The hidden nginx VMs are not re-provisioned on in-place updates.
 
 ~> **Note:** `description` is **not configurable for CCM (node pool) load balancers.** The panel owns it — it sets `"CCM: <name>"` and ignores any caller-supplied value on both create and update. The provider rejects a user-supplied `description` at plan time to surface the constraint — omit `description` for CCM balancers and let the provider read the panel value back into state.
 
@@ -101,7 +101,8 @@ resource "prodata_lb" "ingress" {
 - `port` (Set of Object, 1-10 entries) Port mappings. Re-ordering entries does not produce a diff (set semantics). Each entry has:
   - `port` (Number, required) Port exposed on the load balancer (1-65535).
   - `target_port` (Number, required) Port on each backend (1-65535).
-- `backend_group` (Object) Backend selection. Exactly one of `vm_ids` or `node_pool_id` must be set:
+- `backend_group` (Object) Backend selection. Exactly one of `vm_ids`, `asg_id` or `node_pool_id` must be set:
+  - `asg_id` (Number, optional) Auto scaling group ID. The group must belong to the balancer's network and project. Changing the group updates the balancer in place. Requires an API that reports durable `backendGroups` declarations; the provider verifies the requested declaration before reporting success.
   - `vm_ids` (Set of String, optional) Set of VM guids — the `guid` attribute on `prodata_vm`. At least one entry required when this mode is used. Re-ordering produces no diff. Used by `FRONTEND`-source LBs.
 
 ~> **Note:** `vm_ids` expects VM **guids** — the computed `guid` attribute of `prodata_vm` (e.g. `prodata_vm.web[*].guid`), **not** the numeric `prodata_vm.id`. Passing the id (or any non-guid value) fails the create with a backend-not-found error.

@@ -13,7 +13,9 @@ Pool creation and scaling are asynchronous; `terraform apply` blocks until the p
 
 ~> **Note:** The pool's `project_tag` (or the provider default) must match its parent cluster's project. The provider checks the cluster listing in that project before creating the pool and fails if the parent is absent or the listing cannot be read. Referencing `cluster_id` does not make the pool inherit the cluster's project; configure both resources for the same project.
 
-~> **Note:** Sizing (`vcpu`, `ram`, `disk_size`) and `name` are immutable — changing them forces a new resource. Only `node_count` and `autoscaling` are updated in place.
+Sizing (`vcpu`, `ram`, and increases to `disk_size`) updates the existing pool by rolling its worker machines, preserving the pool ID. Workers are drained and replaced one at a time with at most one unavailable worker and no extra surge worker. Local data on worker boot disks is lost. Application data must use storage with suitable retention. Workloads must tolerate a worker restart, and disruption budgets can delay completion. Disk shrinking is rejected. Changing `name`, `cluster_id`, `region`, or `project_tag` still requires a separate pool.
+
+Hardware updates require both a panel and Kubernetes service supporting the versioned worker-hardware API. Older servers fail the update and retain the resource in state. The provider waits for the current MachineDeployment generation and all updated workers to be ready; a database status of `SUCCESS` alone does not complete a hardware update. Use `timeouts.update` to allow time for larger pools to roll.
 
 ## Example Usage
 
@@ -49,9 +51,9 @@ resource "prodata_kubernetes_node_pool" "batch" {
 
 - `cluster_id` (Number) ID of the cluster this pool belongs to. Minimum `1`. Changing it forces a new resource (a pool cannot be moved between clusters).
 - `name` (String) Pool name. 3-24 characters, lowercase letters / digits / hyphens, not starting or ending with a hyphen. Must be unique within the cluster. Changing it forces a new resource.
-- `vcpu` (Number) vCPUs per worker node. Minimum `1`. Changing it forces a new resource.
-- `ram` (Number) RAM per worker node, in GB. Minimum `1`. Changing it forces a new resource.
-- `disk_size` (Number) Disk size per worker node, in GB. Minimum `1`. Changing it forces a new resource.
+- `vcpu` (Number) vCPUs per worker node. Minimum `1`. Updated through a worker rollout within the existing pool.
+- `ram` (Number) RAM per worker node, in GB. Minimum `1`. Updated through a worker rollout within the existing pool.
+- `disk_size` (Number) Disk size per worker node, in GB. Minimum `1`. Increases roll the workers within the existing pool. Shrinking is not supported.
 
 One of `node_count` or `autoscaling` must be set (they are mutually exclusive).
 
