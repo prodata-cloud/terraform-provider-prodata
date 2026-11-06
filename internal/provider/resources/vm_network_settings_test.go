@@ -522,6 +522,45 @@ func TestVmGatewayUpdate_PlanLeavesNewOwnershipForApply(t *testing.T) {
 	}
 }
 
+func TestVmGatewayUpdate_PartialChangeRecordsKnownUnverifiedGuestState(t *testing.T) {
+	old := "192.0.2.1"
+	c, panel := newGatewayTestPanel(t, "RUNNING", &old)
+	base := panel.vm.extra
+	panel.vm.extra = func(w http.ResponseWriter, req *http.Request) bool {
+		if req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/guest-network-capabilities") {
+			panel.vm.ok(w, map[string]any{"supported": true, "configured": false, "driver": "netplan-v1"})
+			return true
+		}
+		return base(w, req)
+	}
+	panel.vm.broken["start"] = [2]int{http.StatusForbidden, 714}
+	r := &VmGatewayResource{client: c, poll: time.Millisecond}
+	state := gatewayState(t, old, old)
+	for name, value := range map[string]bool{"configure_guest": true, "guest_configuration_applied": true, "restart_pending": false} {
+		if d := state.SetAttribute(context.Background(), path.Root(name), value); d.HasError() {
+			t.Fatal(d)
+		}
+	}
+	plan, _ := gatewayRaw(t, map[string]tftypes.Value{
+		"gateway": vmStr("192.0.2.2"), "interface_id": vmNum(91), "owned_gateway": vmUnkS,
+		"configure_guest":             tftypes.NewValue(tftypes.Bool, true),
+		"guest_configuration_applied": tftypes.NewValue(tftypes.Bool, tftypes.UnknownValue),
+		"restart_pending":             tftypes.NewValue(tftypes.Bool, tftypes.UnknownValue),
+	})
+	resp := resource.UpdateResponse{State: state}
+	r.Update(context.Background(), resource.UpdateRequest{Plan: plan, State: state}, &resp)
+	var actual VmGatewayResourceModel
+	if d := resp.State.Get(context.Background(), &actual); d.HasError() || !resp.Diagnostics.HasError() {
+		t.Fatalf("expected partial-change error with readable state: %v %v", resp.Diagnostics, d)
+	}
+	if actual.GuestConfigurationApplied.IsUnknown() || actual.GuestConfigurationApplied.IsNull() || actual.GuestConfigurationApplied.ValueBool() || !actual.RestartPending.ValueBool() || actual.OwnedGateway.ValueString() != "192.0.2.2" {
+		t.Fatalf("partial change lost known verification or ownership state: %+v", actual)
+	}
+	if !resp.State.Raw.IsFullyKnown() {
+		t.Fatal("partial change persisted an unknown state value")
+	}
+}
+
 func TestVmGatewayDestroyPlanWarnsAboutCloudInitAndTheRestart(t *testing.T) {
 	r := &VmGatewayResource{}
 	state := gatewayState(t, "192.0.2.1", "192.0.2.1")

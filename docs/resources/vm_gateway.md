@@ -63,6 +63,23 @@ network-settings API.
 
 If the panel reports that the network settings service is busy (error 370971), wait briefly and retry.
 
+## Optional guest configuration
+
+Set `configure_guest = true` to persistently configure and verify the guest's IPv4 address and default route after the platform change. Support is checked before stopping the VM or changing its gateway. This requires the running Linux/root QEMU guest agent and static Netplan/systemd-networkd layout described in [Configuring the VM](local_network_attachment.md#configuring-the-vm). Unsupported guests, including pfSense/FreeBSD and guests without an agent, require manual guest configuration and fail preflight. No packages are installed and no default route is inferred.
+
+The guest MAC, IPv4 address, and current platform gateway are checked before execution. Only this explicit option authorizes moving the guest IPv4 default route; other interfaces' addresses, IPv6 and DNS remain intact. `guest_configuration_applied` records verified success. External guest drift is corrected in place, without a new interface or a power cycle when the platform gateway is already correct. Disabling the option leaves the guest configuration in place and stops reconciliation.
+
+On destroy, the platform gateway is conditionally cleared first. Guest cleanup then removes only the previously owned IPv4 gateway on the same verified interface, leaving a replacement or foreign route alone. A guest failure retains state and reports an error; if a failed create was tainted, review and untaint the resource before applying again. A timed-out guest request has an unverified outcome and can continue for a bounded period under a guest lock. The original guest file is backed up and restoration is attempted after an apply/readback failure; restoration itself is not guaranteed.
+
+```terraform
+resource "prodata_vm_gateway" "managed_guest" {
+  vm_id           = prodata_vm.example.id
+  network_id      = prodata_local_network_attachment.example.network_id
+  gateway         = "192.0.2.1"
+  configure_guest = true
+}
+```
+
 ## Schema
 
 ### Required
@@ -75,6 +92,7 @@ If the panel reports that the network settings service is busy (error 370971), w
 
 - `region` (String) Region override. Defaults to the provider's region. Changing it replaces this resource.
 - `project_tag` (String) Project override. Defaults to the provider's project. Changing it replaces this resource.
+- `configure_guest` (Boolean) Default `false`. Explicitly enable supported persistent guest address and IPv4 default-route configuration and drift reconciliation. This option can be enabled in place.
 - `timeouts` (Object) Operation ceilings. `create`, `update` and `delete` default to `15m`. A change on a running VM needs at least 13 minutes of remaining time for the stop, the change and the reserved restart time; use a larger value for a slow VM.
 
 ### Attribute Reference
@@ -82,6 +100,7 @@ If the panel reports that the network settings service is busy (error 370971), w
 - `interface_id` (Number) ID of the selected, verified local interface.
 - `owned_gateway` (String) Gateway last applied or imported by this resource, used for conditional deletion.
 - `restart_pending` (Boolean) A gateway change stopped a running VM but its restart was not confirmed.
+- `guest_configuration_applied` (Boolean) Whether opted-in guest address/default-route configuration was verified. False when disabled, drifted, unsupported or unverified.
 
 ## Import
 
@@ -93,3 +112,5 @@ terraform import prodata_vm_gateway.local 123:456
 
 Import adopts the gateway currently present on the selected interface. If there is no gateway on
 that interface, the next apply can set the value in the configuration.
+
+Imports and older states default `configure_guest` to `false`; setting it to `true` afterwards performs support checks and reconciles the guest in place.

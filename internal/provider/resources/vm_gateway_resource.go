@@ -16,6 +16,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
@@ -39,15 +40,17 @@ type VmGatewayResource struct {
 }
 
 type VmGatewayResourceModel struct {
-	VmID           types.Int64    `tfsdk:"vm_id"`
-	NetworkID      types.Int64    `tfsdk:"network_id"`
-	InterfaceID    types.Int64    `tfsdk:"interface_id"`
-	Gateway        types.String   `tfsdk:"gateway"`
-	OwnedGateway   types.String   `tfsdk:"owned_gateway"`
-	RestartPending types.Bool     `tfsdk:"restart_pending"`
-	Region         types.String   `tfsdk:"region"`
-	ProjectTag     types.String   `tfsdk:"project_tag"`
-	Timeouts       timeouts.Value `tfsdk:"timeouts"`
+	VmID                      types.Int64    `tfsdk:"vm_id"`
+	NetworkID                 types.Int64    `tfsdk:"network_id"`
+	InterfaceID               types.Int64    `tfsdk:"interface_id"`
+	Gateway                   types.String   `tfsdk:"gateway"`
+	OwnedGateway              types.String   `tfsdk:"owned_gateway"`
+	RestartPending            types.Bool     `tfsdk:"restart_pending"`
+	ConfigureGuest            types.Bool     `tfsdk:"configure_guest"`
+	GuestConfigurationApplied types.Bool     `tfsdk:"guest_configuration_applied"`
+	Region                    types.String   `tfsdk:"region"`
+	ProjectTag                types.String   `tfsdk:"project_tag"`
+	Timeouts                  timeouts.Value `tfsdk:"timeouts"`
 }
 
 func NewVmGatewayResource() resource.Resource { return &VmGatewayResource{} }
@@ -58,15 +61,17 @@ func (r *VmGatewayResource) Schema(ctx context.Context, _ resource.SchemaRequest
 	resp.Schema = schema.Schema{
 		MarkdownDescription: "Manages the VM's IPv4 default gateway on a selected local network interface. A VM has one default route: use only one prodata_vm_gateway per VM. Setting it can move the route from another interface, including a public interface.",
 		Attributes: map[string]schema.Attribute{
-			"vm_id":           schema.Int64Attribute{Required: true, MarkdownDescription: "ID of the virtual machine.", Validators: []validator.Int64{int64validator.AtLeast(1)}, PlanModifiers: []planmodifier.Int64{int64planmodifier.RequiresReplace()}},
-			"network_id":      schema.Int64Attribute{Required: true, MarkdownDescription: "ID of a local network already attached to the VM. It can be the primary network or an additional attachment.", Validators: []validator.Int64{int64validator.AtLeast(1)}, PlanModifiers: []planmodifier.Int64{int64planmodifier.RequiresReplace()}},
-			"interface_id":    schema.Int64Attribute{Computed: true, MarkdownDescription: "ID of the verified network interface. Changes or deletion are refused if the interface has been replaced.", PlanModifiers: []planmodifier.Int64{int64planmodifier.UseStateForUnknown()}},
-			"gateway":         schema.StringAttribute{Required: true, MarkdownDescription: "IPv4 address of the default gateway, in the selected interface's subnet.", Validators: []validator.String{IPv4Address()}},
-			"owned_gateway":   schema.StringAttribute{Computed: true, MarkdownDescription: "Gateway last applied or imported by this resource; used to avoid deleting a different route.", PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()}},
-			"restart_pending": schema.BoolAttribute{Computed: true, MarkdownDescription: "A previous gateway change stopped a running VM but could not confirm its restart.", PlanModifiers: []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()}},
-			"region":          schema.StringAttribute{Optional: true, Computed: true, MarkdownDescription: "Region override; defaults to the provider region.", PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace(), stringplanmodifier.UseStateForUnknown()}},
-			"project_tag":     schema.StringAttribute{Optional: true, Computed: true, MarkdownDescription: "Project override; defaults to the provider project.", PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace(), stringplanmodifier.UseStateForUnknown()}},
-			"timeouts":        timeouts.Attributes(ctx, timeouts.Opts{Create: true, Update: true, Delete: true}),
+			"vm_id":                       schema.Int64Attribute{Required: true, MarkdownDescription: "ID of the virtual machine.", Validators: []validator.Int64{int64validator.AtLeast(1)}, PlanModifiers: []planmodifier.Int64{int64planmodifier.RequiresReplace()}},
+			"network_id":                  schema.Int64Attribute{Required: true, MarkdownDescription: "ID of a local network already attached to the VM. It can be the primary network or an additional attachment.", Validators: []validator.Int64{int64validator.AtLeast(1)}, PlanModifiers: []planmodifier.Int64{int64planmodifier.RequiresReplace()}},
+			"interface_id":                schema.Int64Attribute{Computed: true, MarkdownDescription: "ID of the verified network interface. Changes or deletion are refused if the interface has been replaced.", PlanModifiers: []planmodifier.Int64{int64planmodifier.UseStateForUnknown()}},
+			"gateway":                     schema.StringAttribute{Required: true, MarkdownDescription: "IPv4 address of the default gateway, in the selected interface's subnet.", Validators: []validator.String{IPv4Address()}},
+			"owned_gateway":               schema.StringAttribute{Computed: true, MarkdownDescription: "Gateway last applied or imported by this resource; used to avoid deleting a different route.", PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()}},
+			"restart_pending":             schema.BoolAttribute{Computed: true, MarkdownDescription: "A previous gateway change stopped a running VM but could not confirm its restart.", PlanModifiers: []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()}},
+			"configure_guest":             schema.BoolAttribute{Optional: true, Computed: true, Default: booldefault.StaticBool(false), MarkdownDescription: "Opt in to persistent guest IPv4 default-route configuration after the platform gateway change. Requires a running Linux QEMU guest agent with supported static Netplan configuration; preflight fails before changing the gateway on unsupported guests."},
+			"guest_configuration_applied": schema.BoolAttribute{Computed: true, MarkdownDescription: "Whether the requested guest address and default route were verified. Drift is reconciled in place when configure_guest is enabled.", PlanModifiers: []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()}},
+			"region":                      schema.StringAttribute{Optional: true, Computed: true, MarkdownDescription: "Region override; defaults to the provider region.", PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace(), stringplanmodifier.UseStateForUnknown()}},
+			"project_tag":                 schema.StringAttribute{Optional: true, Computed: true, MarkdownDescription: "Project override; defaults to the provider project.", PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace(), stringplanmodifier.UseStateForUnknown()}},
+			"timeouts":                    timeouts.Attributes(ctx, timeouts.Opts{Create: true, Update: true, Delete: true}),
 		},
 	}
 }
@@ -101,6 +106,10 @@ func (r *VmGatewayResource) ModifyPlan(ctx context.Context, req resource.ModifyP
 			return
 		}
 		changed = !state.Gateway.Equal(plan.Gateway)
+		if plan.ConfigureGuest.IsUnknown() || !plan.ConfigureGuest.Equal(state.ConfigureGuest) ||
+			plan.ConfigureGuest.ValueBool() && (!state.GuestConfigurationApplied.ValueBool() || changed) {
+			resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("guest_configuration_applied"), types.BoolUnknown())...)
+		}
 		if state.RestartPending.ValueBool() {
 			resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("restart_pending"), types.BoolUnknown())...)
 			resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("owned_gateway"), types.StringUnknown())...)
@@ -145,6 +154,13 @@ func (r *VmGatewayResource) Create(ctx context.Context, req resource.CreateReque
 		data.ProjectTag = types.StringValue(r.client.ProjectTag)
 	}
 	gateway := data.Gateway.ValueString()
+	data.GuestConfigurationApplied = types.BoolValue(false)
+	if data.ConfigureGuest.ValueBool() {
+		if err := requireGuestNetworkSupport(ctx, r.client, data.VmID.ValueInt64(), r.opts(&data)); err != nil {
+			resp.Diagnostics.AddError("Guest Network Automation Unavailable", err.Error())
+			return
+		}
+	}
 	data.RestartPending = types.BoolValue(false)
 	change := client.ChangeVmGatewayRequest{NetworkID: data.NetworkID.ValueInt64(), Gateway: &gateway}
 	result, changes := r.apply(ctx, &data, change)
@@ -165,6 +181,14 @@ func (r *VmGatewayResource) Create(ctx context.Context, req resource.CreateReque
 	data.InterfaceID = types.Int64Value(result.InterfaceID)
 	data.OwnedGateway = data.Gateway
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
+	if data.ConfigureGuest.ValueBool() {
+		if err := r.configureGuest(ctx, &data, &gateway, nil); err != nil {
+			resp.Diagnostics.AddError("Gateway Changed but Guest Configuration Failed", err.Error()+" The platform gateway remains recorded in state.")
+			return
+		}
+		data.GuestConfigurationApplied = types.BoolValue(true)
+		resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
+	}
 }
 
 func (r *VmGatewayResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
@@ -206,13 +230,32 @@ func (r *VmGatewayResource) Update(ctx context.Context, req resource.UpdateReque
 		data.RestartPending = types.BoolValue(false)
 		data.OwnedGateway = state.OwnedGateway
 	}
+	if data.ConfigureGuest.ValueBool() {
+		if err := requireGuestNetworkSupport(ctx, r.client, data.VmID.ValueInt64(), r.opts(&data)); err != nil {
+			resp.Diagnostics.AddError("Guest Network Automation Unavailable", err.Error())
+			return
+		}
+	}
 	if data.Gateway.Equal(state.Gateway) {
+		if data.ConfigureGuest.ValueBool() && (!state.ConfigureGuest.ValueBool() || !state.GuestConfigurationApplied.ValueBool()) {
+			gateway := data.Gateway.ValueString()
+			if err := r.configureGuest(ctx, &data, &gateway, nil); err != nil {
+				resp.Diagnostics.AddError("Unable to Configure Guest Gateway", err.Error())
+				return
+			}
+			data.GuestConfigurationApplied = types.BoolValue(true)
+		} else if !data.ConfigureGuest.ValueBool() {
+			data.GuestConfigurationApplied = types.BoolValue(false)
+		}
 		resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 		return
 	}
 	gateway := data.Gateway.ValueString()
 	interfaceID := state.InterfaceID.ValueInt64()
 	change := client.ChangeVmGatewayRequest{NetworkID: data.NetworkID.ValueInt64(), Gateway: &gateway, ExpectedInterfaceID: &interfaceID}
+	// The planned verification result is unknown until both platform and guest work
+	// finish. Every partial-change checkpoint must record a concrete unverified value.
+	data.GuestConfigurationApplied = types.BoolValue(false)
 	result, changes := r.apply(ctx, &data, change)
 	resp.Diagnostics.Append(changes...)
 	if resp.Diagnostics.HasError() {
@@ -223,6 +266,7 @@ func (r *VmGatewayResource) Update(ctx context.Context, req resource.UpdateReque
 				resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 			} else {
 				state.RestartPending = types.BoolValue(true)
+				state.GuestConfigurationApplied = types.BoolValue(false)
 				resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 			}
 		}
@@ -230,7 +274,16 @@ func (r *VmGatewayResource) Update(ctx context.Context, req resource.UpdateReque
 	}
 	data.InterfaceID = types.Int64Value(result.InterfaceID)
 	data.OwnedGateway = data.Gateway
+	data.GuestConfigurationApplied = types.BoolValue(false)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
+	if data.ConfigureGuest.ValueBool() {
+		if err := r.configureGuest(ctx, &data, &gateway, nil); err != nil {
+			resp.Diagnostics.AddError("Gateway Changed but Guest Configuration Failed", err.Error())
+			return
+		}
+		data.GuestConfigurationApplied = types.BoolValue(true)
+		resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
+	}
 }
 
 func (r *VmGatewayResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
@@ -238,6 +291,9 @@ func (r *VmGatewayResource) Read(ctx context.Context, req resource.ReadRequest, 
 	resp.Diagnostics.Append(req.State.Get(ctx, &data)...)
 	if resp.Diagnostics.HasError() {
 		return
+	}
+	if data.ConfigureGuest.IsNull() {
+		data.ConfigureGuest = types.BoolValue(false)
 	}
 	actual, err := r.client.GetVmGateway(ctx, data.VmID.ValueInt64(), data.NetworkID.ValueInt64(), r.opts(&data))
 	if err != nil {
@@ -267,6 +323,24 @@ func (r *VmGatewayResource) Read(ctx context.Context, req resource.ReadRequest, 
 	} else {
 		data.Gateway = types.StringValue(*actual.Gateway)
 	}
+	if data.ConfigureGuest.ValueBool() {
+		request, err := gatewayGuestRequest(ctx, r.client, data.VmID.ValueInt64(), actual.InterfaceID, data.NetworkID.ValueInt64(), actual.Gateway, nil, r.opts(&data))
+		if err != nil {
+			resp.Diagnostics.AddError("Unable to Verify Guest Gateway", err.Error())
+			return
+		}
+		guest, err := r.client.GetVmGuestNetworkState(ctx, data.VmID.ValueInt64(), actual.InterfaceID, request, r.opts(&data))
+		if err != nil {
+			resp.Diagnostics.AddError("Unable to Verify Guest Gateway", err.Error())
+			return
+		}
+		data.GuestConfigurationApplied = types.BoolValue(*guest.Supported && *guest.Configured)
+		if !*guest.Supported {
+			resp.Diagnostics.AddWarning("Guest Gateway Configuration Is Unverified", guest.Reason)
+		}
+	} else {
+		data.GuestConfigurationApplied = types.BoolValue(false)
+	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
 
@@ -290,12 +364,25 @@ func (r *VmGatewayResource) Delete(ctx context.Context, req resource.DeleteReque
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	if data.ConfigureGuest.ValueBool() {
+		if err := requireGuestNetworkSupport(ctx, r.client, data.VmID.ValueInt64(), r.opts(&data)); err != nil {
+			resp.Diagnostics.AddError("Guest Network Automation Unavailable", err.Error())
+			return
+		}
+	}
 	expected, interfaceID := data.OwnedGateway.ValueString(), data.InterfaceID.ValueInt64()
 	change := client.ChangeVmGatewayRequest{NetworkID: data.NetworkID.ValueInt64(), ExpectedGateway: &expected, ExpectedInterfaceID: &interfaceID, Clear: true}
-	_, changes := r.apply(ctx, &data, change)
+	result, changes := r.apply(ctx, &data, change)
 	resp.Diagnostics.Append(changes...)
 	if resp.Diagnostics.HasError() && data.RestartPending.ValueBool() {
 		resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
+	}
+	if !resp.Diagnostics.HasError() && data.ConfigureGuest.ValueBool() && result != nil && result.Gateway == nil {
+		data.GuestConfigurationApplied = types.BoolValue(false)
+		if err := r.configureGuest(ctx, &data, nil, &expected); err != nil {
+			resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
+			resp.Diagnostics.AddError("Platform Gateway Cleared but Guest Cleanup Failed", err.Error())
+		}
 	}
 }
 
@@ -348,7 +435,7 @@ func (r *VmGatewayResource) apply(ctx context.Context, data *VmGatewayResourceMo
 	if forecast.PreviousGatewayOnAnotherInterface {
 		diags.AddWarning("The VM default route will move", "The current default gateway is on another interface, which may be a public interface. Setting this gateway moves the default route to the selected local interface.")
 	}
-	if forecast.RequiresGuestConfiguration {
+	if forecast.RequiresGuestConfiguration && !data.ConfigureGuest.ValueBool() {
 		diags.AddWarning("Guest network needs configuration", "The VM has no cloud-init; configure its default gateway inside the guest as well.")
 	}
 	if !forecast.Changed {

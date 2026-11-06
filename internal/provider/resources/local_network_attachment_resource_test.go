@@ -2434,6 +2434,9 @@ func TestLocalNetworkAttachmentSchema_WhoSetsWhat(t *testing.T) {
 		// Not computed: a null in the configuration must stay a null in the plan, or every plan
 		// after an import, where nothing records the flag, would show it as a change.
 		{"reboot_after_attach", false, true, false},
+		{"allow_gateway_address", false, true, true},
+		{"configure_guest", false, true, true},
+		{"guest_configuration_applied", false, false, true},
 		{"timeouts", false, true, false},
 	} {
 		a, ok := sch.Attributes[tc.name]
@@ -2446,7 +2449,7 @@ func TestLocalNetworkAttachmentSchema_WhoSetsWhat(t *testing.T) {
 				tc.name, a.IsRequired(), a.IsOptional(), a.IsComputed(), tc.required, tc.optional, tc.computed)
 		}
 	}
-	if len(sch.Attributes) != 9 {
-		t.Errorf("the schema has %d attributes, want the 9 above", len(sch.Attributes))
+	if len(sch.Attributes) != 12 {
+		t.Errorf("the schema has %d attributes, want the 12 above", len(sch.Attributes))
 	}
 }

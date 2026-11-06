@@ -30,8 +30,9 @@ type VmLocalNetwork struct {
 // AttachLocalNetworkRequest is the body of POST /api/v2/vms/{id}/local-networks. An empty IP asks
 // the panel for the next free address of the network.
 type AttachLocalNetworkRequest struct {
-	NetworkID int64  `json:"networkId"`
-	IP        string `json:"ip,omitempty"`
+	NetworkID           int64  `json:"networkId"`
+	IP                  string `json:"ip,omitempty"`
+	AllowGatewayAddress bool   `json:"allowGatewayAddress,omitempty"`
 }
 
 // AttachedLocalNetwork is the answer to an attach: the new interface, and what is left to do for

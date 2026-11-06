@@ -15,6 +15,8 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
@@ -27,6 +29,7 @@ var (
 	_ resource.Resource                = &LocalNetworkAttachmentResource{}
 	_ resource.ResourceWithConfigure   = &LocalNetworkAttachmentResource{}
 	_ resource.ResourceWithImportState = &LocalNetworkAttachmentResource{}
+	_ resource.ResourceWithModifyPlan  = &LocalNetworkAttachmentResource{}
 )
 
 const (
@@ -78,15 +81,18 @@ type LocalNetworkAttachmentResource struct {
 }
 
 type LocalNetworkAttachmentResourceModel struct {
-	VmID              types.Int64    `tfsdk:"vm_id"`
-	NetworkID         types.Int64    `tfsdk:"network_id"`
-	IP                types.String   `tfsdk:"ip"`
-	InterfaceID       types.Int64    `tfsdk:"interface_id"`
-	MACAddress        types.String   `tfsdk:"mac_address"`
-	Region            types.String   `tfsdk:"region"`
-	ProjectTag        types.String   `tfsdk:"project_tag"`
-	RebootAfterAttach types.Bool     `tfsdk:"reboot_after_attach"`
-	Timeouts          timeouts.Value `tfsdk:"timeouts"`
+	VmID                      types.Int64    `tfsdk:"vm_id"`
+	NetworkID                 types.Int64    `tfsdk:"network_id"`
+	IP                        types.String   `tfsdk:"ip"`
+	InterfaceID               types.Int64    `tfsdk:"interface_id"`
+	MACAddress                types.String   `tfsdk:"mac_address"`
+	Region                    types.String   `tfsdk:"region"`
+	ProjectTag                types.String   `tfsdk:"project_tag"`
+	RebootAfterAttach         types.Bool     `tfsdk:"reboot_after_attach"`
+	AllowGatewayAddress       types.Bool     `tfsdk:"allow_gateway_address"`
+	ConfigureGuest            types.Bool     `tfsdk:"configure_guest"`
+	GuestConfigurationApplied types.Bool     `tfsdk:"guest_configuration_applied"`
+	Timeouts                  timeouts.Value `tfsdk:"timeouts"`
 }
 
 func NewLocalNetworkAttachmentResource() resource.Resource {
@@ -163,6 +169,20 @@ func (r *LocalNetworkAttachmentResource) Schema(ctx context.Context, req resourc
 					stringplanmodifier.RequiresReplace(),
 				},
 			},
+			"configure_guest": schema.BoolAttribute{
+				MarkdownDescription: "Opt in to persistent IPv4 configuration through a running Linux QEMU guest agent and a supported cloud-init Netplan setup. Preflight runs before attachment; unsupported guests fail without creating an interface. Default routes remain unchanged. Defaults to false.",
+				Optional:            true, Computed: true, Default: booldefault.StaticBool(false),
+			},
+			"guest_configuration_applied": schema.BoolAttribute{
+				MarkdownDescription: "Whether the requested guest configuration was verified. Guest drift is reconciled by an in-place update when configure_guest is enabled.",
+				Computed:            true, PlanModifiers: []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()},
+			},
+			"allow_gateway_address": schema.BoolAttribute{
+				MarkdownDescription: "Explicitly allow the requested IP to equal this customer-owned local network's gateway address. Defaults to false. Existing claims, including platform routers and temporarily unavailable VMs, are refused. This does not configure routes or make the VM forward traffic.",
+				Optional:            true,
+				Computed:            true,
+				Default:             booldefault.StaticBool(false),
+			},
 			"reboot_after_attach": schema.BoolAttribute{
 				MarkdownDescription: "Restart the VM during `apply`, once the interface is attached, if the VM is running. " +
 					"The platform does not restart the VM when an interface is added, and whether the new interface and its address work " +
@@ -179,6 +199,7 @@ func (r *LocalNetworkAttachmentResource) Schema(ctx context.Context, req resourc
 			},
 			"timeouts": timeouts.Attributes(ctx, timeouts.Opts{
 				Create: true,
+				Update: true,
 				Delete: true,
 			}),
 		},
@@ -220,7 +241,14 @@ func (r *LocalNetworkAttachmentResource) Create(ctx context.Context, req resourc
 
 	opts := r.buildOpts(&data)
 	vmID := data.VmID.ValueInt64()
-	attachReq := client.AttachLocalNetworkRequest{NetworkID: data.NetworkID.ValueInt64()}
+	data.GuestConfigurationApplied = types.BoolValue(false)
+	if data.ConfigureGuest.ValueBool() {
+		if err := requireGuestNetworkSupport(ctx, r.client, vmID, opts); err != nil {
+			resp.Diagnostics.AddError("Guest Network Automation Unavailable", err.Error())
+			return
+		}
+	}
+	attachReq := client.AttachLocalNetworkRequest{NetworkID: data.NetworkID.ValueInt64(), AllowGatewayAddress: data.AllowGatewayAddress.ValueBool()}
 	if !data.IP.IsNull() && !data.IP.IsUnknown() {
 		attachReq.IP = data.IP.ValueString()
 	}
@@ -275,7 +303,7 @@ func (r *LocalNetworkAttachmentResource) Create(ctx context.Context, req resourc
 		return
 	}
 
-	if attached.RequiresGuestConfiguration {
+	if attached.RequiresGuestConfiguration && !data.ConfigureGuest.ValueBool() {
 		resp.Diagnostics.AddWarning(
 			"Local Network Attached, but the Address Must Be Set Inside the VM",
 			fmt.Sprintf("VM %d has no cloud-init, so nothing configures the new interface inside the guest operating system. "+
@@ -329,6 +357,14 @@ func (r *LocalNetworkAttachmentResource) Create(ctx context.Context, req resourc
 				vmID, attached.ID),
 		)
 	}
+	if data.ConfigureGuest.ValueBool() {
+		if err := applyGuestNetwork(ctx, r.client, vmID, data.InterfaceID.ValueInt64(), client.ConfigureGuestNetworkRequest{ExpectedMAC: data.MACAddress.ValueString(), ExpectedIP: data.IP.ValueString()}, opts, r.pollInterval()); err != nil {
+			resp.Diagnostics.AddError("Interface Attached but Guest Configuration Failed", err.Error()+" The interface remains recorded in Terraform state. Check the VM before retrying.")
+			return
+		}
+		data.GuestConfigurationApplied = types.BoolValue(true)
+		resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
+	}
 }
 
 func (r *LocalNetworkAttachmentResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
@@ -337,6 +373,12 @@ func (r *LocalNetworkAttachmentResource) Read(ctx context.Context, req resource.
 	resp.Diagnostics.Append(req.State.Get(ctx, &data)...)
 	if resp.Diagnostics.HasError() {
 		return
+	}
+	if data.ConfigureGuest.IsNull() {
+		data.ConfigureGuest = types.BoolValue(false)
+	}
+	if data.AllowGatewayAddress.IsNull() {
+		data.AllowGatewayAddress = types.BoolValue(false)
 	}
 
 	opts := r.buildOpts(&data)
@@ -424,22 +466,73 @@ func (r *LocalNetworkAttachmentResource) Read(ctx context.Context, req resource.
 		"vm_id":        vmID,
 		"interface_id": interfaceID,
 	})
+	if data.ConfigureGuest.ValueBool() {
+		guest, err := r.client.GetVmGuestNetworkState(ctx, vmID, interfaceID, client.ConfigureGuestNetworkRequest{ExpectedMAC: data.MACAddress.ValueString(), ExpectedIP: data.IP.ValueString()}, opts)
+		if err != nil {
+			resp.Diagnostics.AddError("Unable to Verify Guest Network", err.Error())
+			return
+		}
+		data.GuestConfigurationApplied = types.BoolValue(*guest.Supported && *guest.Configured)
+		if !*guest.Supported {
+			resp.Diagnostics.AddWarning("Guest Network Configuration Is Unverified", guest.Reason)
+		}
+	} else {
+		data.GuestConfigurationApplied = types.BoolValue(false)
+	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
 
 func (r *LocalNetworkAttachmentResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
-	// vm_id, network_id, ip, region and project_tag all require replacement, so the only changes
-	// that get here are to reboot_after_attach and timeouts — options that Create and Delete
-	// alone read. There is nothing to tell the panel; the new values are just recorded.
-	var data LocalNetworkAttachmentResourceModel
+	// Interface identity/address changes require replacement. Guest drift and enabling guest
+	// configuration are reconciled in place; create/delete-only options are merely recorded.
+	var data, state LocalNetworkAttachmentResourceModel
 
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &data)...)
+	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	if data.ConfigureGuest.ValueBool() && (!state.ConfigureGuest.ValueBool() || !state.GuestConfigurationApplied.ValueBool()) {
+		timeout, diags := data.Timeouts.Update(ctx, localNetworkAttachmentDefaultCreateTime)
+		resp.Diagnostics.Append(diags...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+		opts := r.buildOpts(&data)
+		if err := requireGuestNetworkSupport(ctx, r.client, data.VmID.ValueInt64(), opts); err != nil {
+			resp.Diagnostics.AddError("Guest Network Automation Unavailable", err.Error())
+			return
+		}
+		if err := applyGuestNetwork(ctx, r.client, data.VmID.ValueInt64(), data.InterfaceID.ValueInt64(), client.ConfigureGuestNetworkRequest{ExpectedMAC: data.MACAddress.ValueString(), ExpectedIP: data.IP.ValueString()}, opts, r.pollInterval()); err != nil {
+			resp.Diagnostics.AddError("Unable to Configure Guest Network", err.Error())
+			return
+		}
+		data.GuestConfigurationApplied = types.BoolValue(true)
+	} else if !data.ConfigureGuest.ValueBool() {
+		data.GuestConfigurationApplied = types.BoolValue(false)
+	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
+}
+
+func (r *LocalNetworkAttachmentResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	if req.Plan.Raw.IsNull() || req.State.Raw.IsNull() {
+		return
+	}
+	var state, plan LocalNetworkAttachmentResourceModel
+	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	if plan.ConfigureGuest.IsUnknown() || !plan.ConfigureGuest.Equal(state.ConfigureGuest) ||
+		plan.ConfigureGuest.ValueBool() && !state.GuestConfigurationApplied.ValueBool() {
+		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("guest_configuration_applied"), types.BoolUnknown())...)
+	}
 }
 
 func (r *LocalNetworkAttachmentResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
