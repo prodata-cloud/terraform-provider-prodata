@@ -9,7 +9,7 @@ All notable changes to this provider are documented here. The format is based on
 ### Added
 
 - Local-network attachments may explicitly claim a network gateway address with `allow_gateway_address`, subject to ownership and reservation checks.
-- `configure_guest` optionally applies and verifies persistent Linux guest NIC addresses and explicit default routes through QGA. Support is checked before network changes; unsupported guests fail without mutation. Requires matching panel and proxmox-core APIs.
+- `configure_guest` optionally applies and verifies persistent Linux guest NIC addresses and explicit default routes through QGA. Support is checked before network changes; unsupported guests fail without mutation. Requires a ProData Cloud API version that supports it.
 - VM backups, snapshots, backup schedules, and separate VMs restored from backups. Creation records a durable identity before submission and retains uncertain outcomes for reconciliation. Restored VM name, CPU, RAM and description update in place.
 - Security groups with ordered rules and conditional bindings to VM interfaces, using project- and region-scoped v2 APIs.
 - Load balancer backend groups may follow an Auto Scaling Group, including when it has no current members.
@@ -22,7 +22,6 @@ All notable changes to this provider are documented here. The format is based on
 
 - `prodata_local_network`: creating a network with a name that is already in use now reports API error `614` and leaves it outside Terraform state. Existing networks require an explicit import, even when their CIDR and gateway match the configuration.
 - `prodata_volume` and volume data sources use persistent volume identities across attach/detach. Refresh only removes a volume after the stable API explicitly confirms its absence; a missing endpoint, incomplete response, or attachment ID collision preserves state and reports an error. Renames and deletion use the same stable identity. Requires the matching panel API with `user-disk-v1` support; creation checks API support before allocating a volume.
-
 - `prodata_s3_bucket`: creation with a name that is already in use reports API error `626` without adopting the bucket or modifying its ACL. Existing buckets require explicit import.
 - Load balancer provisioning failures include the platform reason when available.
 
