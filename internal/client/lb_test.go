@@ -283,7 +283,7 @@ func TestListLoadBalancers_Empty(t *testing.T) {
 }
 
 func TestConfigureLoadBalancerFrontend_Success(t *testing.T) {
-	server, capture := newCapturingServer(t, 200, lbGetSuccessBody)
+	server, capture := newCapturingServer(t, 200, strings.NewReplacer(`"id":236`, `"id":55`, `"loadBalancerId":236`, `"loadBalancerId":55`).Replace(lbGetSuccessBody))
 	defer server.Close()
 
 	c := newTestClient(t, server)
@@ -306,7 +306,7 @@ func TestConfigureLoadBalancerFrontend_Success(t *testing.T) {
 }
 
 func TestConfigureLoadBalancerCCM_Success(t *testing.T) {
-	server, capture := newCapturingServer(t, 200, lbGetSuccessBody)
+	server, capture := newCapturingServer(t, 200, strings.NewReplacer(`"id":236`, `"id":55`, `"loadBalancerId":236`, `"loadBalancerId":55`).Replace(lbGetSuccessBody))
 	defer server.Close()
 
 	c := newTestClient(t, server)

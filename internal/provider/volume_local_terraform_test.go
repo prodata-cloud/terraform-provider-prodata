@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os/exec"
+	"strings"
 	"sync"
 	"testing"
 
@@ -28,9 +29,12 @@ func TestVolumeLocalTerraformStableIdentity(t *testing.T) {
 	var mu sync.Mutex
 	var exists, attached bool
 	name := "data"
+	createUUID, createState, originalName := "", "", "data"
+	attachmentStatus, attachmentDirection := "RESERVED", "ATTACH"
+	reserves := 0
 	creates, deletes, attaches, detaches := 0, 0, 0, 0
 	stableVolume := func() map[string]any {
-		data := map[string]any{"identityVersion": "user-disk-v1", "id": 9, "exists": exists}
+		data := map[string]any{"identityVersion": "user-disk-v1", "id": 9, "exists": exists, "creationRequestUuid": createUUID}
 		if exists {
 			data["name"], data["type"], data["size"], data["inUse"] = name, "SSD", 10, attached
 			if attached {
@@ -47,6 +51,76 @@ func TestVolumeLocalTerraformStableIdentity(t *testing.T) {
 		if req.Header.Get("X-Project-Tag") != "test" || req.Header.Get("X-Region") != "TEST" {
 			t.Errorf("wrong scope for %s %s", req.Method, req.URL.Path)
 		}
+		creationPath := "/panel-main/api/v2/volumes/by-user-disk/creation/"
+		if strings.HasPrefix(req.URL.Path, creationPath) {
+			suffix := strings.TrimPrefix(req.URL.Path, creationPath)
+			if suffix == "capabilities" {
+				answer(map[string]any{"contract": client.VolumeCreationContract, "reserveBeforeSubmit": true, "requestLookup": true, "cancelTombstone": true, "canonicalIdentity": "user-disk-v1"})
+				return
+			}
+			id := strings.TrimSuffix(suffix, "/submit")
+			if createUUID != "" && id != createUUID {
+				t.Error("creation UUID changed across retries")
+			}
+			createUUID = id
+			view := func() {
+				answer(map[string]any{"contract": client.VolumeCreationContract, "requestUuid": createUUID, "volumeId": 9, "region": "TEST", "projectTag": "test", "name": originalName, "type": "SSD", "size": 10, "status": createState, "exists": true, "canRelease": false})
+			}
+			if req.Method == http.MethodPost && strings.HasSuffix(suffix, "/submit") {
+				if exists {
+					t.Error("a repeated submit allocated another physical disk")
+				}
+				creates++
+				exists = true
+				createState = "READY"
+				w.WriteHeader(502)
+				return
+			}
+			if req.Method == http.MethodPost {
+				reserves++
+				var create client.CreateVolumeRequest
+				if e := json.NewDecoder(req.Body).Decode(&create); e != nil {
+					t.Error(e)
+				}
+				name, originalName = create.Name, create.Name
+				createState = "RESERVED"
+				view()
+				return
+			}
+			if req.Method == http.MethodGet || req.Method == http.MethodDelete {
+				view()
+				return
+			}
+		}
+		if strings.HasPrefix(req.URL.Path, "/panel-main/api/v2/vms/77/volume-attachments/") {
+			suffix := strings.TrimPrefix(req.URL.Path, "/panel-main/api/v2/vms/77/volume-attachments/")
+			view := func() {
+				answer(map[string]any{"contract": client.VolumeAttachmentContract, "id": 515, "vmId": 77, "volumeId": 9, "exists": attachmentStatus != "DELETED", "direction": attachmentDirection, "status": attachmentStatus})
+			}
+			switch {
+			case suffix == "capabilities":
+				answer(map[string]any{"contract": client.VolumeAttachmentContract, "reserveBeforeSubmit": true, "recoverableSubmission": true})
+			case suffix == "reservations" && req.Method == http.MethodPost:
+				attachmentStatus = "RESERVED"
+				view()
+			case suffix == "515/submit" && req.Method == http.MethodPost:
+				attached = true
+				attaches++
+				attachmentStatus = "SUCCESS"
+				view()
+			case suffix == "515" && req.Method == http.MethodGet:
+				view()
+			case suffix == "515" && req.Method == http.MethodDelete:
+				attached = false
+				detaches++
+				attachmentDirection = "DETACH"
+				attachmentStatus = "DELETED"
+				view()
+			default:
+				t.Errorf("unexpected attachment route %s %s", req.Method, req.URL.Path)
+			}
+			return
+		}
 		switch req.Method + " " + req.URL.Path {
 		case "GET /panel-main/api/v2/volumes/by-user-disk/capabilities":
 			answer(map[string]any{"identityVersion": "user-disk-v1"})
@@ -56,17 +130,6 @@ func TestVolumeLocalTerraformStableIdentity(t *testing.T) {
 				items = append(items, stableVolume())
 			}
 			answer(map[string]any{"identityVersion": "user-disk-v1", "volumes": items})
-		case "POST /panel-main/api/v2/volumes":
-			var create client.CreateVolumeRequest
-			if err := json.NewDecoder(req.Body).Decode(&create); err != nil {
-				t.Error(err)
-			}
-			if exists {
-				t.Error("refresh incorrectly planned a second disk")
-			}
-			exists, name = true, create.Name
-			creates++
-			answer(map[string]any{"id": 9, "name": name, "type": "SSD", "size": 10})
 		case "GET /panel-main/api/v2/volumes/by-user-disk/9":
 			answer(stableVolume())
 		case "PUT /panel-main/api/v2/volumes/by-user-disk/9":
@@ -150,7 +213,7 @@ data "prodata_volumes" "test" {
 		CheckDestroy: func(_ *terraform.State) error {
 			mu.Lock()
 			defer mu.Unlock()
-			if exists || attached || creates != 1 || deletes != 1 || attaches != 1 || detaches != 1 {
+			if reserves != 1 || exists || attached || creates != 1 || deletes != 1 || attaches != 1 || detaches != 1 {
 				return fmt.Errorf("unexpected lifecycle exists=%t attached=%t create/delete=%d/%d attach/detach=%d/%d", exists, attached, creates, deletes, attaches, detaches)
 			}
 			return nil

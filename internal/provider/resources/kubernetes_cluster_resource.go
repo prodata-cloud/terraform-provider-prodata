@@ -42,12 +42,14 @@ var (
 // resource owns the cluster's control plane only; all worker node pools —
 // including the first — are managed by the separate prodata_kubernetes_node_pool resource.
 type K8sClusterResource struct {
-	c *client.Client
+	c            *client.Client
+	creationPoll time.Duration
 }
 
 // K8sClusterModel mirrors the prodata_kubernetes_cluster schema.
 type K8sClusterModel struct {
 	ID                    types.Int64  `tfsdk:"id"`
+	RequestUUID           types.String `tfsdk:"request_uuid"`
 	Region                types.String `tfsdk:"region"`
 	ProjectTag            types.String `tfsdk:"project_tag"`
 	Name                  types.String `tfsdk:"name"`
@@ -256,6 +258,7 @@ func (r *K8sClusterResource) Schema(ctx context.Context, _ resource.SchemaReques
 			"managed as independent `prodata_kubernetes_node_pool` resources — a cluster with zero " +
 			"node pools is a valid, control-plane-only steady state.",
 		Attributes: map[string]schema.Attribute{
+			"request_uuid": schema.StringAttribute{Computed: true, MarkdownDescription: "Durable creation request UUID, retained before the first reservation and when the canonical cluster ID is not yet confirmed.", PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()}},
 			"id": schema.Int64Attribute{
 				MarkdownDescription: "Cluster ID, assigned by the panel.",
 				Computed:            true,
@@ -778,6 +781,18 @@ func (r *K8sClusterResource) Create(ctx context.Context, req resource.CreateRequ
 	ctx, cancel := context.WithTimeout(ctx, createTimeout)
 	defer cancel()
 
+	if err := r.initializeClusterCreation(ctx, &plan, region, projectTag, resp); err != nil {
+		resp.Diagnostics.AddError("Unable to Retain Cluster Request", err.Error())
+		return
+	}
+	reservationStarted := false
+	defer func() {
+		if !reservationStarted && resp.Diagnostics.HasError() {
+			// Only local validation and GETs preceded this refusal; no reservation was sent.
+			resp.State.RemoveResource(ctx)
+		}
+	}()
+
 	wire := client.CreateClusterRequest{
 		ClusterName:  plan.Name.ValueString(),
 		KuberVersion: plan.KubernetesVersion.ValueString(),
@@ -878,61 +893,14 @@ func (r *K8sClusterResource) Create(ctx context.Context, req resource.CreateRequ
 		return
 	}
 
-	tflog.Debug(ctx, "Creating Kubernetes cluster", map[string]any{
-		"name": wire.ClusterName, "region": region, "project_tag": projectTag, "ha": wire.IsHA,
-	})
-
-	// RetryOnBusy covers transient 503 (capacity); it deliberately does not retry
-	// 627. The create endpoint is not idempotent, but it errors before persisting
-	// on a duplicate name, and we adopt-checked above.
-	created, err := client.RetryOnBusy(ctx, client.RetryTimeoutLong, func() (*client.Cluster, error) {
-		return r.c.CreateCluster(ctx, wire, opts)
-	})
-	if err != nil {
-		detail := client.KuberErrorDetail(err)
-		// The backend returns a generic HTTP 500 ("Could not create kubernetes cluster")
-		// when it cannot provision the control plane. With the master flavor preflighted
-		// and the version/network/addresses validated above, this is a server-side
-		// provisioning failure (typically the region lacks Managed-Kubernetes capacity),
-		// not a configuration error — say so, so it isn't read as a provider bug.
-		if client.IsAPIError(err, 500) {
-			detail += "\n\nThis is a server-side failure to provision the cluster, not a configuration problem " +
-				"(the master flavor, version, network and node IP range were validated before this call). " +
-				"The target region may not currently have Managed Kubernetes capacity/availability — retry " +
-				"later or contact ProData support if it persists."
-		}
-		resp.Diagnostics.AddError("Unable to create Kubernetes cluster", detail)
+	if err := r.c.RequireClusterCreationAPI(ctx, opts); err != nil {
+		resp.Diagnostics.AddError("Durable Cluster Creation API Required", err.Error())
 		return
 	}
+	plan.MasterFlavorID = types.Int64Value(wire.MasterNodeConfigID)
+	reservationStarted = true
+	r.createDurableCluster(ctx, &plan, wire, opts, resp)
 
-	// Save the id to state immediately (before the long poll) so a mid-poll
-	// failure leaves an importable/destroyable resource rather than an orphan.
-	plan.ID = types.Int64Value(created.ID)
-	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
-	if resp.Diagnostics.HasError() {
-		return
-	}
-
-	final, waitErr := r.waitForClusterReady(ctx, created.ID, "", opts)
-	result := final
-	if result == nil {
-		result = created
-	}
-
-	r.applyServerState(ctx, &plan, result, region, projectTag)
-	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
-
-	if waitErr != nil {
-		resp.Diagnostics.AddError(
-			"Kubernetes cluster did not reach a ready state",
-			fmt.Sprintf("cluster %d: %s", created.ID, waitErr.Error()),
-		)
-		return
-	}
-	if result != nil && result.Status == client.ClusterStatusSuccess && result.Kubeconfig == "" {
-		summary, detail := kubeconfigPendingDiag(created.ID, plan.ExcludeCredentialsFromState)
-		resp.Diagnostics.AddWarning(summary, detail)
-	}
 }
 
 // kubeconfigPendingDiag builds the (summary, detail) warning for a cluster that reached
@@ -960,26 +928,43 @@ func (r *K8sClusterResource) Read(ctx context.Context, req resource.ReadRequest,
 	}
 
 	opts := r.optsFromState(data.Region, data.ProjectTag)
+	if r.readClusterCreation(ctx, &data, opts, resp) {
+		return
+	}
+
 	id := data.ID.ValueInt64()
 
 	cl, err := r.c.GetCluster(ctx, id, opts)
 	if err != nil {
 		if client.IsKuberNotFound(err) {
-			tflog.Warn(ctx, "Cluster not found, removing from state", map[string]any{"id": id})
-			resp.State.RemoveResource(ctx)
+			resp.Diagnostics.AddWarning("Cluster Absence Is Unverified", "The canonical cluster could not be read. Its identity is retained until the scoped API confirms durable deletion: "+client.KuberErrorDetail(err))
 			return
 		}
 		resp.Diagnostics.AddError("Unable to read Kubernetes cluster", client.KuberErrorDetail(err))
 		return
 	}
-	// A soft-deleted cluster reads DELETED forever (there is no 404), so treat that
-	// as "gone" and drop it from state. DELETING is deliberately NOT handled here:
-	// the cluster still exists while its async teardown runs, so it must stay in
-	// state — it falls through to applyServerState below and keeps its DELETING
-	// status visible until it finally reads DELETED.
+	if cl.CreationRequestUUID != "" {
+		if data.RequestUUID.ValueString() != "" && data.RequestUUID.ValueString() != cl.CreationRequestUUID {
+			resp.Diagnostics.AddError("Cluster Creation Identity Changed", "The canonical row returned another creation UUID; prior ownership is retained.")
+			return
+		}
+		if data.RequestUUID.ValueString() == "" {
+			data.RequestUUID = types.StringValue(cl.CreationRequestUUID)
+			if r.readClusterCreation(ctx, &data, opts, resp) {
+				return
+			}
+		}
+	}
+	if cl.ID != id {
+		resp.Diagnostics.AddError("Cluster Identity Was Not Confirmed", "The response belongs to another canonical cluster; the existing identity is retained.")
+		return
+	}
 	if cl.Status == client.ClusterStatusDeleted {
-		tflog.Warn(ctx, "Cluster reported DELETED, removing from state", map[string]any{"id": id})
-		resp.State.RemoveResource(ctx)
+		if cl.ConfirmedDeletion(id) {
+			resp.State.RemoveResource(ctx)
+		} else {
+			resp.Diagnostics.AddWarning("Cluster Deletion Is Unverified", "The API returned a legacy or incomplete deletion status. The cluster identity is retained until its exact durable teardown is verified.")
+		}
 		return
 	}
 
@@ -987,6 +972,22 @@ func (r *K8sClusterResource) Read(ctx context.Context, req resource.ReadRequest,
 	projectTag := valueOrDefault(data.ProjectTag, r.c.ProjectTag)
 
 	r.applyServerState(ctx, &data, cl, region, projectTag)
+	if !data.MasterFlavorID.IsNull() && !data.MasterFlavorID.IsUnknown() && data.MasterFlavorID.ValueInt64() > 0 {
+		hardware, hardwareErr := r.c.ControlPlaneHardware(ctx, id, opts)
+		if hardwareErr != nil {
+			resp.Diagnostics.AddWarning("Control-plane rollout could not be verified", "Cluster ownership and metadata were refreshed. "+hardwareErr.Error())
+		} else {
+			data.MasterFlavorID = types.Int64Value(hardware.MasterFlavorID)
+			if !*hardware.Ready {
+				if data.Status.ValueString() != client.ClusterStatusFail && data.Status.ValueString() != client.ClusterStatusDeleting {
+					data.Status = types.StringValue(client.ClusterStatusProcessing)
+				}
+				data.Blocked = types.BoolValue(true)
+				resp.Diagnostics.AddWarning("Control-plane rollout is incomplete", "The requested template is present, but replacement machines have not converged. The cluster identity is retained and deletion remains available.")
+			}
+		}
+	}
+
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
 
@@ -1000,6 +1001,7 @@ func (r *K8sClusterResource) Update(ctx context.Context, req resource.UpdateRequ
 		return
 	}
 
+	plan.RequestUUID = state.RequestUUID
 	opts := r.optsFromState(state.Region, state.ProjectTag)
 	id := state.ID.ValueInt64()
 
@@ -1161,15 +1163,51 @@ func (r *K8sClusterResource) Delete(ctx context.Context, req resource.DeleteRequ
 	ctx, cancel := context.WithTimeout(ctx, deleteTimeout)
 	defer cancel()
 
+	if data.RequestUUID.ValueString() != "" {
+		complete, err := r.cancelClusterCreation(ctx, &data, opts)
+		if err != nil {
+			resp.Diagnostics.AddError("Cluster Creation Cleanup Is Unverified", err.Error())
+			return
+		}
+		if complete {
+			return
+		}
+		id = data.ID.ValueInt64()
+		resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+	}
+	if id < 1 {
+		resp.Diagnostics.AddError("Cluster Identity Is Unverified", "A positive canonical ID or exact creation cancellation is required before release.")
+		return
+	}
+
 	unlock := lockCluster(id)
 	defer unlock()
 
-	if err := r.c.DeleteCluster(ctx, id, opts); err != nil {
-		if client.IsKuberNotFound(err) {
+	before, readErr := r.c.GetCluster(ctx, id, opts)
+	if readErr != nil || before.ID != id {
+		detail := "The canonical cluster identity could not be confirmed; ownership is retained."
+		if readErr != nil {
+			detail = client.KuberErrorDetail(readErr) + ". " + detail
+		}
+		resp.Diagnostics.AddError("Unable to Verify Cluster Before Deletion", detail)
+		return
+	}
+	if before.ConfirmedDeletion(id) {
+		return
+	}
+	knownDrain := before.Status == client.ClusterStatusDeleting && before.KnownDeletion(id)
+	if !knownDrain {
+		if err := r.c.RequireClusterDeletionAPI(ctx, id, opts); err != nil {
+			resp.Diagnostics.AddError("Durable Cluster Deletion API Required", err.Error())
 			return
 		}
-		resp.Diagnostics.AddError("Unable to delete Kubernetes cluster", client.KuberErrorDetail(err))
-		return
+		if err := r.c.DeleteCluster(ctx, id, opts); err != nil {
+			resp.Diagnostics.AddError("Unable to delete Kubernetes cluster", client.KuberErrorDetail(err))
+			return
+		}
 	}
 
 	// Delete is a synchronous soft-delete; confirm the cluster reads back DELETED
@@ -1182,9 +1220,15 @@ func (r *K8sClusterResource) Delete(ctx context.Context, req resource.DeleteRequ
 		switch {
 		case err == nil:
 			consecutiveErrs = 0
+			if cl.ID != id {
+				resp.Diagnostics.AddError("Cluster Identity Was Not Confirmed", "The deletion readback belongs to another canonical cluster; ownership is retained.")
+				return
+			}
 			switch classifyDeletePoll(cl.Status) {
 			case deletePollDone:
-				// DELETED — teardown finished; the destroy succeeded.
+				if !cl.ConfirmedDeletion(id) {
+					resp.Diagnostics.AddError("Cluster Deletion Is Unverified", "The cluster has no verified durable teardown proof. Its canonical identity is retained; retry with the matching backend after the known operation is reconciled.")
+				}
 				return
 			case deletePollFailed:
 				// The backend put the cluster in FAIL (e.g. its teardown finalizer
@@ -1201,6 +1245,7 @@ func (r *K8sClusterResource) Delete(ctx context.Context, req resource.DeleteRequ
 				// keep polling until DELETED, FAIL, or the delete timeout.
 			}
 		case client.IsKuberNotFound(err):
+			resp.Diagnostics.AddError("Cluster Absence Is Unverified", "A missing response does not confirm physical teardown; the canonical cluster remains managed: "+client.KuberErrorDetail(err))
 			return
 		default:
 			consecutiveErrs++
@@ -1430,7 +1475,7 @@ func (r *K8sClusterResource) waitForClusterReady(ctx context.Context, id int64, 
 		select {
 		case <-ctx.Done():
 			return last, ctx.Err()
-		case <-time.After(k8sPollInterval):
+		case <-time.After(r.clusterOperationPoll()):
 		}
 	}
 }

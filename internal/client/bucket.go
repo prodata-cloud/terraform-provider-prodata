@@ -122,6 +122,9 @@ func (c *Client) GetBucket(ctx context.Context, name string, opts *RequestOpts) 
 	if err := c.Do(ctx, http.MethodGet, bucketPath(name), nil, &b, opts); err != nil {
 		return nil, err
 	}
+	if b.Name != name {
+		return nil, fmt.Errorf("get bucket: server returned a missing or different identity")
+	}
 	return &b, nil
 }
 

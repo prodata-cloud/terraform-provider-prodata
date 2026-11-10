@@ -65,6 +65,7 @@ func TestLbASG_CreateRefreshUpdateImportDelete(t *testing.T) {
 			"status": map[string]any{"name": status}, "ports": []map[string]int{{"srcPort": 80, "dstPort": 8080}},
 			// No materialized backends: the group is scaled to zero.
 			"backends": []any{}, "backendGroups": []map[string]any{{"kind": "ASG", "asgId": asg}},
+			"backendSelectorContract": "replace-v1",
 		}})
 	}))
 	defer server.Close()

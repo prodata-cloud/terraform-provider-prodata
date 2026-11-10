@@ -81,6 +81,7 @@ type LocalNetworkAttachmentResource struct {
 }
 
 type LocalNetworkAttachmentResourceModel struct {
+	Status                    types.String   `tfsdk:"status"`
 	VmID                      types.Int64    `tfsdk:"vm_id"`
 	NetworkID                 types.Int64    `tfsdk:"network_id"`
 	IP                        types.String   `tfsdk:"ip"`
@@ -111,6 +112,7 @@ func (r *LocalNetworkAttachmentResource) Schema(ctx context.Context, req resourc
 			"To move the VM itself to another network, change that `local_network_id`.",
 
 		Attributes: map[string]schema.Attribute{
+			"status": schema.StringAttribute{Computed: true, MarkdownDescription: "Last verified state of the durable local interface operation.", PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()}},
 			"vm_id": schema.Int64Attribute{
 				MarkdownDescription: "The ID of the virtual machine to add the interface to.",
 				Required:            true,
@@ -240,6 +242,12 @@ func (r *LocalNetworkAttachmentResource) Create(ctx context.Context, req resourc
 	defer cancel()
 
 	opts := r.buildOpts(&data)
+	if opts.Region == "" {
+		opts.Region = r.client.Region
+	}
+	if opts.ProjectTag == "" {
+		opts.ProjectTag = r.client.ProjectTag
+	}
 	vmID := data.VmID.ValueInt64()
 	data.GuestConfigurationApplied = types.BoolValue(false)
 	if data.ConfigureGuest.ValueBool() {
@@ -259,49 +267,64 @@ func (r *LocalNetworkAttachmentResource) Create(ctx context.Context, req resourc
 		"ip":         attachReq.IP,
 	})
 
-	var (
-		attached *client.AttachedLocalNetwork
-		last     error // what the latest request of the attach was answered with
-	)
-	err := r.whileUnsettled(ctx, vmID, opts, func() (err error) {
-		attached, err = r.client.AttachLocalNetwork(ctx, vmID, attachReq, opts)
-		last = err
-		return err
-	})
-	if err != nil {
-		resp.Diagnostics.AddError("Unable to Attach Local Network", r.attachFailure(ctx, err, last, vmID, attachReq.NetworkID, opts))
+	if err := r.client.CheckLocalNetworkAttachmentAPI(ctx, vmID, opts); err != nil {
+		resp.Diagnostics.AddError("Unable to Attach Local Network", err.Error())
 		return
 	}
-
-	data.InterfaceID = types.Int64Value(attached.ID)
-	data.MACAddress = nullableString(attached.MAC)
-	if data.IP.IsNull() || data.IP.IsUnknown() {
-		data.IP = nullableString(attached.IP)
-	}
-
-	region := data.Region.ValueString()
-	if region == "" {
-		region = r.client.Region
-	}
-	projectTag := data.ProjectTag.ValueString()
-	if projectTag == "" {
-		projectTag = r.client.ProjectTag
-	}
-	data.Region = types.StringValue(region)
-	data.ProjectTag = types.StringValue(projectTag)
-
-	tflog.Debug(ctx, "Attached local network to VM", map[string]any{
-		"vm_id":        vmID,
-		"interface_id": attached.ID,
+	var reserved *client.LocalNetworkAttachmentOperation
+	var reserveLast error
+	err := r.whileUnsettled(ctx, vmID, opts, func() (e error) {
+		reserved, e = r.client.ReserveLocalNetworkAttachment(ctx, vmID, attachReq, opts)
+		reserveLast = e
+		return e
 	})
-
-	// The interface exists on the platform from here on. Record it before anything that can
-	// still fail: a failed restart must not leave an interface Terraform does not know of,
-	// which a retry would then be refused ("already has an interface in this network").
+	if err != nil && reserved == nil {
+		resp.Diagnostics.AddError("Unable to Attach Local Network", r.attachFailure(ctx, err, reserveLast, vmID, attachReq.NetworkID, opts))
+		return
+	}
+	data.InterfaceID = types.Int64Value(reserved.ID)
+	data.MACAddress = nullableString(reserved.MAC)
+	if data.IP.IsNull() || data.IP.IsUnknown() {
+		data.IP = nullableString(reserved.IP)
+	}
+	data.Region = types.StringValue(opts.Region)
+	data.ProjectTag = types.StringValue(opts.ProjectTag)
+	data.Status = types.StringValue(reserved.Status)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	if err != nil {
+		resp.Diagnostics.AddError("Local Network Reservation Is Incomplete", err.Error()+" The known reservation is retained and no physical attachment was submitted.")
+		return
+	}
+	if !*reserved.Exists {
+		resp.Diagnostics.AddError("Local Network Reservation Was Cancelled", "The known reservation was cancelled before attachment; its identity is retained for cleanup.")
+		return
+	}
+	if data.RebootAfterAttach.ValueBool() && reserved.RequiresRestart {
+		if err := r.client.RequireVmPowerOperations(ctx, vmID, opts); err != nil {
+			resp.Diagnostics.AddError("Automatic VM Restart Unavailable", err.Error()+" The interface remains reserved; no physical attachment was submitted.")
+			return
+		}
+	}
+	current, err := submitKnownReservation(ctx, func(ctx context.Context) (*client.LocalNetworkAttachmentOperation, error) {
+		return r.client.SubmitLocalNetworkAttachment(ctx, vmID, attachReq.NetworkID, reserved.ID, opts)
+	}, func(ctx context.Context) (*client.LocalNetworkAttachmentOperation, error) {
+		return r.client.GetLocalNetworkAttachment(ctx, vmID, attachReq.NetworkID, reserved.ID, opts)
+	}, func(v *client.LocalNetworkAttachmentOperation) string { return v.Status }, r.pollInterval())
+	if err == nil {
+		current, err = r.waitForLocalNetworkOperation(ctx, vmID, attachReq.NetworkID, reserved.ID, current, opts, false)
+	}
+	if current != nil {
+		data.Status = types.StringValue(current.Status)
+		resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
+	}
+	if err != nil {
+		resp.Diagnostics.AddError("Unable to Confirm Local Network Attachment", err.Error()+" The reserved interface and IP remain recorded; no untracked attach is repeated.")
+		return
+	}
+	attached := &client.AttachedLocalNetwork{VmLocalNetwork: current.VmLocalNetwork, RequiresRestart: current.RequiresRestart, RequiresGuestConfiguration: current.RequiresGuestConfiguration}
 
 	if attached.RequiresGuestConfiguration && !data.ConfigureGuest.ValueBool() {
 		resp.Diagnostics.AddWarning(
@@ -390,18 +413,28 @@ func (r *LocalNetworkAttachmentResource) Read(ctx context.Context, req resource.
 		"interface_id": interfaceID,
 	})
 
-	nics, err := r.client.GetVmLocalNetworks(ctx, vmID, opts)
-	if err != nil {
-		// Only a VM that is gone takes its interfaces with it; any other error must not
-		// silently drop the resource from state (it would be created again, and could end up
-		// attached twice).
-		if isLocalNICGone(err) {
-			tflog.Warn(ctx, "VM not found, removing local network attachment from state", map[string]any{
-				"vm_id": vmID,
-			})
+	var nics []client.VmLocalNetwork
+	current, err := r.client.GetLocalNetworkAttachment(ctx, vmID, data.NetworkID.ValueInt64(), interfaceID, opts)
+	if err == nil {
+		if !*current.Exists {
 			resp.State.RemoveResource(ctx)
 			return
 		}
+		data.Status = types.StringValue(current.Status)
+		nics = []client.VmLocalNetwork{current.VmLocalNetwork}
+		if current.Status != "SUCCESS" {
+			resp.Diagnostics.AddWarning("Local Interface Operation Is Unverified", fmt.Sprintf("Interface %d is %s; its reserved identity and address are retained.", interfaceID, current.Status))
+			resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
+			return
+		}
+	} else if (data.Status.IsNull() || data.Status.ValueString() == "LEGACY_UNVERIFIED") && client.IsNotFound(err) {
+		nics, err = r.client.GetVmLocalNetworks(ctx, vmID, opts)
+		if err != nil {
+			resp.Diagnostics.AddError("Unable to Read Local Network Attachment", err.Error())
+			return
+		}
+		data.Status = types.StringValue("LEGACY_UNVERIFIED")
+	} else {
 		resp.Diagnostics.AddError("Unable to Read Local Network Attachment", err.Error())
 		return
 	}
@@ -415,11 +448,7 @@ func (r *LocalNetworkAttachmentResource) Read(ctx context.Context, req resource.
 		}
 	}
 	if nic == nil {
-		tflog.Warn(ctx, "Interface no longer attached to the VM, removing from state", map[string]any{
-			"vm_id":        vmID,
-			"interface_id": interfaceID,
-		})
-		resp.State.RemoveResource(ctx)
+		resp.Diagnostics.AddError("Local Network Attachment Is Unverified", "The legacy list cannot confirm absence of a delayed interface operation. Upgrade the matching APIs to verify its tombstone.")
 		return
 	}
 
@@ -435,12 +464,7 @@ func (r *LocalNetworkAttachmentResource) Read(ctx context.Context, req resource.
 		}
 		data.NetworkID = types.Int64Value(*nic.NetworkID)
 	case nic.NetworkID == nil || *nic.NetworkID != data.NetworkID.ValueInt64():
-		tflog.Warn(ctx, "Interface now belongs to a different network, removing from state", map[string]any{
-			"vm_id":        vmID,
-			"interface_id": interfaceID,
-			"network_id":   data.NetworkID.ValueInt64(),
-		})
-		resp.State.RemoveResource(ctx)
+		resp.Diagnostics.AddError("Local Network Attachment Identity Conflict", "The interface now refers to another network; existing ownership is retained.")
 		return
 	}
 
@@ -467,14 +491,17 @@ func (r *LocalNetworkAttachmentResource) Read(ctx context.Context, req resource.
 		"interface_id": interfaceID,
 	})
 	if data.ConfigureGuest.ValueBool() {
-		guest, err := r.client.GetVmGuestNetworkState(ctx, vmID, interfaceID, client.ConfigureGuestNetworkRequest{ExpectedMAC: data.MACAddress.ValueString(), ExpectedIP: data.IP.ValueString()}, opts)
-		if err != nil {
-			resp.Diagnostics.AddError("Unable to Verify Guest Network", err.Error())
-			return
-		}
-		data.GuestConfigurationApplied = types.BoolValue(*guest.Supported && *guest.Configured)
-		if !*guest.Supported {
-			resp.Diagnostics.AddWarning("Guest Network Configuration Is Unverified", guest.Reason)
+		if nic.IP == nil || *nic.IP != data.IP.ValueString() {
+			resp.Diagnostics.AddWarning("Guest Network Configuration Is Unverified", "The platform address changed; the previous guest verification is retained without probing the old address.")
+		} else {
+			guest, err := r.client.GetVmGuestNetworkState(ctx, vmID, interfaceID, client.ConfigureGuestNetworkRequest{ExpectedMAC: data.MACAddress.ValueString(), ExpectedIP: data.IP.ValueString()}, opts)
+			if err != nil {
+				resp.Diagnostics.AddWarning("Guest Network Configuration Is Unverified", err.Error())
+			} else if confirmedGuestNetwork(guest) {
+				data.GuestConfigurationApplied = types.BoolValue(*guest.Configured)
+			} else {
+				resp.Diagnostics.AddWarning("Guest Network Configuration Is Unverified", guest.Reason+" The last verified result is preserved.")
+			}
 		}
 	} else {
 		data.GuestConfigurationApplied = types.BoolValue(false)
@@ -513,8 +540,15 @@ func (r *LocalNetworkAttachmentResource) Update(ctx context.Context, req resourc
 		}
 		data.GuestConfigurationApplied = types.BoolValue(true)
 	} else if !data.ConfigureGuest.ValueBool() {
+		if state.ConfigureGuest.ValueBool() {
+			if err := releaseGuestNetwork(ctx, r.client, state.VmID.ValueInt64(), state.InterfaceID.ValueInt64(), client.ConfigureGuestNetworkRequest{ExpectedMAC: state.MACAddress.ValueString(), ExpectedIP: state.IP.ValueString()}, r.buildOpts(&state), r.pollInterval()); err != nil {
+				resp.Diagnostics.AddError("Unable to Release Guest Network Ownership", err.Error())
+				return
+			}
+		}
 		data.GuestConfigurationApplied = types.BoolValue(false)
 	}
+	data.Status = state.Status
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
@@ -560,19 +594,40 @@ func (r *LocalNetworkAttachmentResource) Delete(ctx context.Context, req resourc
 		"interface_id": interfaceID,
 	})
 
-	// The VM is never stopped or restarted here: a detach that finds it neither RUNNING nor
-	// STOPPED waits for it to settle, and gives up at the delete timeout.
-	err := r.whileUnsettled(ctx, vmID, opts, func() error {
-		return r.client.DetachLocalNetwork(ctx, vmID, interfaceID, opts)
+	current, err := r.client.GetLocalNetworkAttachment(ctx, vmID, data.NetworkID.ValueInt64(), interfaceID, opts)
+	if err != nil {
+		resp.Diagnostics.AddError("Unable to Detach Local Network", err.Error())
+		return
+	}
+	if !*current.Exists {
+		return
+	}
+	if err = r.client.CheckLocalNetworkAttachmentAPI(ctx, vmID, opts); err != nil {
+		resp.Diagnostics.AddError("Unable to Detach Local Network", err.Error())
+		return
+	}
+	// Versioned DELETE can only resolve/resume this permanent interface identity; no raw PVE replay.
+	err = r.whileUnsettled(ctx, vmID, opts, func() error {
+		var e error
+		current, e = submitKnownReservation(ctx, func(ctx context.Context) (*client.LocalNetworkAttachmentOperation, error) {
+			return r.client.DeleteLocalNetworkAttachment(ctx, vmID, data.NetworkID.ValueInt64(), interfaceID, opts)
+		}, func(ctx context.Context) (*client.LocalNetworkAttachmentOperation, error) {
+			return r.client.GetLocalNetworkAttachment(ctx, vmID, data.NetworkID.ValueInt64(), interfaceID, opts)
+		}, func(v *client.LocalNetworkAttachmentOperation) string {
+			if v.Operation == "ATTACH_LOCAL_NIC" && v.Status == "SUCCESS" {
+				return "RESERVED"
+			}
+			return v.Status
+		}, r.pollInterval())
+		return e
 	})
+	if err == nil {
+		_, err = r.waitForLocalNetworkOperation(ctx, vmID, data.NetworkID.ValueInt64(), interfaceID, current, opts, true)
+	}
+
 	switch {
 	case err == nil:
-	case isLocalNICGone(err):
-		tflog.Info(ctx, "VM or interface not found, local network attachment already gone", map[string]any{
-			"vm_id":        vmID,
-			"interface_id": interfaceID,
-		})
-		return
+
 	case client.IsAPIError(err, panelCodePrimary):
 		resp.Diagnostics.AddError(
 			"Unable to Detach Local Network",
@@ -727,7 +782,7 @@ func (r *LocalNetworkAttachmentResource) whileUnsettled(ctx context.Context, vmI
 		return err
 	}
 	for {
-		err := client.RetryVoidOnBusy(ctx, client.RetryTimeoutShort, ask)
+		err := client.RetryNetworkSettingsBusy(ctx, ask)
 		if !client.IsAPIError(err, panelCodeBadVMStatus) {
 			if ctx.Err() != nil && errors.Is(err, ctx.Err()) {
 				switch {
@@ -1071,4 +1126,34 @@ func forAddress(ip *string) string {
 		return ""
 	}
 	return " " + *ip
+}
+
+func (r *LocalNetworkAttachmentResource) waitForLocalNetworkOperation(ctx context.Context, vmID, networkID, id int64, current *client.LocalNetworkAttachmentOperation, opts *client.RequestOpts, deleting bool) (*client.LocalNetworkAttachmentOperation, error) {
+	for {
+		if current == nil {
+			return nil, fmt.Errorf("the known interface operation has no outcome")
+		}
+		if !*current.Exists {
+			if deleting {
+				return current, nil
+			}
+			return current, fmt.Errorf("the reserved interface was cancelled")
+		}
+		if !deleting && current.Operation == "ATTACH_LOCAL_NIC" && current.Status == "SUCCESS" {
+			return current, nil
+		}
+		if current.Status == "UNVERIFIED" || current.Status == "ERROR" || current.Status == "NOT_SUBMITTED" {
+			return current, fmt.Errorf("interface %d is %s; its identity is retained. Inspect the known operation before retrying", id, current.Status)
+		}
+		select {
+		case <-ctx.Done():
+			return current, ctx.Err()
+		case <-time.After(r.pollInterval()):
+		}
+		var err error
+		current, err = r.client.GetLocalNetworkAttachment(ctx, vmID, networkID, id, opts)
+		if err != nil {
+			return current, err
+		}
+	}
 }

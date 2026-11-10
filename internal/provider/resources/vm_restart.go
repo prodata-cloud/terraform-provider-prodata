@@ -191,7 +191,8 @@ func restartRunningVMWith(ctx context.Context, c *client.Client, vmID int64, opt
 		sawStopped   bool // the VM has been STOPPED since our stop took effect
 		stoppedPolls int  // consecutive reads of STOPPED since the panel accepted our start
 
-		hookDone bool // the hook ran, or was passed over for lack of time: it is not called again, and ctx is the context of the reserve
+		hookDone     bool // the hook ran, or was passed over for lack of time: it is not called again, and ctx is the context of the reserve
+		powerChecked bool
 	)
 	parent := ctx
 
@@ -264,6 +265,12 @@ func restartRunningVMWith(ctx context.Context, c *client.Client, vmID int64, opt
 					if left := hookBudget(ctx); whileStopped != nil && !stopRefused && left < vmHookMinBudget {
 						return out, fmt.Errorf("%w: %s are left, less than the %s the work needs once the VM is stopped, so VM %d was not stopped",
 							errHookTimeShort, left.Round(time.Second), vmHookMinBudget, vmID)
+					}
+					if !powerChecked && !stopRefused {
+						if err := c.RequireVmPowerOperations(ctx, vmID, opts); err != nil {
+							return out, fmt.Errorf("automatic restart is unavailable: %w", err)
+						}
+						powerChecked = true
 					}
 					tflog.Info(ctx, "Stopping VM to start it again", map[string]any{"vm_id": vmID})
 					if err := c.StopVm(ctx, vmID, opts); err != nil {

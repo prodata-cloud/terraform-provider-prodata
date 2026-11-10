@@ -354,7 +354,7 @@ func TestVmGatewayReadAndDeleteDoNotAdoptOrClearSomeoneElsesRoute(t *testing.T) 
 	if deleted.Diagnostics.HasError() {
 		t.Fatal(deleted.Diagnostics)
 	}
-	if got := gatewayRequests(panel.vm); !reflect.DeepEqual(got, []string{"read", "check", "read"}) {
+	if got := gatewayRequests(panel.vm); !reflect.DeepEqual(got, []string{"read", "read", "check", "read"}) {
 		t.Fatalf("calls %v", got)
 	}
 	if panel.gateway == nil || *panel.gateway != foreign || panel.requests[0].ExpectedGateway == nil || *panel.requests[0].ExpectedGateway != "192.0.2.1" {
@@ -376,7 +376,7 @@ func TestVmGatewayDeleteReconcilesPanelWithoutClearingForeignRoute(t *testing.T)
 	if panel.reconcile || panel.gateway == nil || *panel.gateway != foreign {
 		t.Fatalf("panel was not reconciled or foreign route changed: %+v", panel)
 	}
-	if got := gatewayRequests(panel.vm); !reflect.DeepEqual(got, []string{"check", "read", "write"}) {
+	if got := gatewayRequests(panel.vm); !reflect.DeepEqual(got, []string{"read", "check", "read", "write"}) {
 		t.Fatalf("calls %v", got)
 	}
 }
@@ -528,7 +528,21 @@ func TestVmGatewayUpdate_PartialChangeRecordsKnownUnverifiedGuestState(t *testin
 	base := panel.vm.extra
 	panel.vm.extra = func(w http.ResponseWriter, req *http.Request) bool {
 		if req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/guest-network-capabilities") {
-			panel.vm.ok(w, map[string]any{"supported": true, "configured": false, "driver": "netplan-v1"})
+			panel.vm.ok(w, guestWire("SUCCESS"))
+			return true
+		}
+		if strings.HasSuffix(req.URL.Path, "guest-configuration/reservations") {
+			panel.vm.ok(w, guestWire("RESERVED"))
+			return true
+		}
+		if strings.HasSuffix(req.URL.Path, "guest-configuration/dry-run") {
+			panel.vm.ok(w, guestWire("SUCCESS"))
+			return true
+		}
+		if req.URL.Path == vmPanelBase+"/local-networks" {
+			network := int64(42)
+			ip, mac := "192.0.2.5", lnaMAC
+			panel.vm.ok(w, []client.VmLocalNetwork{{ID: 91, NetworkID: &network, IP: &ip, MAC: &mac}})
 			return true
 		}
 		return base(w, req)
@@ -587,7 +601,7 @@ func TestVmGatewayDelete_ClearsOnlyTheOwnedGateway(t *testing.T) {
 	if panel.gateway != nil {
 		t.Fatalf("gateway remains %v", *panel.gateway)
 	}
-	if got := gatewayRequests(panel.vm); !reflect.DeepEqual(got, []string{"check", "stop", "write", "start"}) {
+	if got := gatewayRequests(panel.vm); !reflect.DeepEqual(got, []string{"read", "check", "stop", "write", "start"}) {
 		t.Fatalf("calls %v", got)
 	}
 }

@@ -490,9 +490,11 @@ type credClusterView struct {
 // credPanel is a minimal panel-main: one cluster, id 313, whose getCluster reply carries a
 // kubeconfig and an SSH private key. Any request it does not know is a test failure.
 type credPanel struct {
-	mu       sync.Mutex
-	cluster  credClusterView
-	requests []string
+	creationUUID   string
+	creationStatus string
+	mu             sync.Mutex
+	cluster        credClusterView
+	requests       []string
 
 	// failReadsFrom, when set, makes the n-th and every later getCluster call (counting
 	// from 1) fail with an HTTP 500; onReadFail, if set, runs as each of them is served.
@@ -526,6 +528,32 @@ func newCredPanel(t *testing.T) (*client.Client, *credPanel) {
 		}
 		view := p.cluster
 		p.mu.Unlock()
+		prefix := "/panel-main/api/v2/kubernetes/cluster-operations/"
+		if strings.HasPrefix(r.URL.Path, prefix) {
+			tail := strings.TrimPrefix(r.URL.Path, prefix)
+			var data any
+			if tail == "capabilities" {
+				data = creationCapabilitiesWire()
+			} else {
+				id := strings.TrimSuffix(strings.TrimSuffix(tail, "/reservations"), "/submit")
+				p.mu.Lock()
+				if strings.HasSuffix(tail, "/reservations") {
+					p.creationUUID = id
+					p.creationStatus = "RESERVED"
+				}
+				if strings.HasSuffix(tail, "/submit") {
+					p.creationStatus = "SUCCESS"
+				}
+				if p.creationUUID != id {
+					t.Error("creation identity changed")
+				}
+				data = creationOperationWire(id, p.creationStatus, 313)
+				p.mu.Unlock()
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "data": data})
+			return
+		}
 
 		var data any
 		switch {
@@ -551,6 +579,9 @@ func newCredPanel(t *testing.T) (*client.Client, *credPanel) {
 				return
 			}
 			data = credClusterBody(view)
+		case r.Method == http.MethodGet && r.URL.Path == "/panel-main/api/v2/kubernetes/clusters/313/hardware":
+			http.NotFound(w, r) // Compatible read of a legacy server without rollout metadata.
+			return
 		default:
 			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
 			http.NotFound(w, r)
@@ -663,7 +694,7 @@ func TestCreate_ExcludeCredentialsFromState(t *testing.T) {
 			assertCredentialsInState(t, resp.State, flag == "true")
 			panel.mu.Lock()
 			defer panel.mu.Unlock()
-			if !containsString(panel.requests, "POST /panel-main/api/kubernetes/createCluster") {
+			if !containsString(panel.requests, "POST /panel-main/api/v2/kubernetes/cluster-operations/"+panel.creationUUID+"/submit") {
 				t.Errorf("the cluster was never created: %v", panel.requests)
 			}
 		})

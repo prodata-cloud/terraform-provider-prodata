@@ -13,15 +13,16 @@ const vmProtectionContract = "vm-protection-reservation-v1"
 // reservation semantics. Old endpoints must not be mistaken for safe two-step creation.
 func (c *Client) CheckVmProtectionCapabilities(ctx context.Context, opts *RequestOpts) error {
 	var caps struct {
-		Contract string `json:"contract"`
-		Reserve  bool   `json:"reserveBeforeSubmit"`
-		Single   bool   `json:"singleSubmit"`
-		Restore  bool   `json:"restoreIdentityBeforeSubmit"`
+		Contract    string `json:"contract"`
+		Reserve     bool   `json:"reserveBeforeSubmit"`
+		Single      bool   `json:"singleSubmit"`
+		Restore     bool   `json:"restoreIdentityBeforeSubmit"`
+		Recoverable bool   `json:"recoverableSubmission"`
 	}
 	if err := c.Do(ctx, http.MethodGet, "/api/v2/vm-protection/capabilities", nil, &caps, opts); err != nil {
 		return fmt.Errorf("VM protection reservation API is unavailable: %w", err)
 	}
-	if caps.Contract != vmProtectionContract || !caps.Reserve || !caps.Single || !caps.Restore {
+	if caps.Contract != vmProtectionContract || !caps.Reserve || !caps.Single || !caps.Restore || !caps.Recoverable {
 		return fmt.Errorf("backend does not confirm durable single-submit VM protection; no resource was created")
 	}
 	return nil

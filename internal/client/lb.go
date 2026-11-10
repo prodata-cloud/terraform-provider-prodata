@@ -45,23 +45,24 @@ const (
 
 // LoadBalancer is the decoded, flattened form of panel-main's LoadBalancerDTO.
 type LoadBalancer struct {
-	ID            int64
-	Name          string
-	Description   string
-	Type          string // "external" | "internal"
-	Source        string // "FRONTEND" | "CCM" — empty for legacy LBs created before sourcing
-	Status        string // NEW | PROCESSING | SUCCESS | DELETED | FAIL
-	ErrorMessage  string
-	Protocol      string
-	NetworkID     int64
-	PublicIP      string // provisioned public IP; empty for internal LBs or while NEW
-	PrivateIP     string // VIP inside the local network; may be empty while NEW
-	DateCreated   string
-	Backends      []LbBackend
-	BackendGroups []LbBackendGroup
-	Ports         []LbPort
-	Region        string
-	ProjectTag    string
+	ID                      int64
+	Name                    string
+	Description             string
+	Type                    string // "external" | "internal"
+	Source                  string // "FRONTEND" | "CCM" — empty for legacy LBs created before sourcing
+	Status                  string // NEW | PROCESSING | SUCCESS | DELETED | FAIL
+	ErrorMessage            string
+	Protocol                string
+	NetworkID               int64
+	PublicIP                string // provisioned public IP; empty for internal LBs or while NEW
+	PrivateIP               string // VIP inside the local network; may be empty while NEW
+	DateCreated             string
+	Backends                []LbBackend
+	BackendGroups           []LbBackendGroup
+	BackendSelectorContract string
+	Ports                   []LbPort
+	Region                  string
+	ProjectTag              string
 }
 
 type LbBackendGroup struct {
@@ -73,6 +74,7 @@ type LbBackendGroup struct {
 // LbBackend is one backend member of a load balancer. Backends are identified by
 // VM guid (see prodata_vm's computed `guid` attribute).
 type LbBackend struct {
+	NodePoolID     int64
 	Guid           string
 	Status         string
 	IP             string
@@ -106,13 +108,14 @@ type LbPortReq struct {
 // auto-allocates them from the network when absent, and pinning them would
 // couple Terraform state to network-internal addressing.
 type LoadBalancerRequest struct {
-	Name        string         `json:"name"`
-	Description string         `json:"description,omitempty"`
-	IsPublic    bool           `json:"isPublic"`
-	Protocol    string         `json:"protocol"`
-	UserNetID   int64          `json:"userNetId"`
-	Backends    []LbBackendRef `json:"backends,omitempty"`
-	Ports       []LbPortReq    `json:"ports"`
+	Name                    string         `json:"name"`
+	Description             string         `json:"description,omitempty"`
+	IsPublic                bool           `json:"isPublic"`
+	Protocol                string         `json:"protocol"`
+	UserNetID               int64          `json:"userNetId"`
+	Backends                []LbBackendRef `json:"backends,omitempty"`
+	Ports                   []LbPortReq    `json:"ports"`
+	ReplaceBackendSelectors bool           `json:"replaceBackendSelectors,omitempty"`
 }
 
 // CreateLoadBalancerCCMRequest is the body for the CCM create endpoint. The
@@ -128,23 +131,24 @@ type CreateLoadBalancerCCMRequest struct {
 // ---- wire types: mirror panel-main's LoadBalancerDTO exactly ----
 
 type lbDTO struct {
-	ID                   int64            `json:"id"`
-	Name                 string           `json:"name"`
-	Description          string           `json:"description"`
-	IsPublic             bool             `json:"isPublic"`
-	Status               lbStatusDTO      `json:"status"`
-	ErrorMessage         string           `json:"errMessage"`
-	UserNet              int64            `json:"userNet"`
-	DateCreated          string           `json:"dateCreated"`
-	LocalUserVip         string           `json:"localUserVip"`
-	ProvisioningPublicIP string           `json:"provisioningPublicIp"`
-	Protocol             string           `json:"protocol"`
-	Backends             []lbBackendDTO   `json:"backends"`
-	BackendGroups        []LbBackendGroup `json:"backendGroups"`
-	Ports                []lbPortDTO      `json:"ports"`
-	Source               string           `json:"source"`
-	Region               string           `json:"region"`
-	ProjectTag           string           `json:"projectTag"`
+	ID                      int64            `json:"id"`
+	Name                    string           `json:"name"`
+	Description             string           `json:"description"`
+	IsPublic                bool             `json:"isPublic"`
+	Status                  lbStatusDTO      `json:"status"`
+	ErrorMessage            string           `json:"errMessage"`
+	UserNet                 int64            `json:"userNet"`
+	DateCreated             string           `json:"dateCreated"`
+	LocalUserVip            string           `json:"localUserVip"`
+	ProvisioningPublicIP    string           `json:"provisioningPublicIp"`
+	Protocol                string           `json:"protocol"`
+	Backends                []lbBackendDTO   `json:"backends"`
+	BackendGroups           []LbBackendGroup `json:"backendGroups"`
+	BackendSelectorContract string           `json:"backendSelectorContract"`
+	Ports                   []lbPortDTO      `json:"ports"`
+	Source                  string           `json:"source"`
+	Region                  string           `json:"region"`
+	ProjectTag              string           `json:"projectTag"`
 }
 
 type lbStatusDTO struct {
@@ -152,6 +156,7 @@ type lbStatusDTO struct {
 }
 
 type lbBackendDTO struct {
+	NodePoolID     int64          `json:"nodePoolId"`
 	IP             string         `json:"ip"`
 	Status         lbStatusDTO    `json:"status"`
 	UserVM         lbBackendVMDTO `json:"userVM"`
@@ -173,24 +178,26 @@ func (d *lbDTO) toLoadBalancer() *LoadBalancer {
 	// the schema's stringvalidator.OneOf("TCP","UDP") and trigger a spurious
 	// RequiresReplace destroy+recreate on the next plan.
 	lb := &LoadBalancer{
-		ID:            d.ID,
-		Name:          d.Name,
-		Description:   d.Description,
-		Type:          lbTypeFromIsPublic(d.IsPublic),
-		Source:        d.Source,
-		Status:        d.Status.Name,
-		ErrorMessage:  d.ErrorMessage,
-		Protocol:      strings.ToUpper(d.Protocol),
-		NetworkID:     d.UserNet,
-		PublicIP:      d.ProvisioningPublicIP,
-		PrivateIP:     d.LocalUserVip,
-		DateCreated:   d.DateCreated,
-		Region:        d.Region,
-		ProjectTag:    d.ProjectTag,
-		BackendGroups: d.BackendGroups,
+		ID:                      d.ID,
+		Name:                    d.Name,
+		Description:             d.Description,
+		Type:                    lbTypeFromIsPublic(d.IsPublic),
+		Source:                  d.Source,
+		Status:                  d.Status.Name,
+		ErrorMessage:            d.ErrorMessage,
+		Protocol:                strings.ToUpper(d.Protocol),
+		NetworkID:               d.UserNet,
+		PublicIP:                d.ProvisioningPublicIP,
+		PrivateIP:               d.LocalUserVip,
+		DateCreated:             d.DateCreated,
+		Region:                  d.Region,
+		ProjectTag:              d.ProjectTag,
+		BackendGroups:           d.BackendGroups,
+		BackendSelectorContract: d.BackendSelectorContract,
 	}
 	for _, b := range d.Backends {
 		lb.Backends = append(lb.Backends, LbBackend{
+			NodePoolID:     b.NodePoolID,
 			Guid:           b.UserVM.Guid,
 			Status:         b.Status.Name,
 			IP:             b.IP,
@@ -216,12 +223,15 @@ func lbTypeFromIsPublic(isPublic bool) string {
 // the language of the API key user's profile (see RequestOpts.Lang).
 func doLBV1[T any](ctx context.Context, c *Client, method, path string, body any, opts *RequestOpts) (T, error) {
 	var zero T
-	statusCode, respBody, err := c.doRequest(ctx, method, path, body, withEnglishLang(opts))
+	statusCode, respBody, headers, err := c.doRequestWithHeaders(ctx, method, path, body, withEnglishLang(opts))
 	if err != nil {
 		return zero, err
 	}
 	data, apiErr := parseV1Response[T](statusCode, respBody)
 	if apiErr != nil {
+		if statusCode == http.StatusServiceUnavailable && apiErr.HasCode(806) {
+			apiErr.RetrySafe = headers.Get(LBSelectorFenceRetryHeader)
+		}
 		return zero, apiErr
 	}
 	return data, nil
@@ -233,6 +243,9 @@ func singleLB(dto *lbDTO, err error, op string) (*LoadBalancer, error) {
 	}
 	if dto == nil {
 		return nil, fmt.Errorf("%s: empty response from server", op)
+	}
+	if dto.ID < 1 {
+		return nil, fmt.Errorf("%s: server returned an invalid load balancer identity", op)
 	}
 	return dto.toLoadBalancer(), nil
 }
@@ -283,6 +296,9 @@ func (c *Client) GetLoadBalancer(ctx context.Context, id int64, opts *RequestOpt
 	path := "/api/loadbalancer/getLoadBalancer?" +
 		url.Values{"loadBalancerId": {strconv.FormatInt(id, 10)}}.Encode()
 	dto, err := doLBV1[*lbDTO](ctx, c, http.MethodGet, path, nil, opts)
+	if err == nil && dto != nil && dto.ID != id {
+		return nil, fmt.Errorf("get load balancer %d: server returned a different identity", id)
+	}
 	return singleLB(dto, err, fmt.Sprintf("get load balancer %d", id))
 }
 
@@ -302,15 +318,37 @@ func (c *Client) ListLoadBalancers(ctx context.Context, opts *RequestOpts) ([]Lo
 
 // ConfigureLoadBalancerFrontend updates a Frontend-source load balancer in place.
 func (c *Client) ConfigureLoadBalancerFrontend(ctx context.Context, id int64, req LoadBalancerRequest, opts *RequestOpts) (*LoadBalancer, error) {
+	// This provider supplies a complete selector, unlike legacy API-key callers
+	// whose missing flag intentionally preserves additive group declarations.
+	req.ReplaceBackendSelectors = true
 	path := fmt.Sprintf("/api/loadbalancer/configureLoadbalancer/%d", id)
 	dto, err := doLBV1[*lbDTO](ctx, c, http.MethodPost, path, req, opts)
+	if err == nil && dto != nil && dto.ID != id {
+		return nil, fmt.Errorf("configure load balancer %d: server returned a different identity", id)
+	}
 	return singleLB(dto, err, fmt.Sprintf("configure load balancer %d", id))
+}
+
+// CheckLoadBalancerBackendSelectorContract prevents an old server from applying
+// additive semantics before readback notices that stale ASG declarations survived.
+func (c *Client) CheckLoadBalancerBackendSelectorContract(ctx context.Context, id int64, opts *RequestOpts) error {
+	lb, err := c.GetLoadBalancer(ctx, id, opts)
+	if err != nil {
+		return err
+	}
+	if lb.ID != id || lb.BackendSelectorContract != "replace-v1" {
+		return fmt.Errorf("the API did not confirm the replace-v1 backend selector contract; upgrade the panel before changing ASG selectors, no mutation was sent")
+	}
+	return nil
 }
 
 // ConfigureLoadBalancerCCM updates a CCM-source load balancer in place.
 func (c *Client) ConfigureLoadBalancerCCM(ctx context.Context, id int64, req LoadBalancerRequest, opts *RequestOpts) (*LoadBalancer, error) {
 	path := fmt.Sprintf("/api/ccm/loadbalancer/configureLoadbalancer/%d", id)
 	dto, err := doLBV1[*lbDTO](ctx, c, http.MethodPost, path, req, opts)
+	if err == nil && dto != nil && dto.ID != id {
+		return nil, fmt.Errorf("configure load balancer %d: server returned a different identity", id)
+	}
 	return singleLB(dto, err, fmt.Sprintf("configure load balancer %d", id))
 }
 

@@ -70,7 +70,7 @@ func TestRetryOnBusy_RetryThenSuccess(t *testing.T) {
 	result, err := RetryOnBusy(context.Background(), 30*time.Second, func() (string, error) {
 		calls++
 		if calls < 3 {
-			return "", &APIError{StatusCode: 503, Codes: []int{744}, Message: "no capacity"}
+			return "", &APIError{StatusCode: 503, Codes: []int{806}, Message: "busy fence", RetrySafe: LBSelectorFenceRetryProof}
 		}
 		return "done", nil
 	})
@@ -90,7 +90,7 @@ func TestRetryOnBusy_Timeout(t *testing.T) {
 	calls := 0
 	_, err := RetryOnBusy(context.Background(), 1*time.Second, func() (string, error) {
 		calls++
-		return "", &APIError{StatusCode: 503, Codes: []int{744}, Message: "no capacity"}
+		return "", &APIError{StatusCode: 503, Codes: []int{806}, Message: "busy fence", RetrySafe: LBSelectorFenceRetryProof}
 	})
 
 	if err == nil {
@@ -116,7 +116,7 @@ func TestRetryOnBusy_ContextCancelled(t *testing.T) {
 		calls++
 		// Cancel context after first call so the select picks it up
 		cancel()
-		return "", &APIError{StatusCode: 503, Codes: []int{744}, Message: "no capacity"}
+		return "", &APIError{StatusCode: 503, Codes: []int{806}, Message: "busy fence", RetrySafe: LBSelectorFenceRetryProof}
 	})
 
 	if err == nil {
@@ -132,7 +132,7 @@ func TestRetryVoidOnBusy(t *testing.T) {
 	err := RetryVoidOnBusy(context.Background(), 30*time.Second, func() error {
 		calls++
 		if calls < 2 {
-			return &APIError{StatusCode: 503, Codes: []int{744}, Message: "no capacity"}
+			return &APIError{StatusCode: 503, Codes: []int{806}, Message: "busy fence", RetrySafe: LBSelectorFenceRetryProof}
 		}
 		return nil
 	})
@@ -151,7 +151,7 @@ func TestRetryOnBusy_ExponentialBackoff(t *testing.T) {
 	_, _ = RetryOnBusy(context.Background(), 10*time.Second, func() (string, error) {
 		timestamps = append(timestamps, time.Now())
 		if len(timestamps) < 4 {
-			return "", &APIError{StatusCode: 503, Codes: []int{744}, Message: "no capacity"}
+			return "", &APIError{StatusCode: 503, Codes: []int{806}, Message: "busy fence", RetrySafe: LBSelectorFenceRetryProof}
 		}
 		return "done", nil
 	})

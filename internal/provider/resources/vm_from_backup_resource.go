@@ -161,11 +161,19 @@ func (r *VmFromBackupResource) Create(ctx context.Context, req resource.CreateRe
 		return
 	}
 	// The only request allowed to create a remote VM happens after its canonical ID is in state.
-	submitted, submitErr := r.client.SubmitVmBackupRestore(ctx, d.BackupID.ValueInt64(), out.VmID, opts)
-	if submitErr != nil {
-		// A lost submit acknowledgement is reconciled by the same ID, never a second POST.
-		submitted, submitErr = r.client.GetVmBackupRestore(ctx, d.BackupID.ValueInt64(), out.VmID, opts)
+	submitted, submitErr := submitKnownReservation(ctx,
+		func(call context.Context) (*client.VmBackupRestoreOperation, error) {
+			return r.client.SubmitVmBackupRestore(call, d.BackupID.ValueInt64(), out.VmID, opts)
+		},
+		func(call context.Context) (*client.VmBackupRestoreOperation, error) {
+			return r.client.GetVmBackupRestore(call, d.BackupID.ValueInt64(), out.VmID, opts)
+		},
+		func(value *client.VmBackupRestoreOperation) string { return value.Status }, r.poll)
+	if submitted != nil {
+		d.Status = types.StringValue(submitted.Status)
+		resp.Diagnostics.Append(resp.State.Set(context.WithoutCancel(ctx), &d)...)
 	}
+
 	if submitErr != nil {
 		resp.Diagnostics.AddError("Unable to Confirm VM Restore Submission", submitErr.Error())
 		return
@@ -209,7 +217,7 @@ func (r *VmFromBackupResource) Read(ctx context.Context, req resource.ReadReques
 	if operation != nil && (operation.Status == "UNVERIFIED" || operation.Status == "RESERVED") {
 		d.Status = types.StringValue(operation.Status)
 		resp.Diagnostics.Append(resp.State.Set(ctx, &d)...)
-		resp.Diagnostics.AddError("VM Restore Submission Unverified", "The known VM reservation is retained. This operation requires reconciliation before its state can be refreshed.")
+		resp.Diagnostics.AddWarning("VM Restore Submission Unverified", "The known VM reservation is retained. This operation requires reconciliation before its state can be refreshed.")
 		return
 	}
 	v, err := r.client.GetVmStatus(ctx, d.ID.ValueInt64(), r.opts(d))

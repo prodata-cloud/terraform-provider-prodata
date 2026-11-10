@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"terraform-provider-prodata/internal/testutil"
 	"testing"
 
 	"terraform-provider-prodata/internal/client"
@@ -31,8 +32,12 @@ func TestNicGuestLocalTerraformLifecycle(t *testing.T) {
 	var gateway, guestGateway *string
 	vmStatus := "RUNNING"
 	attaches, detaches, guestWrites := 0, 0, 0
+	nicStatus := "RESERVED"
+	guestUUID, guestStatus := "", "SUCCESS"
+	uuidCounter := 0
+	allocateGuestUUID := func() { uuidCounter++; guestUUID = fmt.Sprintf("%08x-1111-4111-8111-111111111111", uuidCounter) }
 	ptr := func(value string) *string { return &value }
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+	server := httptest.NewServer(testutil.GatewayJournal(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		mu.Lock()
 		defer mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
@@ -41,19 +46,40 @@ func TestNicGuestLocalTerraformLifecycle(t *testing.T) {
 		}
 		ok := func(data any) { _ = json.NewEncoder(w).Encode(map[string]any{"success": true, "data": data}) }
 		guest := func(configured bool) {
-			ok(map[string]any{"supported": true, "configured": configured, "driver": "netplan-v1", "reason": nil})
+			ok(map[string]any{"supported": true, "configured": configured, "driver": "netplan-v1", "reason": nil, "contract": client.GuestNetworkContract, "recoverableSubmission": true, "recoverablePowerChildren": true, "operationUuid": guestUUID, "status": guestStatus, "pending": guestStatus == "RESERVED", "verified": guestStatus != "RESERVED", "cloudInitDisabled": false, "released": false})
 		}
 		nic := func() map[string]any {
 			return map[string]any{"id": 91, "networkId": 42, "networkName": "local", "ip": "192.0.2.1", "mac": "BC:24:11:AA:BB:CC", "gateway": gateway, "primary": gateway != nil}
 		}
 		const base = "/panel-main/api/v2/vms/7"
+		localView := func() {
+			v := nic()
+			v["contract"] = client.LocalNetworkAttachmentContract
+			v["vmId"] = 7
+			v["exists"] = nicExists
+			v["status"] = nicStatus
+			v["canRelease"] = false
+			v["operation"] = "ATTACH_LOCAL_NIC"
+			if !nicExists {
+				v["operation"] = "DETACH_LOCAL_NIC"
+			}
+			v["netIndex"] = 1
+			v["pveFullName"] = "net1"
+			v["requiresRestart"] = false
+			v["requiresGuestConfiguration"] = true
+			ok(v)
+		}
 		switch req.Method + " " + req.URL.Path {
+		case "GET " + base + "/power-operations/capabilities":
+			ok(map[string]any{"contract": client.VmPowerOperationContract, "callerUuid": true, "claimBeforeWrite": true, "readNeverActivates": true, "resolveTombstone": true, "recoverablePowerChildren": true, "stopCheckpoint": true, "supportedActions": []string{"START", "REBOOT", "RESET", "RESUME", "STOP", "SHUTDOWN"}})
 		case "GET " + base + "/guest-network-capabilities":
 			if vmStatus != "RUNNING" {
 				t.Error("guest preflight on a stopped VM")
 			}
-			guest(false)
-		case "POST " + base + "/local-networks":
+			ok(map[string]any{"supported": true, "configured": false, "driver": "netplan-v1", "contract": client.GuestNetworkContract, "recoverableSubmission": true, "recoverablePowerChildren": true, "pending": false, "verified": true, "cloudInitDisabled": false})
+		case "GET " + base + "/local-network-attachments/capabilities":
+			ok(map[string]any{"contract": client.LocalNetworkAttachmentContract, "reserveBeforeSubmit": true, "recoverableSubmission": true, "strictInterfaceIdentity": true})
+		case "POST " + base + "/local-network-attachments/reservations":
 			var body client.AttachLocalNetworkRequest
 			if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
 				t.Error(err)
@@ -65,31 +91,52 @@ func TestNicGuestLocalTerraformLifecycle(t *testing.T) {
 				t.Error("NIC replaced during a guest-only update")
 			}
 			nicExists = true
+			nicStatus = "RESERVED"
+			localView()
+		case "POST " + base + "/local-network-attachments/91/submit":
 			attaches++
-			data := nic()
-			data["requiresRestart"] = false
-			data["requiresGuestConfiguration"] = true
-			ok(data)
+			nicStatus = "SUCCESS"
+			localView()
+		case "GET " + base + "/local-network-attachments/91":
+			localView()
 		case "GET " + base + "/local-networks":
 			data := []any{}
 			if nicExists {
 				data = append(data, nic())
 			}
 			ok(data)
-		case "DELETE " + base + "/local-networks/91":
+		case "DELETE " + base + "/local-network-attachments/91":
 			if gateway != nil {
 				t.Error("NIC detached before platform gateway removal")
 			}
 			nicExists = false
 			detaches++
-			ok(nil)
+			nicStatus = "DELETED"
+			localView()
+		case "POST " + base + "/local-networks/91/guest-configuration/dry-run":
+			ok(map[string]any{"supported": true, "configured": false, "driver": "netplan-v1", "contract": client.GuestNetworkContract, "recoverableSubmission": true, "recoverablePowerChildren": true, "pending": false, "verified": true, "cloudInitDisabled": false})
+		case "POST " + base + "/local-networks/91/guest-configuration/reservations":
+			allocateGuestUUID()
+			guestStatus = "RESERVED"
+			guest(false)
+		case "DELETE " + base + "/local-networks/91/guest-configuration":
+			allocateGuestUUID()
+			guestStatus = "SUCCESS"
+			v := map[string]any{"supported": true, "configured": false, "driver": "netplan-v1", "contract": client.GuestNetworkContract, "recoverableSubmission": true, "recoverablePowerChildren": true, "operationUuid": guestUUID, "status": guestStatus, "pending": false, "verified": true, "cloudInitDisabled": false, "released": true}
+			ok(v)
 		case "GET " + base + "/local-networks/91/guest-configuration":
 			if req.URL.Query().Get("expectedMac") != "BC:24:11:AA:BB:CC" || req.URL.Query().Get("expectedIp") != "192.0.2.1" {
 				t.Error("guest state lookup has no stable identity")
 			}
 			configured := guestAddress
 			if req.URL.Query().Get("configureDefaultRoute") == "true" {
-				configured = configured && guestGateway != nil && *guestGateway == req.URL.Query().Get("gateway")
+				desired := req.URL.Query().Get("gateway")
+				expected := req.URL.Query().Get("expectedGuestGateway")
+				if desired != "" {
+					configured = configured && guestGateway != nil && *guestGateway == desired
+				} else {
+					configured = configured && (guestGateway == nil || expected != "" && *guestGateway != expected)
+				}
 			}
 			guest(configured)
 		case "POST " + base + "/local-networks/91/guest-configuration":
@@ -100,6 +147,10 @@ func TestNicGuestLocalTerraformLifecycle(t *testing.T) {
 			if vmStatus != "RUNNING" || !nicExists || body.ExpectedMAC != "BC:24:11:AA:BB:CC" || body.ExpectedIP != "192.0.2.1" {
 				t.Error("guest configuration has wrong target or VM state")
 			}
+			if guestStatus != "RESERVED" {
+				allocateGuestUUID()
+			}
+			guestStatus = "SUCCESS"
 			guestAddress = true
 			guestWrites++
 			if body.ConfigureDefaultRoute {
@@ -150,7 +201,7 @@ func TestNicGuestLocalTerraformLifecycle(t *testing.T) {
 			t.Errorf("unexpected request: %s %s", req.Method, req.URL.Path)
 			http.NotFound(w, req)
 		}
-	}))
+	})))
 	t.Cleanup(server.Close)
 	config := fmt.Sprintf(`
 provider "prodata" {

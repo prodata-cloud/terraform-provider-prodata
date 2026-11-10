@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	uuid "github.com/hashicorp/go-uuid"
 )
 
 // kuberBasePath is the class-level @RequestMapping prefix of panel-main's
@@ -39,23 +41,27 @@ const (
 // headers), and node_ip_range is a write-once create input that cannot be read
 // back.
 type Cluster struct {
-	ID                int64
-	Name              string
-	Status            string // status.name — NEW|PROCESSING|SUCCESS|FAIL|DELETING|DELETED
-	KubeVersion       string // kuberVersion (NOT "kubernetes_version")
-	APIEndpoint       string
-	IsPublic          bool
-	IsHA              bool
-	PodSubnet         string
-	NodeIPRange       string // nodeIpRange — start-end; echoed by the API since the backend may auto-allocate it
-	Kubeconfig        string // clusterConfigSecret — may be empty while NEW/PROCESSING
-	SSHKeyEncoded     string
-	PrivateKeyEncoded string
-	Blocked           bool
-	IPAddressesCount  int64
-	ProjectID         int64
-	DateCreated       string // ISO-8601 offset string in UTC
-	Description       string
+	CreationRequestUUID   string
+	DeletionContract      string
+	DeletionVerified      bool
+	DeletionOperationUUID string
+	ID                    int64
+	Name                  string
+	Status                string // status.name — NEW|PROCESSING|SUCCESS|FAIL|DELETING|DELETED
+	KubeVersion           string // kuberVersion (NOT "kubernetes_version")
+	APIEndpoint           string
+	IsPublic              bool
+	IsHA                  bool
+	PodSubnet             string
+	NodeIPRange           string // nodeIpRange — start-end; echoed by the API since the backend may auto-allocate it
+	Kubeconfig            string // clusterConfigSecret — may be empty while NEW/PROCESSING
+	SSHKeyEncoded         string
+	PrivateKeyEncoded     string
+	Blocked               bool
+	IPAddressesCount      int64
+	ProjectID             int64
+	DateCreated           string // ISO-8601 offset string in UTC
+	Description           string
 	// Counts are populated only by getCluster / getClusters; on the create
 	// response they are absent (null) and decode to zero.
 	MasterNodeCount int
@@ -68,6 +74,8 @@ type Cluster struct {
 
 // NodePool is the decoded, flattened form of panel-main's NodePoolDTO.
 type NodePool struct {
+	CreationRequestUUID string
+
 	ID         int64
 	Name       string // poolName
 	NodeCount  int
@@ -116,7 +124,7 @@ type KuberVersion struct {
 // nodeSubnet too (panel-main derives the node subnet prefix from the local network's
 // mask). Addresses (node_ip_range) is omitempty: when omitted, panel-main
 // auto-allocates a free contiguous range and echoes it back (nodeIpRange). The region
-// and project are NOT in the body: createCluster hardcodes the caller's current region.
+// and project are NOT in the body: the versioned API resolves their request scope.
 type CreateClusterRequest struct {
 	ClusterName        string   `json:"clusterName"`
 	Addresses          []string `json:"addresses,omitempty"`
@@ -198,30 +206,36 @@ type masterNodeConfigDTO struct {
 }
 
 type clusterDTO struct {
-	ID                  int64                `json:"id"`
-	Status              kuberStatusDTO       `json:"status"`
-	KuberVersion        string               `json:"kuberVersion"`
-	Name                string               `json:"name"`
-	APIEndpoint         string               `json:"apiEndpoint"`
-	IsPublic            bool                 `json:"isPublic"`
-	SSHKeyEncoded       string               `json:"sshKeyEncoded"`
-	PrivateKeyEncoded   string               `json:"privateKeyEncoded"`
-	ClusterConfigSecret string               `json:"clusterConfigSecret"`
-	IsHA                bool                 `json:"isHa"`
-	MasterNodeCount     *int                 `json:"masterNodeCount"`
-	WorkerNodeCount     *int                 `json:"workerNodeCount"`
-	NodePoolCount       *int                 `json:"nodePoolCount"`
-	MasterNodeConfig    *masterNodeConfigDTO `json:"masterNodeConfiguration"`
-	PodSubnet           string               `json:"podSubnet"`
-	NodeIPRange         string               `json:"nodeIpRange"`
-	Blocked             bool                 `json:"blocked"`
-	IPAddressesCount    int64                `json:"ipAddressesCount"`
-	ProjectID           int64                `json:"projectId"`
-	DateCreated         string               `json:"dateCreated"`
-	Description         string               `json:"description"`
+	CreationRequestUUID   string               `json:"creationRequestUuid"`
+	DeletionContract      string               `json:"deletionContract"`
+	DeletionVerified      bool                 `json:"deletionVerified"`
+	DeletionOperationUUID string               `json:"deletionOperationUuid"`
+	ID                    int64                `json:"id"`
+	Status                kuberStatusDTO       `json:"status"`
+	KuberVersion          string               `json:"kuberVersion"`
+	Name                  string               `json:"name"`
+	APIEndpoint           string               `json:"apiEndpoint"`
+	IsPublic              bool                 `json:"isPublic"`
+	SSHKeyEncoded         string               `json:"sshKeyEncoded"`
+	PrivateKeyEncoded     string               `json:"privateKeyEncoded"`
+	ClusterConfigSecret   string               `json:"clusterConfigSecret"`
+	IsHA                  bool                 `json:"isHa"`
+	MasterNodeCount       *int                 `json:"masterNodeCount"`
+	WorkerNodeCount       *int                 `json:"workerNodeCount"`
+	NodePoolCount         *int                 `json:"nodePoolCount"`
+	MasterNodeConfig      *masterNodeConfigDTO `json:"masterNodeConfiguration"`
+	PodSubnet             string               `json:"podSubnet"`
+	NodeIPRange           string               `json:"nodeIpRange"`
+	Blocked               bool                 `json:"blocked"`
+	IPAddressesCount      int64                `json:"ipAddressesCount"`
+	ProjectID             int64                `json:"projectId"`
+	DateCreated           string               `json:"dateCreated"`
+	Description           string               `json:"description"`
 }
 
 type nodePoolDTO struct {
+	CreationRequestUUID string `json:"creationRequestUuid"`
+
 	ID               int64          `json:"id"`
 	PoolName         string         `json:"poolName"`
 	NodeCount        int            `json:"nodeCount"`
@@ -260,44 +274,59 @@ func (d *masterNodeConfigDTO) toMasterNodeConfig() *MasterNodeConfig {
 
 func (d *clusterDTO) toCluster() *Cluster {
 	return &Cluster{
-		ID:                d.ID,
-		Name:              d.Name,
-		Status:            d.Status.Name,
-		KubeVersion:       d.KuberVersion,
-		APIEndpoint:       d.APIEndpoint,
-		IsPublic:          d.IsPublic,
-		IsHA:              d.IsHA,
-		PodSubnet:         d.PodSubnet,
-		NodeIPRange:       d.NodeIPRange,
-		Kubeconfig:        d.ClusterConfigSecret,
-		SSHKeyEncoded:     d.SSHKeyEncoded,
-		PrivateKeyEncoded: d.PrivateKeyEncoded,
-		Blocked:           d.Blocked,
-		IPAddressesCount:  d.IPAddressesCount,
-		ProjectID:         d.ProjectID,
-		DateCreated:       d.DateCreated,
-		Description:       d.Description,
-		MasterNodeCount:   derefInt(d.MasterNodeCount),
-		WorkerNodeCount:   derefInt(d.WorkerNodeCount),
-		NodePoolCount:     derefInt(d.NodePoolCount),
-		MasterNodeConfig:  d.MasterNodeConfig.toMasterNodeConfig(),
+		CreationRequestUUID:   d.CreationRequestUUID,
+		DeletionContract:      d.DeletionContract,
+		DeletionVerified:      d.DeletionVerified,
+		DeletionOperationUUID: d.DeletionOperationUUID,
+		ID:                    d.ID,
+		Name:                  d.Name,
+		Status:                d.Status.Name,
+		KubeVersion:           d.KuberVersion,
+		APIEndpoint:           d.APIEndpoint,
+		IsPublic:              d.IsPublic,
+		IsHA:                  d.IsHA,
+		PodSubnet:             d.PodSubnet,
+		NodeIPRange:           d.NodeIPRange,
+		Kubeconfig:            d.ClusterConfigSecret,
+		SSHKeyEncoded:         d.SSHKeyEncoded,
+		PrivateKeyEncoded:     d.PrivateKeyEncoded,
+		Blocked:               d.Blocked,
+		IPAddressesCount:      d.IPAddressesCount,
+		ProjectID:             d.ProjectID,
+		DateCreated:           d.DateCreated,
+		Description:           d.Description,
+		MasterNodeCount:       derefInt(d.MasterNodeCount),
+		WorkerNodeCount:       derefInt(d.WorkerNodeCount),
+		NodePoolCount:         derefInt(d.NodePoolCount),
+		MasterNodeConfig:      d.MasterNodeConfig.toMasterNodeConfig(),
 	}
+}
+
+// ConfirmedDeletion requires the canonical scoped row and the durable teardown proof.
+// A missing endpoint or an old uncorrelated DELETED status proves no physical absence.
+func (c *Cluster) ConfirmedDeletion(expectedID int64) bool {
+	if c == nil || expectedID < 1 || c.ID != expectedID || c.Status != ClusterStatusDeleted || c.DeletionContract != "cluster-deletion-v1" || !c.DeletionVerified {
+		return false
+	}
+	parsed, err := uuid.ParseUUID(c.DeletionOperationUUID)
+	return err == nil && len(parsed) == 16 && fmt.Sprintf("%x-%x-%x-%x-%x", parsed[0:4], parsed[4:6], parsed[6:8], parsed[8:10], parsed[10:16]) == c.DeletionOperationUUID
 }
 
 func (d *nodePoolDTO) toNodePool() *NodePool {
 	return &NodePool{
-		ID:               d.ID,
-		Name:             d.PoolName,
-		NodeCount:        d.NodeCount,
-		NodeSubnet:       d.NodeSubnet,
-		CPU:              d.CPU,
-		RAM:              d.RAM,
-		SSD:              d.SSD,
-		Status:           d.Status.Name,
-		ClusterID:        d.ClusterID,
-		AutoscaleEnabled: d.AutoscaleEnabled,
-		MinNodes:         derefInt(d.MinNodes),
-		MaxNodes:         derefInt(d.MaxNodes),
+		CreationRequestUUID: d.CreationRequestUUID,
+		ID:                  d.ID,
+		Name:                d.PoolName,
+		NodeCount:           d.NodeCount,
+		NodeSubnet:          d.NodeSubnet,
+		CPU:                 d.CPU,
+		RAM:                 d.RAM,
+		SSD:                 d.SSD,
+		Status:              d.Status.Name,
+		ClusterID:           d.ClusterID,
+		AutoscaleEnabled:    d.AutoscaleEnabled,
+		MinNodes:            derefInt(d.MinNodes),
+		MaxNodes:            derefInt(d.MaxNodes),
 	}
 }
 
@@ -497,9 +526,9 @@ func (c *Client) UpdateMasterConfig(ctx context.Context, req UpdateMasterConfigR
 
 // ---- node pool operations ----
 
-// CreateNodePool adds a worker node pool to a cluster. panel-main returns no id
-// for the new pool, so the caller discovers it via an id-set diff over
-// ListNodePools (ADR-K6).
+// CreateNodePool is the legacy API adapter. Terraform uses the versioned
+// ReserveNodePoolOperation/SubmitNodePoolOperation path to checkpoint canonical identity.
+// It never discovers or adopts a created pool from names or an id-set diff.
 func (c *Client) CreateNodePool(ctx context.Context, req CreateNodePoolRequest, opts *RequestOpts) error {
 	_, err := doKuberV1[json.RawMessage](ctx, c, http.MethodPost, "/createNewNodePool", req, opts)
 	return err
@@ -509,7 +538,27 @@ func (c *Client) CreateNodePool(ctx context.Context, req CreateNodePoolRequest, 
 func (c *Client) GetNodePool(ctx context.Context, id int64, opts *RequestOpts) (*NodePool, error) {
 	path := fmt.Sprintf("/getK8SNodePool/%d", id)
 	dto, err := doKuberV1[*nodePoolDTO](ctx, c, http.MethodGet, path, nil, opts)
-	return singleNodePool(dto, err, fmt.Sprintf("get node pool %d", id))
+	pool, err := singleNodePool(dto, err, fmt.Sprintf("get node pool %d", id))
+	if err != nil {
+		return nil, err
+	}
+	if pool.ID != id || pool.ID < 1 || pool.ClusterID < 1 {
+		return nil, fmt.Errorf("node pool readback did not confirm the requested canonical identity")
+	}
+	if pool.Name == "" {
+		return nil, fmt.Errorf("node pool readback did not confirm its name")
+	}
+	switch pool.Status {
+	case ClusterStatusNew, ClusterStatusProcessing, ClusterStatusSuccess, ClusterStatusFail, ClusterStatusDeleting, ClusterStatusDeleted:
+	default:
+		return nil, fmt.Errorf("node pool readback returned an unsupported lifecycle status")
+	}
+	if pool.CreationRequestUUID != "" {
+		if err := validateNodePoolRequestUUID(pool.CreationRequestUUID); err != nil {
+			return nil, err
+		}
+	}
+	return pool, nil
 }
 
 // ListNodePools returns the node pools of a cluster.
@@ -526,7 +575,8 @@ func (c *Client) ListNodePools(ctx context.Context, clusterID int64, opts *Reque
 	return out, nil
 }
 
-// DeleteNodePool deletes a node pool. Older backends refuse to delete the last
+// DeleteNodePool is the legacy API adapter; Terraform uses UID-bound lifecycle intents.
+// Older backends refuse to delete the last
 // worker pool (code 756; KuberErrorDetail maps it); the control-plane-only backend
 // allows it.
 func (c *Client) DeleteNodePool(ctx context.Context, id int64, opts *RequestOpts) error {

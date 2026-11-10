@@ -47,7 +47,7 @@ func TestVmProtectionLocalTerraform(t *testing.T) {
 		success := func(v any) { _ = json.NewEncoder(w).Encode(map[string]any{"success": true, "data": v}) }
 		p := strings.TrimPrefix(q.URL.Path, "/panel-main/api/v2/")
 		if p == "vm-protection/capabilities" {
-			success(map[string]any{"contract": "vm-protection-reservation-v1", "reserveBeforeSubmit": true, "singleSubmit": true, "restoreIdentityBeforeSubmit": true})
+			success(map[string]any{"contract": "vm-protection-reservation-v1", "reserveBeforeSubmit": true, "singleSubmit": true, "restoreIdentityBeforeSubmit": true, "recoverableSubmission": true})
 			return
 		}
 		if p == "vm-backups/8/restore-as-new-vm/reservations" && q.Method == "POST" {

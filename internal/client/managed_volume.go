@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
+	"strings"
 )
 
 const volumeIdentityVersion = "user-disk-v1"
@@ -13,6 +15,8 @@ const managedVolumesPath = "/api/v2/volumes/by-user-disk"
 // An explicit exists=false in this versioned response is the only absence signal;
 // an HTTP 404 may just mean that the server does not implement the stable API.
 type ManagedVolume struct {
+	CreationRequestUUID string `json:"creationRequestUuid"`
+	Status              string `json:"status"`
 	Volume
 	IdentityVersion string `json:"identityVersion"`
 	Exists          *bool  `json:"exists"`
@@ -20,6 +24,17 @@ type ManagedVolume struct {
 }
 
 func (v *ManagedVolume) validate(id int64) error {
+	if v.CreationRequestUUID != "" {
+		if err := validateVolumeRequestUUID(v.CreationRequestUUID); err != nil {
+			return fmt.Errorf("the API returned an invalid creation UUID; existing identity was retained")
+		}
+	}
+	switch v.Status {
+	case "", "AVAILABLE", "RESERVED", "QUEUED", "RUNNING", "UNVERIFIED", "SUCCESS", "ERROR", "CREATING":
+	default:
+		return fmt.Errorf("the API returned an unsupported volume operation status; existing identity was retained")
+	}
+
 	if v.IdentityVersion != volumeIdentityVersion || v.ID <= 0 || v.ID != id {
 		return fmt.Errorf("the API did not confirm the stable identity of volume %d; upgrade the panel API before managing volumes", id)
 	}
@@ -128,8 +143,18 @@ func (c *Client) UpdateManagedVolume(ctx context.Context, id int64, req UpdateVo
 }
 
 func (c *Client) DeleteManagedVolume(ctx context.Context, id int64, opts *RequestOpts) error {
+	return c.DeleteManagedVolumeWithIdentity(ctx, id, "", opts)
+}
+func (c *Client) DeleteManagedVolumeWithIdentity(ctx context.Context, id int64, expected string, opts *RequestOpts) error {
+	endpoint := fmt.Sprintf("%s/%d", managedVolumesPath, id)
+	if expected != "" {
+		if expected != strings.TrimSpace(expected) || len(expected) > 2048 || !strings.Contains(expected, ":") {
+			return fmt.Errorf("a complete physical source volume ID is required")
+		}
+		endpoint += "?expectedSourceVolid=" + url.QueryEscape(expected)
+	}
 	var volume ManagedVolume
-	if err := c.Do(ctx, http.MethodDelete, fmt.Sprintf("%s/%d", managedVolumesPath, id), nil, &volume, opts); err != nil {
+	if err := c.Do(ctx, http.MethodDelete, endpoint, nil, &volume, opts); err != nil {
 		return err
 	}
 	if err := volume.validate(id); err != nil {

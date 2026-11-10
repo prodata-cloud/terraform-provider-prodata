@@ -10,7 +10,7 @@ import (
 )
 
 func TestGuestNetworkIdentityScopeAndExplicitRouteIntent(t *testing.T) {
-	server, seen := recordingServer(t, `{"success":true,"data":{"supported":true,"configured":true,"driver":"netplan-v1"}}`)
+	server, seen := recordingServer(t, `{"success":true,"data":{"supported":true,"configured":true,"driver":"netplan-v1","contract":"guest-network-operation-v1","recoverableSubmission":true,"verified":true,"cloudInitDisabled":false}}`)
 	c := newTestClient(t, server)
 	gw := "192.0.2.1"
 	req := ConfigureGuestNetworkRequest{ExpectedMAC: "BC:24:11:AA:BB:CC", ExpectedIP: "192.0.2.5", ConfigureDefaultRoute: true, ExpectedGuestGateway: &gw}
@@ -78,5 +78,29 @@ func TestGuestNetworkPostRequiresObservedSuccess(t *testing.T) {
 		if _, err := c.ConfigureVmGuestNetwork(context.Background(), 7, 91, ConfigureGuestNetworkRequest{}, nil); err == nil {
 			t.Fatal("guest mutation was accepted without observed configuration")
 		}
+	}
+}
+
+func TestGuestNetworkPendingMutationHasKnownIdentityAndReleaseUsesDelete(t *testing.T) {
+	response := `{"success":true,"data":{"supported":true,"configured":false,"driver":"netplan-v1","contract":"guest-network-operation-v1","recoverableSubmission":true,"operationUuid":"11111111-1111-4111-8111-111111111111","status":"UNVERIFIED","pending":true,"verified":false}}`
+	server, seen := recordingServer(t, response)
+	c := newTestClient(t, server)
+	req := ConfigureGuestNetworkRequest{ExpectedMAC: "BC:24:11:AA:BB:CC", ExpectedIP: "192.0.2.5"}
+	got, err := c.ConfigureVmGuestNetwork(context.Background(), 7, 91, req, nil)
+	if err != nil || got.Pending == nil || !*got.Pending {
+		t.Fatalf("%+v %v", got, err)
+	}
+	if _, err = c.ReleaseVmGuestNetwork(context.Background(), 7, 91, req, nil); err != nil {
+		t.Fatal(err)
+	}
+	if (*seen)[0].method != "POST" || (*seen)[1].method != "DELETE" {
+		t.Fatalf("%+v", *seen)
+	}
+}
+func TestGuestNetworkOldServerCannotAuthorizeMutation(t *testing.T) {
+	server, _ := recordingServer(t, `{"success":true,"data":{"supported":true,"configured":true,"driver":"netplan-v1"}}`)
+	c := newTestClient(t, server)
+	if _, err := c.ConfigureVmGuestNetwork(context.Background(), 7, 91, ConfigureGuestNetworkRequest{}, nil); err == nil {
+		t.Fatal("uncorrelated old guest mutation accepted")
 	}
 }

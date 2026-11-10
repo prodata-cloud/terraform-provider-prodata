@@ -15,23 +15,29 @@ const (
 	retryMaxInterval     = 15 * time.Second
 )
 
-// RetryOnBusy retries fn while it returns a genuinely transient API error —
-// an HTTP 503 (Service Unavailable), e.g. the panel's "no compute capacity"
-// (744) or "no IP pool in region" (743) — using exponential backoff with ±25%
-// jitter (2s → 4s → 8s → 15s cap).
-//
-// It deliberately does NOT retry code 627 ("Unhandled error. Please contact
-// support."): 627 is the panel's generic HTTP 500 catch-all for any unmapped
-// failure (e.g. a downstream provisioning service returning 5xx), not a
-// transient/busy condition. Retrying it would only hang `terraform apply` for
-// the full timeout and mask the real cause, so 627 now surfaces immediately.
+// RetryOnBusy replays a mutation only after an explicit API pre-write refusal.
+// An HTTP 503 or capacity error alone cannot establish that an upstream mutation
+// did not happen. The LB fence proof is deliberately separate from ambiguous AWX error 806.
 func RetryOnBusy[T any](ctx context.Context, timeout time.Duration, fn func() (T, error)) (T, error) {
+	return retryOnBusy(ctx, timeout, fn, isRetrySafeMutationRefusal)
+}
+
+// RetryReadOnBusy is for read-only operations, including the primary-move dry-run.
+func RetryReadOnBusy[T any](ctx context.Context, timeout time.Duration, fn func() (T, error)) (T, error) {
+	return retryOnBusy(ctx, timeout, fn, IsRetryableTransient)
+}
+
+func isRetrySafeMutationRefusal(err error) bool {
+	return IsAPIError(err, 806) && IsRetryableTransient(err)
+}
+
+func retryOnBusy[T any](ctx context.Context, timeout time.Duration, fn func() (T, error), retryable func(error) bool) (T, error) {
 	deadline := time.Now().Add(timeout)
 	interval := retryInitialInterval
 
 	for {
 		result, err := fn()
-		if err == nil || !IsRetryableTransient(err) {
+		if err == nil || !retryable(err) {
 			return result, err
 		}
 

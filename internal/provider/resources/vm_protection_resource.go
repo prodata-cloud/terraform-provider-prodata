@@ -206,12 +206,15 @@ func (r *vmProtectionResource) Create(ctx context.Context, req resource.CreateRe
 		return
 	}
 	if r.kind != "backup-schedules" {
-		submitted, submitErr := r.client.SubmitVmProtection(ctx, d.VMID.ValueInt64(), r.kind, d.ID.ValueInt64(), r.opts(d))
-		if submitErr != nil {
-			// A lost acknowledgement is reconciled only by the ID already recorded in state.
-			// Never look up by name and never issue a second create request.
-			submitted, submitErr = r.client.GetVmProtection(ctx, d.VMID.ValueInt64(), r.kind, d.ID.ValueInt64(), r.opts(d))
-		}
+		submitted, submitErr := submitKnownReservation(ctx,
+			func(call context.Context) (*client.VmProtection, error) {
+				return r.client.SubmitVmProtection(call, d.VMID.ValueInt64(), r.kind, d.ID.ValueInt64(), r.opts(d))
+			},
+			func(call context.Context) (*client.VmProtection, error) {
+				return r.client.GetVmProtection(call, d.VMID.ValueInt64(), r.kind, d.ID.ValueInt64(), r.opts(d))
+			},
+			func(value *client.VmProtection) string { return value.Status }, r.poll)
+
 		if submitted != nil {
 			resp.Diagnostics.Append(r.store(context.WithoutCancel(ctx), &resp.State, d, submitted)...)
 		}
@@ -252,7 +255,7 @@ func (r *vmProtectionResource) Read(ctx context.Context, req resource.ReadReques
 	}
 	resp.Diagnostics.Append(r.store(ctx, &resp.State, d, v)...)
 	if v.Status == "UNVERIFIED" || v.Status == "RESERVED" {
-		resp.Diagnostics.AddError("VM Protection Submission Unverified", "The durable reservation is retained. The platform cannot confirm the upstream submit; it will not queue another job or delete this ownership record. Reconcile the operation before continuing.")
+		resp.Diagnostics.AddWarning("VM Protection Submission Unverified", "The durable reservation is retained. The platform cannot confirm the upstream submit; it will not queue another job or delete this ownership record. Reconcile the operation before continuing.")
 	}
 }
 func (r *vmProtectionResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
@@ -301,10 +304,7 @@ func (r *vmProtectionResource) Delete(ctx context.Context, req resource.DeleteRe
 	if !v.Present {
 		return
 	}
-	if v.Status == "UNVERIFIED" {
-		resp.Diagnostics.AddError("VM Protection Submission Unverified", "The operation may already exist upstream. Reconcile it before deletion; its ownership record is retained.")
-		return
-	}
+
 	if v.Status == "NEW" || (r.kind != "backup-schedules" && (v.Status == "SCHEDULE" || v.Status == "SCHEDULED")) {
 		settled, waitErr := r.wait(ctx, d)
 		if settled != nil && !settled.Present {

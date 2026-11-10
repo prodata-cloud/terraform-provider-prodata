@@ -9,12 +9,14 @@ import (
 
 	"terraform-provider-prodata/internal/client"
 
+	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-log/tflog"
 )
@@ -27,14 +29,18 @@ var (
 
 type VolumeAttachmentResource struct {
 	client *client.Client
+	poll   time.Duration
 }
 
 type VolumeAttachmentResourceModel struct {
-	VmID             types.Int64  `tfsdk:"vm_id"`
-	VolumeID         types.Int64  `tfsdk:"volume_id"`
-	AttachedVolumeID types.Int64  `tfsdk:"attached_volume_id"`
-	Region           types.String `tfsdk:"region"`
-	ProjectTag       types.String `tfsdk:"project_tag"`
+	LegacySourceVolumeID   types.String `tfsdk:"legacy_source_volume_id"`
+	LegacyAttachedVolumeID types.String `tfsdk:"legacy_attached_volume_id"`
+	Status                 types.String `tfsdk:"status"`
+	VmID                   types.Int64  `tfsdk:"vm_id"`
+	VolumeID               types.Int64  `tfsdk:"volume_id"`
+	AttachedVolumeID       types.Int64  `tfsdk:"attached_volume_id"`
+	Region                 types.String `tfsdk:"region"`
+	ProjectTag             types.String `tfsdk:"project_tag"`
 }
 
 func NewVolumeAttachmentResource() resource.Resource {
@@ -51,6 +57,10 @@ func (r *VolumeAttachmentResource) Schema(ctx context.Context, req resource.Sche
 			"Destroying this resource detaches the volume from the VM.",
 
 		Attributes: map[string]schema.Attribute{
+			"legacy_source_volume_id":   schema.StringAttribute{Optional: true, MarkdownDescription: "Explicit physical volume ID for a legacy hub disk without a recorded identity history. Never inferred from a slot or name. Managed volumes do not need this assertion.", Validators: []validator.String{stringvalidator.LengthBetween(1, 2048)}},
+			"legacy_attached_volume_id": schema.StringAttribute{Optional: true, MarkdownDescription: "Explicit physical volume ID for detaching an imported legacy binding without a recorded identity history. Apply this metadata assertion before destroying the attachment. It cannot override a known managed identity.", Validators: []validator.String{stringvalidator.LengthBetween(1, 2048)}},
+
+			"status": schema.StringAttribute{Computed: true, MarkdownDescription: "Verified attachment operation status. Pending or unverified moves retain their identity for recovery.", PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()}},
 			"vm_id": schema.Int64Attribute{
 				MarkdownDescription: "The ID of the virtual machine to attach the volume to.",
 				Required:            true,
@@ -114,53 +124,140 @@ func (r *VolumeAttachmentResource) Configure(ctx context.Context, req resource.C
 
 func (r *VolumeAttachmentResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	var data VolumeAttachmentResourceModel
-
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &data)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
-
 	opts := r.buildOpts(&data)
-	vmID := data.VmID.ValueInt64()
-	attachReq := client.AttachVolumeRequest{
-		VolumeID: data.VolumeID.ValueInt64(),
-	}
-
-	tflog.Debug(ctx, "Attaching volume to VM", map[string]any{
-		"vm_id":     vmID,
-		"volume_id": attachReq.VolumeID,
-	})
-
-	volume, err := client.RetryOnBusy(ctx, client.RetryTimeoutLong, func() (*client.Volume, error) {
-		return r.client.AttachVolume(ctx, vmID, attachReq, opts)
-	})
-	if err != nil {
-		resp.Diagnostics.AddError("Unable to Attach Volume", err.Error())
+	vmID, volumeID := data.VmID.ValueInt64(), data.VolumeID.ValueInt64()
+	if err := r.client.CheckVolumeAttachmentAPI(ctx, vmID, opts); err != nil {
+		resp.Diagnostics.AddError("Recoverable Volume API Required", err.Error())
 		return
 	}
-
-	data.AttachedVolumeID = types.Int64Value(volume.ID)
-
-	region := data.Region.ValueString()
-	if region == "" {
-		region = r.client.Region
+	reserved, err := r.client.ReserveVolumeAttachmentWithIdentity(ctx, vmID, volumeID, data.LegacySourceVolumeID.ValueString(), opts)
+	if err != nil {
+		resp.Diagnostics.AddError("Unable to Reserve Volume Attachment", err.Error())
+		return
 	}
-	projectTag := data.ProjectTag.ValueString()
-	if projectTag == "" {
-		projectTag = r.client.ProjectTag
+	data.AttachedVolumeID = types.Int64Value(reserved.ID)
+	if data.Region.ValueString() == "" {
+		data.Region = types.StringValue(r.client.Region)
 	}
-	data.Region = types.StringValue(region)
-	data.ProjectTag = types.StringValue(projectTag)
-
-	tflog.Debug(ctx, "Attached volume to VM", map[string]any{
-		"vm_id":              vmID,
-		"attached_volume_id": volume.ID,
-	})
-
+	if data.ProjectTag.ValueString() == "" {
+		data.ProjectTag = types.StringValue(r.client.ProjectTag)
+	}
+	data.Status = types.StringValue(reserved.Status)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	if !*reserved.Exists {
+		resp.Diagnostics.AddError("Volume Reservation Cancelled", "The reservation was positively cancelled before submission.")
+		return
+	}
+	if reserved.Status != "RESERVED" {
+		resp.Diagnostics.AddError("Unexpected Volume Reservation", "The API did not return an inactive disk reservation; its identity was retained.")
+		return
+	}
+	current, err := submitKnownReservation(ctx, func(ctx context.Context) (*client.VolumeAttachmentOperation, error) {
+		return r.client.SubmitVolumeAttachment(ctx, vmID, volumeID, reserved.ID, opts)
+	}, func(ctx context.Context) (*client.VolumeAttachmentOperation, error) {
+		return r.client.GetVolumeAttachment(ctx, vmID, volumeID, reserved.ID, opts)
+	}, func(v *client.VolumeAttachmentOperation) string { return v.Status }, r.movePoll())
+	if current != nil {
+		data.Status = types.StringValue(current.Status)
+		resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
+	}
+	if err != nil {
+		resp.Diagnostics.AddError("Volume Attachment Outcome Unverified", err.Error())
+		return
+	}
+	current, err = r.waitForVolumeMove(ctx, vmID, volumeID, reserved.ID, current, opts, false)
+	if current != nil {
+		data.Status = types.StringValue(current.Status)
+		resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
+	}
+	if err != nil {
+		resp.Diagnostics.AddError("Unable to Complete Volume Attachment", err.Error())
+	}
+}
+
+func (r *VolumeAttachmentResource) movePoll() time.Duration {
+	if r.poll > 0 {
+		return r.poll
+	}
+	return detachPollInterval
+}
+func (r *VolumeAttachmentResource) waitForVolumeMove(ctx context.Context, vmID, volumeID, id int64, current *client.VolumeAttachmentOperation, opts *client.RequestOpts, deleting bool) (*client.VolumeAttachmentOperation, error) {
+	waitCtx, cancel := context.WithTimeout(ctx, client.RetryTimeoutLong)
+	defer cancel()
+	for {
+		if current == nil {
+			return nil, fmt.Errorf("the API did not return a verified volume move")
+		}
+		if !*current.Exists {
+			if deleting {
+				return current, nil
+			}
+			return current, fmt.Errorf("the attachment was cancelled; its reserved identity was retained")
+		}
+		switch current.Status {
+		case "SUCCESS":
+			if !deleting && current.Direction == "ATTACH" {
+				return current, nil
+			}
+			return current, fmt.Errorf("the API did not confirm detachment")
+		case "ERROR", "UNVERIFIED", "NOT_SUBMITTED":
+			return current, fmt.Errorf("volume move %d is %s; retain its identity and reconcile the known operation before retrying", id, current.Status)
+		}
+		timer := time.NewTimer(r.movePoll())
+		select {
+		case <-waitCtx.Done():
+			timer.Stop()
+			return current, waitCtx.Err()
+		case <-timer.C:
+		}
+		next, err := r.client.GetVolumeAttachment(waitCtx, vmID, volumeID, id, opts)
+		if err != nil {
+			return current, err
+		}
+		current = next
+	}
 }
 
 func (r *VolumeAttachmentResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
+	var data VolumeAttachmentResourceModel
+	resp.Diagnostics.Append(req.State.Get(ctx, &data)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	opts := r.buildOpts(&data)
+	vmID, volumeID, id := data.VmID.ValueInt64(), data.VolumeID.ValueInt64(), data.AttachedVolumeID.ValueInt64()
+	if id <= 0 {
+		r.readLegacy(ctx, req, resp)
+		return
+	}
+	current, err := r.client.GetVolumeAttachment(ctx, vmID, volumeID, id, opts)
+	if err != nil {
+		if client.IsNotFound(err) && data.Status.IsNull() {
+			r.readLegacy(ctx, req, resp)
+			return
+		}
+		resp.Diagnostics.AddError("Unable to Verify Volume Attachment", err.Error())
+		return
+	}
+	if !*current.Exists {
+		resp.State.RemoveResource(ctx)
+		return
+	}
+	data.Status = types.StringValue(current.Status)
+	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
+	if current.Status != "SUCCESS" || current.Direction != "ATTACH" {
+		resp.Diagnostics.AddWarning("Volume Move Pending", fmt.Sprintf("Attachment %d is %s (%s); its identity is retained. Inspect the known operation before retrying.", id, current.Status, current.Direction))
+	}
+}
+
+func (r *VolumeAttachmentResource) readLegacy(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
 	var data VolumeAttachmentResourceModel
 
 	resp.Diagnostics.Append(req.State.Get(ctx, &data)...)
@@ -217,24 +314,19 @@ func (r *VolumeAttachmentResource) Read(ctx context.Context, req resource.ReadRe
 		}
 	}
 	if attached == nil {
-		tflog.Warn(ctx, "Volume no longer attached to the expected VM, removing from state", map[string]any{
-			"vm_id":              vmID,
-			"attached_volume_id": attachedVolumeID,
-			"volume_id":          volumeID,
-		})
-		resp.State.RemoveResource(ctx)
+		resp.Diagnostics.AddError("Legacy Volume Attachment Is Unverified", "The legacy list does not contain this binding, but cannot prove that no delayed managed operation exists. Its identity is retained; use the matching versioned API to verify cancellation or deletion.")
 		return
 	}
 
 	// Defense in depth: the attached disk should map back to the configured volume.
 	if attached.UserDiskID != nil && *attached.UserDiskID != volumeID {
-		tflog.Warn(ctx, "Attached disk maps to a different volume than recorded, removing from state", map[string]any{
+		tflog.Warn(ctx, "Attached disk maps to a different volume than recorded; retaining state", map[string]any{
 			"vm_id":              vmID,
 			"attached_volume_id": attached.ID,
 			"expected_volume_id": volumeID,
 			"actual_volume_id":   *attached.UserDiskID,
 		})
-		resp.State.RemoveResource(ctx)
+		resp.Diagnostics.AddError("Volume Attachment Identity Conflict", "The attachment belongs to another volume; existing state was retained.")
 		return
 	}
 
@@ -250,129 +342,98 @@ func (r *VolumeAttachmentResource) Read(ctx context.Context, req resource.ReadRe
 }
 
 func (r *VolumeAttachmentResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
-	resp.Diagnostics.AddError(
-		"Update Not Supported",
-		"All attributes of prodata_volume_attachment require replacement. This is a bug in the provider.",
-	)
+	var previous, planned VolumeAttachmentResourceModel
+	resp.Diagnostics.Append(req.State.Get(ctx, &previous)...)
+	resp.Diagnostics.Append(req.Plan.Get(ctx, &planned)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	if !previous.VmID.Equal(planned.VmID) || !previous.VolumeID.Equal(planned.VolumeID) || !previous.Region.Equal(planned.Region) || !previous.ProjectTag.Equal(planned.ProjectTag) {
+		resp.Diagnostics.AddError("Replacement Required", "Changing attachment identity requires resource replacement.")
+		return
+	}
+	// Assertions record explicit user input; the core checks them before any physical operation.
+	previous.LegacySourceVolumeID = planned.LegacySourceVolumeID
+	previous.LegacyAttachedVolumeID = planned.LegacyAttachedVolumeID
+	resp.Diagnostics.Append(resp.State.Set(ctx, &previous)...)
 }
 
 func (r *VolumeAttachmentResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
 	var data VolumeAttachmentResourceModel
-
 	resp.Diagnostics.Append(req.State.Get(ctx, &data)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
-
 	opts := r.buildOpts(&data)
-	vmID := data.VmID.ValueInt64()
-	attachedVolumeID := data.AttachedVolumeID.ValueInt64()
-
-	tflog.Debug(ctx, "Detaching volume from VM", map[string]any{
-		"vm_id":              vmID,
-		"attached_volume_id": attachedVolumeID,
-	})
-
-	// Poll VM status until it's stopped, then detach. No restart after detach:
-	// when Terraform destroys multiple volume_attachment resources in parallel,
-	// the first detach stops the VM and leaves it stopped so subsequent detaches
-	// find it already stopped and complete immediately without stop/start cycles.
-	const overallTimeout = 10 * time.Minute
-	deadline := time.Now().Add(overallTimeout)
-
-	for {
-		if time.Now().After(deadline) {
-			resp.Diagnostics.AddError(
-				"Volume detach timed out",
-				fmt.Sprintf("timed out waiting to detach volume from VM %d — VM could not be stopped or detach was blocked by concurrent operations", vmID),
-			)
+	vmID, volumeID, id := data.VmID.ValueInt64(), data.VolumeID.ValueInt64(), data.AttachedVolumeID.ValueInt64()
+	current, err := r.client.GetVolumeAttachment(ctx, vmID, volumeID, id, opts)
+	if err != nil {
+		resp.Diagnostics.AddError("Unable to Verify Volume Attachment", err.Error())
+		return
+	}
+	if !*current.Exists {
+		return
+	}
+	if err := r.client.CheckVolumeAttachmentAPI(ctx, vmID, opts); err != nil {
+		if client.IsAPIError(err, 601) {
 			return
 		}
-
-		vm, err := r.client.GetVmStatus(ctx, vmID, opts)
-		if err != nil {
-			if client.IsAPIError(err, 601) {
-				tflog.Info(ctx, "VM not found, volume attachment already gone", map[string]any{"vm_id": vmID})
+		resp.Diagnostics.AddError("Recoverable Volume API Required", err.Error())
+		return
+	}
+	// Cancelling an inactive reservation needs no VM shutdown. A running detach is already fenced.
+	if current.Direction == "ATTACH" && (current.Status == "SUCCESS" || data.LegacyAttachedVolumeID.ValueString() != "") {
+		stopCtx, cancel := context.WithTimeout(ctx, client.RetryTimeoutLong)
+		defer cancel()
+		stopRequested := false
+		for {
+			vm, e := r.client.GetVmStatus(stopCtx, vmID, opts)
+			if e != nil {
+				if client.IsAPIError(e, 601) {
+					return
+				}
+				resp.Diagnostics.AddError("Unable to Read VM Status", e.Error())
 				return
 			}
-			resp.Diagnostics.AddError("Unable to Read VM status", err.Error())
-			return
-		}
-
-		switch vm.Status {
-		case "STOPPED":
-			// VM is stopped — attempt detach
-			if err := r.client.DetachVolume(ctx, vmID, attachedVolumeID, opts); err != nil {
-				if client.IsAPIError(err, 601) {
-					tflog.Info(ctx, "Volume already detached", map[string]any{"vm_id": vmID, "attached_volume_id": attachedVolumeID})
-					goto detached
+			if vm.Status == "STOPPED" {
+				break
+			}
+			if vm.Status == "RUNNING" && !stopRequested {
+				if e = r.client.StopVm(stopCtx, vmID, opts); e != nil {
+					resp.Diagnostics.AddError("Unable to Stop VM for Volume Detach", e.Error())
+					return
 				}
-				// 627 = VM locked by another operation (concurrent detach), retry
-				// 711 = VM became running between our check and the API call, retry
-				if client.IsAPIError(err, 627) || client.IsAPIError(err, 711) {
-					tflog.Info(ctx, "Detach blocked by concurrent operation, retrying", map[string]any{
-						"vm_id": vmID, "error": err.Error(),
-					})
-					sleepWithContext(ctx)
-					continue
-				}
-				resp.Diagnostics.AddError("Unable to Detach Volume", err.Error())
+				stopRequested = true
+			}
+			if vm.Status != "RUNNING" && vm.Status != "STARTING" && vm.Status != "STOPPING" {
+				resp.Diagnostics.AddError("VM Not Ready for Volume Detach", fmt.Sprintf("VM %d is %s", vmID, vm.Status))
 				return
 			}
-			goto detached
-
-		case "RUNNING":
-			tflog.Info(ctx, "VM is running, stopping before volume detach", map[string]any{"vm_id": vmID})
-			if err := r.client.StopVm(ctx, vmID, opts); err != nil {
-				// 627 = VM already being stopped/operated on by concurrent detach
-				if client.IsAPIError(err, 627) {
-					tflog.Info(ctx, "VM is busy (stop rejected), will re-check status", map[string]any{"vm_id": vmID})
-					sleepWithContext(ctx)
-					continue
-				}
-				resp.Diagnostics.AddError("Unable to Stop VM for volume detach", err.Error())
+			timer := time.NewTimer(r.movePoll())
+			select {
+			case <-stopCtx.Done():
+				timer.Stop()
+				resp.Diagnostics.AddError("Volume Detach Timed Out", stopCtx.Err().Error())
 				return
+			case <-timer.C:
 			}
-			sleepWithContext(ctx)
-
-		case "STOPPING":
-			tflog.Debug(ctx, "VM is stopping, waiting", map[string]any{"vm_id": vmID})
-			sleepWithContext(ctx)
-
-		case "STARTING":
-			tflog.Debug(ctx, "VM is starting, waiting for it to finish", map[string]any{"vm_id": vmID})
-			sleepWithContext(ctx)
-
-		default:
-			tflog.Warn(ctx, "VM in unexpected status, attempting detach", map[string]any{"vm_id": vmID, "status": vm.Status})
-			if err := r.client.DetachVolume(ctx, vmID, attachedVolumeID, opts); err != nil {
-				if client.IsAPIError(err, 601) {
-					goto detached
-				}
-				resp.Diagnostics.AddError("Unable to Detach Volume", err.Error())
-				return
-			}
-			goto detached
 		}
 	}
-
-detached:
-	tflog.Debug(ctx, "Detached volume from VM", map[string]any{
-		"vm_id":              vmID,
-		"attached_volume_id": attachedVolumeID,
-	})
+	current, err = submitKnownReservation(ctx, func(ctx context.Context) (*client.VolumeAttachmentOperation, error) {
+		return r.client.DeleteVolumeAttachmentWithIdentity(ctx, vmID, volumeID, id, data.LegacyAttachedVolumeID.ValueString(), opts)
+	}, func(ctx context.Context) (*client.VolumeAttachmentOperation, error) {
+		return r.client.GetVolumeAttachment(ctx, vmID, volumeID, id, opts)
+	}, func(v *client.VolumeAttachmentOperation) string { return v.Status }, r.movePoll())
+	if err == nil {
+		_, err = r.waitForVolumeMove(ctx, vmID, volumeID, id, current, opts, true)
+	}
+	if err != nil {
+		resp.Diagnostics.AddError("Unable to Confirm Volume Detachment", err.Error())
+	}
 }
 
 // detachPollInterval is how long the detach loop waits between VM-status polls.
 const detachPollInterval = 5 * time.Second
-
-// sleepWithContext waits one detach poll interval, returning early if ctx is cancelled.
-func sleepWithContext(ctx context.Context) {
-	select {
-	case <-ctx.Done():
-	case <-time.After(detachPollInterval):
-	}
-}
 
 func (r *VolumeAttachmentResource) buildOpts(data *VolumeAttachmentResourceModel) *client.RequestOpts {
 	opts := &client.RequestOpts{}

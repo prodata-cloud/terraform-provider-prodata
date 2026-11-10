@@ -46,6 +46,10 @@ func newLnapPanel(t *testing.T) *lnapPanel {
 	t.Helper()
 	p := &lnapPanel{}
 	p.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/local-network-attachments/") {
+			w.WriteHeader(404)
+			return
+		}
 		p.mu.Lock()
 		defer p.mu.Unlock()
 		if r.Method == http.MethodGet && r.URL.Path == lnapPath {
@@ -142,6 +146,7 @@ func (e *lnapEnv) stored(override map[string]tftypes.Value) tftypes.Value {
 		"ip":                          ephStr(lnapAddress),
 		"interface_id":                lnapNum(9071),
 		"mac_address":                 ephStr(lnapMAC),
+		"status":                      ephStr("LEGACY_UNVERIFIED"),
 		"region":                      ephStr("PROV-REGION"),
 		"project_tag":                 ephStr("prov-project"),
 		"allow_gateway_address":       lnapBool(false),

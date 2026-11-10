@@ -733,7 +733,8 @@ func TestPublicIPAttachmentCreate_FlagWithAVMThatWentDownBeforeTheRestartWarns(t
 	for _, status := range []string{"RUNNING", "STARTING", "REBOOTING"} {
 		t.Run(status, func(t *testing.T) {
 			c, p := newVMPanel(t, status)
-			p.setScript(status, "STOPPED")
+			// Admission reads once before attach; the independent restart read sees STOPPED.
+			p.setScript(status, status, "STOPPED")
 
 			resp := pipCreate(t, c, pipCreatePlan(t, "true", ""))
 

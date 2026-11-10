@@ -36,7 +36,7 @@ func protectionClient(t *testing.T, h http.HandlerFunc) *client.Client {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, q *http.Request) {
 		if q.URL.Path == "/panel-main/api/v2/vm-protection/capabilities" {
-			protectionReply(w, map[string]any{"contract": "vm-protection-reservation-v1", "reserveBeforeSubmit": true, "singleSubmit": true, "restoreIdentityBeforeSubmit": true})
+			protectionReply(w, map[string]any{"contract": "vm-protection-reservation-v1", "reserveBeforeSubmit": true, "singleSubmit": true, "restoreIdentityBeforeSubmit": true, "recoverableSubmission": true})
 			return
 		}
 		h(w, q)
@@ -421,6 +421,8 @@ func TestVmFromBackupUpdatesMutableInputsWithoutRestoringAgain(t *testing.T) {
 			r := &VmFromBackupResource{poll: time.Millisecond}
 			r.client = protectionClient(t, func(w http.ResponseWriter, q *http.Request) {
 				switch {
+				case strings.HasSuffix(q.URL.Path, "/power-operations/capabilities"):
+					protectionReply(w, map[string]any{"contract": client.VmPowerOperationContract, "callerUuid": true, "claimBeforeWrite": true, "readNeverActivates": true, "resolveTombstone": true, "recoverablePowerChildren": true, "stopCheckpoint": true, "supportedActions": []string{"START", "REBOOT", "RESET", "RESUME", "STOP", "SHUTDOWN"}})
 				case strings.Contains(q.URL.Path, "/restores/"):
 					protectionReply(w, client.VmBackupRestoreOperation{Contract: "vm-protection-reservation-v1", VmID: 42, Status: current.Status})
 				case strings.HasSuffix(q.URL.Path, "/status"):
@@ -518,5 +520,38 @@ func TestVmFromBackupFailedResizeAndReadbackKeepsOnlyVerifiedState(t *testing.T)
 	var status string
 	if ds := out.State.GetAttribute(context.Background(), path.Root("status"), &status); ds.HasError() || status != "STOPPED" {
 		t.Fatalf("unverified status persisted: %s %v", status, ds)
+	}
+}
+
+func TestVmProtectionDeleteUnverifiedUsesSafePanelResolve(t *testing.T) {
+	for _, release := range []bool{false, true} {
+		t.Run(fmt.Sprint(release), func(t *testing.T) {
+			deletes := 0
+			r := &vmProtectionResource{kind: "snapshots"}
+			r.client = protectionClient(t, func(w http.ResponseWriter, q *http.Request) {
+				if q.Method == "DELETE" {
+					deletes++
+					if !release {
+						w.WriteHeader(409)
+						fmt.Fprint(w, `{"success":false,"errors":[{"code":961,"message":"pending operation"}]}`)
+						return
+					}
+					protectionReply(w, nil)
+					return
+				}
+				v := protectionView("snapshots", "UNVERIFIED")
+				v.Present = !release || deletes == 0
+				protectionReply(w, v)
+			})
+			inputs := protectionInputs("snapshots")
+			inputs["id"] = int64(8)
+			plan, _ := protectionPlan(t, r, inputs)
+			prior := tfsdk.State(plan)
+			out := resource.DeleteResponse{State: prior}
+			r.Delete(context.Background(), resource.DeleteRequest{State: prior}, &out)
+			if deletes != 1 || out.Diagnostics.HasError() == release {
+				t.Fatalf("deletes=%d,release=%v diagnostics=%v", deletes, release, out.Diagnostics)
+			}
+		})
 	}
 }

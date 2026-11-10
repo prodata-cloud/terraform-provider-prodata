@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -80,7 +81,7 @@ func TestVolumeResource_ReadRequiresConfirmedAbsence(t *testing.T) {
 			var sch resource.SchemaResponse
 			r.Schema(ctx, resource.SchemaRequest{}, &sch)
 			state := tfsdk.State{Schema: sch.Schema, Raw: tftypes.NewValue(sch.Schema.Type().TerraformType(ctx), nil)}
-			model := VolumeResourceModel{ID: types.Int64Value(9), Region: types.StringValue("OTHER"), ProjectTag: types.StringValue("stored-project"), Name: types.StringValue("data"), Type: types.StringValue("SSD"), Size: types.Int64Value(10)}
+			model := VolumeResourceModel{Status: types.StringValue("AVAILABLE"), ID: types.Int64Value(9), Region: types.StringValue("OTHER"), ProjectTag: types.StringValue("stored-project"), Name: types.StringValue("data"), Type: types.StringValue("SSD"), Size: types.Int64Value(10)}
 			if diags := state.Set(ctx, &model); diags.HasError() {
 				t.Fatal(diags)
 			}
@@ -175,6 +176,14 @@ func TestVolumeAttachmentResource_DeleteRequiresVerifiedVmAbsence(t *testing.T) 
 		t.Run(tc.name, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
+				if strings.HasSuffix(r.URL.Path, "/volume-attachments/capabilities") && !tc.failStatus {
+					protectionReply(w, map[string]any{"contract": client.VolumeAttachmentContract, "reserveBeforeSubmit": true, "recoverableSubmission": true})
+					return
+				}
+				if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/volume-attachments/515") && !tc.failStatus {
+					protectionReply(w, attachmentView("SUCCESS", "ATTACH", true))
+					return
+				}
 				if r.Method == http.MethodGet && !tc.failStatus {
 					_, _ = w.Write([]byte(`{"success":true,"data":{"id":77,"status":"` + tc.vmStatus + `"}}`))
 					return

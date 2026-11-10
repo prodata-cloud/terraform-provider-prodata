@@ -233,6 +233,11 @@ func checkSendsEnglishInScope(t *testing.T, send string, requests map[string]str
 							args[i] = reflect.ValueOf(scope.opts)
 						default:
 							args[i] = arg(in)
+							// LB identifiers are positive even in a minimum-input header case.
+							// A zero requested identity is invalid and cannot have a valid success reply.
+							if (send == "doLBV1" || name == "GetNodePool") && in.Kind() == reflect.Int64 && args[i].Int() == 0 {
+								args[i] = reflect.ValueOf(int64(1))
+							}
 							if in.Kind() != reflect.Struct {
 								inLine = append(inLine, args[i].Interface())
 							}
@@ -243,6 +248,22 @@ func checkSendsEnglishInScope(t *testing.T, send string, requests map[string]str
 					sent, data = nil, fill.item
 					if mt.Out(0).Kind() == reflect.Slice {
 						data = fill.list
+					}
+					if send == "doLBV1" && mt.Out(0).Kind() != reflect.Slice {
+						replyID := int64(1)
+						for _, argument := range args {
+							if argument.Kind() == reflect.Int64 && argument.Int() > 0 {
+								replyID = argument.Int()
+							}
+						}
+						data = fmt.Sprintf(`{"id":%d}`, replyID)
+					}
+					if name == "GetNodePool" {
+						for _, argument := range args {
+							if argument.Kind() == reflect.Int64 {
+								data = fmt.Sprintf(`{"id":%d,"clusterId":313,"poolName":"workers","status":{"name":"SUCCESS"}}`, argument.Int())
+							}
+						}
 					}
 					mu.Unlock()
 

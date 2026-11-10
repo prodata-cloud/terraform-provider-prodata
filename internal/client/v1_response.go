@@ -2,6 +2,7 @@ package client
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 )
@@ -42,7 +43,7 @@ func parseV1Response[T any](statusCode int, body []byte) (T, *APIError) {
 		if err := json.Unmarshal(body, &env); err != nil {
 			return zero, &APIError{
 				StatusCode: statusCode,
-				Message:    "parse V1 response: " + err.Error(),
+				Message:    "invalid load balancer API envelope",
 				RawBody:    string(body),
 			}
 		}
@@ -54,12 +55,15 @@ func parseV1Response[T any](statusCode int, body []byte) (T, *APIError) {
 				RawBody:    string(body),
 			}
 		}
+		if statusCode < 200 || statusCode >= 300 {
+			return zero, &APIError{StatusCode: statusCode, Message: fmt.Sprintf("load balancer API returned HTTP %d %s", statusCode, http.StatusText(statusCode)), RawBody: string(body)}
+		}
 		var data T
 		if len(env.Data) > 0 && string(env.Data) != "null" {
 			if err := json.Unmarshal(env.Data, &data); err != nil {
 				return zero, &APIError{
 					StatusCode: statusCode,
-					Message:    "parse V1 data: " + err.Error(),
+					Message:    "invalid data in load balancer API response",
 					RawBody:    string(body),
 				}
 			}
@@ -71,7 +75,9 @@ func parseV1Response[T any](statusCode int, body []byte) (T, *APIError) {
 		// ApiException rendered by ApiExceptionHandler). A V2 success body here
 		// means the client hit the wrong endpoint — surface it, never accept it.
 		var v2 apiResponse[json.RawMessage]
-		_ = json.Unmarshal(body, &v2)
+		if err := json.Unmarshal(body, &v2); err != nil {
+			return zero, &APIError{StatusCode: statusCode, Message: "invalid load balancer API error envelope", RawBody: string(body)}
+		}
 		apiErr := &APIError{StatusCode: statusCode, RawBody: string(body)}
 		if len(v2.Errors) > 0 {
 			msgs := make([]string, len(v2.Errors))
@@ -87,10 +93,7 @@ func parseV1Response[T any](statusCode int, body []byte) (T, *APIError) {
 
 	default:
 		// Non-JSON or unrecognized body — an infra error page, empty body, etc.
-		msg := strings.TrimSpace(string(body))
-		if msg == "" {
-			msg = http.StatusText(statusCode)
-		}
+		msg := fmt.Sprintf("unexpected load balancer API response (HTTP %d %s)", statusCode, http.StatusText(statusCode))
 		return zero, &APIError{StatusCode: statusCode, Message: msg, RawBody: string(body)}
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"terraform-provider-prodata/internal/testutil"
 	"testing"
 	"time"
 
@@ -115,9 +116,9 @@ func newVMPanel(t *testing.T, status string) (*client.Client, *vmPanel) {
 		hanging:       map[string]bool{},
 		readAnswer:    panelRefusal,
 	}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(testutil.GatewayJournal(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p.serve(t, w, r)
-	}))
+	})))
 	t.Cleanup(srv.Close)
 
 	c, err := client.New(client.Config{APIBaseURL: srv.URL, APIKeyID: "k", APISecretKey: "s", Region: "TEST", ProjectTag: "proj"})
@@ -163,6 +164,12 @@ func (p *vmPanel) serve(t *testing.T, w http.ResponseWriter, r *http.Request) {
 
 	case r.Method == http.MethodGet && r.URL.Path == vmPanelBase:
 		p.ok(w, p.vmBody())
+
+	case r.Method == http.MethodGet && r.URL.Path == vmPanelBase+"/power-operations/capabilities":
+		if p.refused(w, "power-capabilities") {
+			return
+		}
+		p.ok(w, map[string]any{"contract": "vm-power-operation-v1", "callerUuid": true, "claimBeforeWrite": true, "readNeverActivates": true, "resolveTombstone": true, "recoverablePowerChildren": true, "stopCheckpoint": true, "supportedActions": []string{"START", "REBOOT", "RESET", "RESUME", "STOP", "SHUTDOWN"}})
 
 	case r.Method == http.MethodPost && r.URL.Path == vmPanelBase+"/stop":
 		if p.hold(r, "stop") {

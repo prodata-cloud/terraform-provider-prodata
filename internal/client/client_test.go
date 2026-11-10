@@ -309,7 +309,7 @@ func TestDo_RetriesOn429ThenSucceeds(t *testing.T) {
 	defer server.Close()
 
 	c := newTestClient(t, server)
-	err := c.Do(context.Background(), http.MethodPost, "/storage/api/v1/buckets", nil, nil, nil)
+	err := c.Do(context.Background(), http.MethodGet, "/storage/api/v1/buckets", nil, nil, nil)
 
 	if err != nil {
 		t.Fatalf("expected success after 429 retries, got: %v", err)
@@ -330,7 +330,7 @@ func TestDo_429ExhaustsRetries(t *testing.T) {
 	defer server.Close()
 
 	c := newTestClient(t, server)
-	err := c.Do(context.Background(), http.MethodPost, "/storage/api/v1/buckets", nil, nil, nil)
+	err := c.Do(context.Background(), http.MethodGet, "/storage/api/v1/buckets", nil, nil, nil)
 
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) {
@@ -345,7 +345,7 @@ func TestDo_429ExhaustsRetries(t *testing.T) {
 	}
 }
 
-func TestDo_429ResendsRequestBody(t *testing.T) {
+func TestDo_429NeverReplaysMutationBody(t *testing.T) {
 	var callCount int64
 	var bodies []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -364,14 +364,16 @@ func TestDo_429ResendsRequestBody(t *testing.T) {
 
 	c := newTestClient(t, server)
 	payload := map[string]string{"name": "my-bucket"}
-	if err := c.Do(context.Background(), http.MethodPost, "/storage/api/v1/buckets", payload, nil, nil); err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	err := c.Do(context.Background(), http.MethodPost, "/storage/api/v1/buckets", payload, nil, nil)
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("expected one refused mutation: %v", err)
 	}
-	if len(bodies) != 2 {
-		t.Fatalf("expected 2 requests, got %d", len(bodies))
+	if len(bodies) != 1 {
+		t.Fatalf("mutation was replayed %d times", len(bodies))
 	}
-	if bodies[0] != bodies[1] || bodies[1] != `{"name":"my-bucket"}` {
-		t.Errorf("request body not re-sent identically on retry: %q vs %q", bodies[0], bodies[1])
+	if bodies[0] != `{"name":"my-bucket"}` {
+		t.Fatalf("initial mutation body changed: %q", bodies[0])
 	}
 }
 
@@ -387,7 +389,7 @@ func TestDo_429ContextCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancelled before the backoff wait
 
-	err := c.Do(ctx, http.MethodPost, "/storage/api/v1/buckets", nil, nil, nil)
+	err := c.Do(ctx, http.MethodGet, "/storage/api/v1/buckets", nil, nil, nil)
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("expected context.Canceled, got %v", err)
 	}

@@ -163,7 +163,7 @@ func WithMovePause(pause func(attempt int) time.Duration) MoveOption {
 // With DryRun the panel only checks, so the call is repeated only while it answers 503.
 func (c *Client) MovePrimaryLocalNetwork(ctx context.Context, vmID int64, req MovePrimaryLocalNetworkRequest, opts *RequestOpts, options ...MoveOption) (*MovedPrimaryLocalNetwork, error) {
 	if req.DryRun {
-		return RetryOnBusy(ctx, RetryTimeoutShort, func() (*MovedPrimaryLocalNetwork, error) {
+		return RetryReadOnBusy(ctx, RetryTimeoutShort, func() (*MovedPrimaryLocalNetwork, error) {
 			return c.movePrimaryLocalNetworkOnce(ctx, vmID, req, opts)
 		})
 	}

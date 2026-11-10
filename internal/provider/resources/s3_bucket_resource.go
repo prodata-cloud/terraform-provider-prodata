@@ -218,6 +218,19 @@ func (r *S3BucketResource) Create(ctx context.Context, req resource.CreateReques
 		return
 	}
 
+	// A successful create acknowledgement establishes ownership before any optional read.
+	plan.ID = types.StringValue(name)
+	plan.Name = types.StringValue(name)
+	plan.Region = types.StringValue(region)
+	plan.ProjectTag = types.StringValue(projectTag)
+	if plan.CreationDate.IsUnknown() {
+		plan.CreationDate = types.StringNull()
+	}
+	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
 	fresh, getErr := r.c.GetBucket(ctx, name, opts)
 	if getErr != nil {
 		resp.Diagnostics.AddError("Unable to Read Bucket after Create", getErr.Error())
@@ -256,7 +269,7 @@ func (r *S3BucketResource) Read(ctx context.Context, req resource.ReadRequest, r
 
 	b, err := r.c.GetBucket(ctx, name, opts)
 	if err != nil {
-		if client.IsNotFound(err) {
+		if client.IsBucketNotFound(err) {
 			tflog.Warn(ctx, "Bucket not found, removing from state", map[string]any{"name": name})
 			resp.State.RemoveResource(ctx)
 			return
@@ -349,7 +362,7 @@ func (r *S3BucketResource) Delete(ctx context.Context, req resource.DeleteReques
 
 	err := r.c.DeleteBucket(ctx, name, opts)
 	if err != nil {
-		if client.IsNotFound(err) {
+		if client.IsBucketNotFound(err) {
 			return
 		}
 		if client.IsAPIError(err, 738) {

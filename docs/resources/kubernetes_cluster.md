@@ -11,6 +11,10 @@ Manages a ProData Managed Kubernetes cluster's **control plane**. Worker capacit
 
 Cluster creation is asynchronous; `terraform apply` blocks until the cluster reaches `SUCCESS` (with a bounded grace period for the lazily-fetched kubeconfig) or the create timeout elapses. If the kubeconfig still lags after the grace, the apply finishes with a warning and `terraform refresh` populates it. (With `exclude_credentials_from_state` set there is nothing to populate: the warning says so, and the ephemeral resource fails until the kubeconfig is available.)
 
+Creation requires the matching `cluster-creation-v1` API. The provider checkpoints `request_uuid` before reserving the canonical cluster and records its ID before submission. Lost acknowledgements recover that exact request; an existing name is never adopted. Read observes a pending request without activating it. Destroy first resolves the original creation, releases an unsubmitted attempt only with positive cancellation proof, and otherwise uses the owned canonical cluster's durable teardown. Older servers fail before a legacy create or delete mutation.
+
+Deletion completes only when the matching backend confirms durable teardown for this exact cluster. A missing response, an unavailable API, or an older unverified `DELETED` status retains the cluster in Terraform state. Retry after the known deletion operation is reconciled; the provider does not infer successful teardown from a proxy error.
+
 ~> **Note:** The cluster's credentials — `kube_config` and, when the platform generated the nodes' SSH key pair, `private_key_encoded` — are stored in Terraform state by default. Marking them `Sensitive` only hides them from the console; the state file holds them in plaintext. To keep them out, set [`exclude_credentials_from_state`](#credentials-in-terraform-state) and read the kubeconfig with the [`prodata_kubernetes_kubeconfig`](../ephemeral-resources/kubernetes_kubeconfig.md) ephemeral resource.
 
 ~> **Note:** The cluster is created in the region the API resolves for the request. If your account spans multiple regions, set the region through the provider configuration (or `PRODATA_REGION`) to be sure the cluster lands where you intend. `region` and `project_tag` are fixed at create time — changing either forces a new resource.
@@ -203,6 +207,7 @@ Here the cluster is created in the same configuration, so `cluster_id` is not kn
 - `api_endpoint` (String) Kubernetes API server endpoint.
 - `ssh_key_encoded` (String) Base64-encoded SSH public key registered on the nodes. It is the public half, not a secret.
 - `private_key_encoded` (String, Sensitive) Base64-encoded SSH private key for the nodes. It exists only when the platform generated the key pair — `ssh_access_enabled` is `true` and `public_key` is not set — and is null when you supplied your own `public_key`. Always null when `exclude_credentials_from_state` is `true`.
+- `request_uuid` (String) Durable creation request UUID. Retained when the canonical ID has not yet been confirmed; available after interrupted or failed creation for exact recovery and cancellation. Existing correlated clusters discover it during import/refresh.
 - `status` (String) Lifecycle status: `NEW`, `PROCESSING`, `SUCCESS`, `FAIL`, `DELETING`, or `DELETED`. `DELETING` is a lingering state while the cluster's asynchronous teardown runs; on a teardown timeout the cluster goes `FAIL` and keeps reserving its name until it is deleted.
 - `blocked` (Boolean) True while a mutating operation is in flight on the cluster.
 - `node_pool_count` (Number) Number of node pools on the cluster (master + worker pools). Managed workers are separate `prodata_kubernetes_node_pool` resources.

@@ -3,8 +3,10 @@ package resources
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	"terraform-provider-prodata/internal/client"
@@ -92,6 +94,47 @@ func TestSecurityGroupAttachmentDeleteRejectsOtherGroupsBinding(t *testing.T) {
 	r.Delete(context.Background(), resource.DeleteRequest{State: state}, &resp)
 	if !resp.Diagnostics.HasError() || resp.State.Raw.IsNull() {
 		t.Fatal("conflicting detach must fail and keep state")
+	}
+}
+
+func TestSecurityGroupScopeConflictRetainsExactStateForGroupAndBinding(t *testing.T) {
+	for _, binding := range []bool{false, true} {
+		for _, method := range []string{http.MethodGet, http.MethodDelete} {
+			t.Run(fmt.Sprintf("binding=%t/%s", binding, method), func(t *testing.T) {
+				var requests atomic.Int32
+				c := securityGroupClient(t, func(w http.ResponseWriter, req *http.Request) {
+					requests.Add(1)
+					if req.Method != method || req.Header.Get("X-Project-Tag") != "chosen" || req.Header.Get("X-Region") != "OVERRIDE" {
+						t.Errorf("unexpected request or lost stored scope: %s %s", req.Method, req.URL)
+					}
+					w.WriteHeader(http.StatusForbidden)
+					_, _ = w.Write([]byte(`{"success":false,"errors":[{"code":714,"message":"Scope conflict"}]}`))
+				})
+				var r resource.Resource = &SecurityGroupResource{c: c}
+				var model any = &SecurityGroupModel{ID: types.Int64Value(7), Name: types.StringValue("web"), Region: types.StringValue("OVERRIDE"), ProjectTag: types.StringValue("chosen"), Rules: types.ListNull(types.ObjectType{AttrTypes: securityGroupRuleTypes})}
+				if binding {
+					r = &SecurityGroupAttachmentResource{c: c}
+					model = &SecurityGroupAttachmentModel{ID: types.StringValue("7/8/9"), GroupID: types.Int64Value(7), VmID: types.Int64Value(8), InterfaceID: types.Int64Value(9), Region: types.StringValue("OVERRIDE"), ProjectTag: types.StringValue("chosen")}
+				}
+				prior := securityGroupState(t, r, model)
+				if method == http.MethodGet {
+					out := resource.ReadResponse{State: prior}
+					r.Read(context.Background(), resource.ReadRequest{State: prior}, &out)
+					if !out.Diagnostics.HasError() || !out.State.Raw.Equal(prior.Raw) {
+						t.Fatalf("scope-conflicted read altered ownership: %v, %v", out.State.Raw, out.Diagnostics)
+					}
+				} else {
+					out := resource.DeleteResponse{State: prior}
+					r.Delete(context.Background(), resource.DeleteRequest{State: prior}, &out)
+					if !out.Diagnostics.HasError() || !out.State.Raw.Equal(prior.Raw) {
+						t.Fatalf("scope-conflicted destroy forgot ownership: %v, %v", out.State.Raw, out.Diagnostics)
+					}
+				}
+				if requests.Load() != 1 {
+					t.Fatalf("scope conflict was retried or followed by another operation: %d", requests.Load())
+				}
+			})
+		}
 	}
 }
 

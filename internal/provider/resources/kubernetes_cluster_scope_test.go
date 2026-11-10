@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -32,6 +33,7 @@ func TestK8sClusterResource_ProjectScopeCreateAndRead(t *testing.T) {
 			projectIDs := map[string]int64{"provider-project": 89, "resource-project": 144}
 			var mu sync.Mutex
 			var storedProject string
+			var creationUUID string
 			calls := map[string]int{}
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 				mu.Lock()
@@ -53,6 +55,31 @@ func TestK8sClusterResource_ProjectScopeCreateAndRead(t *testing.T) {
 					})
 					body["projectId"] = projectIDs[storedProject]
 					return body
+				}
+				prefix := "/panel-main/api/v2/kubernetes/cluster-operations/"
+				if strings.HasPrefix(req.URL.Path, prefix) {
+					tail := strings.TrimPrefix(req.URL.Path, prefix)
+					var data any
+					if tail == "capabilities" {
+						data = creationCapabilitiesWire()
+					} else {
+						id := strings.TrimSuffix(strings.TrimSuffix(tail, "/reservations"), "/submit")
+						if strings.HasSuffix(tail, "/reservations") {
+							creationUUID = id
+							storedProject = project
+						}
+						if id != creationUUID {
+							t.Error("creation UUID changed")
+						}
+						status := "RESERVED"
+						if req.Method == "GET" || strings.HasSuffix(tail, "/submit") {
+							status = "SUCCESS"
+						}
+						data = creationOperationWire(id, status, 313)
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "data": data})
+					return
 				}
 				var data any
 				switch call {
@@ -81,6 +108,9 @@ func TestK8sClusterResource_ProjectScopeCreateAndRead(t *testing.T) {
 						return
 					}
 					data = cluster(client.ClusterStatusSuccess)
+				case "GET /panel-main/api/v2/kubernetes/clusters/313/hardware":
+					http.NotFound(w, req) // Existing server without the optional rollout readback API.
+					return
 				default:
 					t.Errorf("unexpected request %s", call)
 					http.NotFound(w, req)
@@ -154,7 +184,8 @@ func TestK8sClusterResource_ProjectScopeCreateAndRead(t *testing.T) {
 				"GET /panel-main/api/v2/local-networks/7",
 				"GET " + base + "/getMasterNodeConfig/false",
 				"GET " + base + "/getClusters",
-				"POST " + base + "/createCluster",
+				"POST /panel-main/api/v2/kubernetes/cluster-operations/" + creationUUID + "/reservations",
+				"POST /panel-main/api/v2/kubernetes/cluster-operations/" + creationUUID + "/submit",
 				"GET " + base + "/getCluster/313",
 			} {
 				if calls[call] == 0 {

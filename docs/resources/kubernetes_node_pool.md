@@ -11,7 +11,11 @@ Manages a worker node pool on a ProData Managed Kubernetes cluster. The cluster 
 
 Pool creation and scaling are asynchronous; `terraform apply` blocks until the pool converges or the timeout elapses.
 
-~> **Note:** The pool's `project_tag` (or the provider default) must match its parent cluster's project. The provider checks the cluster listing in that project before creating the pool and fails if the parent is absent or the listing cannot be read. Referencing `cluster_id` does not make the pool inherit the cluster's project; configure both resources for the same project.
+Creation and deletion require a panel and Kubernetes service supporting `pool-lifecycle-v1`. The provider records `request_uuid` before reserving a pool and checkpoints its canonical ID before submitting physical work. A lost response resumes that exact operation; an existing pool is never adopted by its name or by comparing list results. A same-name conflict requires explicit import.
+
+Deletion records a separate `deletion_request_uuid` and uses the canonical pool ID with a UID-pinned operation. A missing legacy response, HTTP404, or unverified read preserves Terraform ownership. Only positive cancellation or confirmed deletion of that exact pool removes it from state. `Read` does not submit operations. A temporary projection read failure after confirmed creation keeps the new pool instead of tainting it for replacement.
+
+~> **Note:** A configured `project_tag` (or provider default) must match the parent cluster's project. The provider checks the cluster listing in that selected project before creation and fails if the parent is absent or the listing cannot be read. If neither the resource nor provider selects a project, the panel preserves inheritance from the parent cluster; no project is guessed from a failed read.
 
 Sizing (`vcpu`, `ram`, and increases to `disk_size`) updates the existing pool by rolling its worker machines, preserving the pool ID. Workers are drained and replaced one at a time with at most one unavailable worker and no extra surge worker. Local data on worker boot disks is lost. Application data must use storage with suitable retention. Workloads must tolerate a worker restart, and disruption budgets can delay completion. Disk shrinking is rejected. Changing `name`, `cluster_id`, `region`, or `project_tag` still requires a separate pool.
 
@@ -69,8 +73,10 @@ One of `node_count` or `autoscaling` must be set (they are mutually exclusive).
 
 ### Attribute Reference
 
-- `id` (Number) Node pool ID assigned by the panel.
-- `status` (String) Lifecycle status: `PROCESSING` while a change is rolling out, `SUCCESS` when converged.
+- `id` (Number) Canonical node pool ID committed by the panel before physical submission. It may remain null after an unacknowledged reservation; the creation UUID is retained.
+- `request_uuid` (String) Durable creation request UUID. Computed; do not configure it.
+- `deletion_request_uuid` (String) Durable deletion request UUID while a destroy attempt is pending. Computed; retained after an uncertain response.
+- `status` (String) Lifecycle status. Pending or unverified operations retain their identity; `SUCCESS` means converged.
 - `node_subnet` (Number) Node subnet prefix length assigned to the pool by the backend.
 
 ### Timeouts
@@ -105,7 +111,15 @@ To import a pool in a different region or project, use `{region}/{cluster_id}/{p
 terraform import prodata_kubernetes_node_pool.example UZ-5/42/7@my-project
 ```
 
+## Recovery
+
+A pending operation retains its original UUID and canonical ID. Known-UUID submit can resume a pre-submission refusal; it does not replay a raw physical create/delete. A cancelled CREATE with no physical pool can be released, including when the original response never supplied an ID. A cancelled DELETE leaves the live pool owned and permits a fresh destroy attempt.
+
+Imports read a committed creation association when the panel supplies it. Older pools retain their explicit canonical ID and still require a positive UID association for deletion. Unknown responses remain inspectable and never cause name-based adoption or inferred absence.
+
+Terraform stores the provider's response when an RPC finishes. If the provider process exits before that response can be stored, the panel's committed record still owns the pending pool; inspect that canonical pool and import its explicit ID. Do not use a same-name resource as evidence that a new create owns it.
+
 ## Known Limitations
 
-- **Deleting the last worker pool is allowed** — a control-plane-only cluster is a valid state. (Against a backend not yet upgraded, the panel still refuses with code 756; the provider surfaces that as a clear message. Destroy the whole cluster, or add another pool first, in that case.)
+- **Deleting the last worker pool is allowed** — a control-plane-only cluster is a valid state. Servers without the durable lifecycle contract fail capability discovery before new allocation; deploy the compatible panel and Kubernetes service before using creation/deletion.
 - **Master (control-plane) pools are not manageable here.** This resource manages worker pools only; the master pool is owned by the cluster's `master_flavor_id`.
