@@ -86,9 +86,22 @@ func New(cfg Config) (*Client, error) {
 		// resource's configurable Create/Update/Delete timeout. A fixed 60s cap here would
 		// override those and abort slow synchronous creates (VM, LB, Kubernetes) regardless
 		// of the `timeouts` block, surfacing as a confusing transport error.
-		httpClient: &http.Client{},
+		httpClient: &http.Client{CheckRedirect: safeAPIRedirect},
 		limiter:    limiter,
 	}, nil
+}
+
+// safeAPIRedirect never replays a mutation or sends API-key headers to another origin.
+// Existing same-origin GET/HEAD redirects remain usable for read-only canonical routes.
+func safeAPIRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) == 0 {
+		return http.ErrUseLastResponse
+	}
+	first := via[0]
+	if !isIdempotentMethod(first.Method) || req.URL.Scheme != first.URL.Scheme || !strings.EqualFold(req.URL.Host, first.URL.Host) || len(via) >= 10 {
+		return http.ErrUseLastResponse
+	}
+	return nil
 }
 
 // rateLimiter paces requests to roughly one per `interval`, serialized across goroutines.
@@ -136,8 +149,12 @@ type apiError struct {
 
 // RequestOpts allows per-request overrides of region and project.
 type RequestOpts struct {
-	Region     string
-	ProjectTag string
+	GatewayOperationUUID string
+	GatewayNetworkID     int64
+	// GuestOperationUUID authorizes a single pre-execution guest intent's gateway/power child.
+	GuestOperationUUID string
+	Region             string
+	ProjectTag         string
 	// Lang sets the X-Lang header (e.g. "en") so DB-backed error messages come
 	// back localized. Empty means no header is sent and the server goes by the
 	// API key user's profile language, else Russian; an older panel goes by the
@@ -153,11 +170,16 @@ type RequestOpts struct {
 // It is the shared transport for both the V2 envelope path (Do) and the V1 envelope
 // path (legacy load-balancer endpoints, parsed via parseV1Response).
 func (c *Client) doRequest(ctx context.Context, method, path string, body any, opts *RequestOpts) (int, []byte, error) {
+	status, data, _, err := c.doRequestWithHeaders(ctx, method, path, body, opts)
+	return status, data, err
+}
+
+func (c *Client) doRequestWithHeaders(ctx context.Context, method, path string, body any, opts *RequestOpts) (int, []byte, http.Header, error) {
 	var bodyBytes []byte
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
-			return 0, nil, fmt.Errorf("marshal request: %w", err)
+			return 0, nil, nil, fmt.Errorf("marshal request: %w", err)
 		}
 		bodyBytes = b
 	}
@@ -180,10 +202,8 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body any, o
 		lang = opts.Lang
 	}
 
-	// Edge rate limiting (HTTP 429 — e.g. Cloudflare error 1015) rejects the
-	// request before it reaches the API, so retrying is safe even for POST/DELETE:
-	// no work was performed. Bulk applies (many parallel resources) trip per-IP
-	// rate limits; retry transparently with backoff instead of failing the apply.
+	// An HTTP 429 alone cannot prove that a mutation did not happen upstream. Only reads
+	// retry transparently; mutations require an explicit API pre-write refusal proof.
 	transportRetries := 0
 	for attempt := 0; ; attempt++ {
 		var reqBody io.Reader
@@ -192,7 +212,7 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body any, o
 		}
 		req, err := http.NewRequestWithContext(ctx, method, fullURL, reqBody)
 		if err != nil {
-			return 0, nil, fmt.Errorf("create request: %w", err)
+			return 0, nil, nil, fmt.Errorf("create request: %w", err)
 		}
 
 		req.Header.Set("Content-Type", "application/json")
@@ -204,10 +224,17 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body any, o
 		if lang != "" {
 			req.Header.Set("X-Lang", lang)
 		}
+		if opts != nil && opts.GuestOperationUUID != "" {
+			req.Header.Set("X-Prodata-Guest-Operation-UUID", opts.GuestOperationUUID)
+		}
+		if opts != nil && opts.GatewayOperationUUID != "" {
+			req.Header.Set("X-Prodata-Gateway-Operation-UUID", opts.GatewayOperationUUID)
+			req.Header.Set("X-Prodata-Gateway-Network-Id", strconv.FormatInt(opts.GatewayNetworkID, 10))
+		}
 
 		if c.limiter != nil {
 			if werr := c.limiter.wait(ctx); werr != nil {
-				return 0, nil, werr
+				return 0, nil, nil, werr
 			}
 		}
 
@@ -229,12 +256,12 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body any, o
 				})
 				select {
 				case <-ctx.Done():
-					return 0, nil, ctx.Err()
+					return 0, nil, nil, ctx.Err()
 				case <-time.After(wait):
 				}
 				continue
 			}
-			return 0, nil, fmt.Errorf("request failed: %w", err)
+			return 0, nil, nil, fmt.Errorf("request failed: %w", err)
 		}
 
 		respBody, readErr := io.ReadAll(resp.Body)
@@ -242,10 +269,10 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body any, o
 		statusCode := resp.StatusCode
 		resp.Body.Close()
 		if readErr != nil {
-			return 0, nil, fmt.Errorf("read response: %w", readErr)
+			return 0, nil, nil, fmt.Errorf("read response: %w", readErr)
 		}
 
-		if statusCode == http.StatusTooManyRequests && attempt < rateLimitMaxRetries {
+		if statusCode == http.StatusTooManyRequests && isIdempotentMethod(method) && attempt < rateLimitMaxRetries {
 			wait := retryAfterDelay(respHeader, attempt)
 			tflog.Warn(ctx, "rate limited (HTTP 429) — backing off before retry", map[string]any{
 				"method":      method,
@@ -256,13 +283,13 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body any, o
 			})
 			select {
 			case <-ctx.Done():
-				return 0, nil, ctx.Err()
+				return 0, nil, nil, ctx.Err()
 			case <-time.After(wait):
 			}
 			continue
 		}
 
-		return statusCode, respBody, nil
+		return statusCode, respBody, respHeader.Clone(), nil
 	}
 }
 
@@ -456,6 +483,10 @@ func (c *Client) GetVmVolumes(ctx context.Context, vmID int64, opts *RequestOpts
 	if err := c.Do(ctx, http.MethodGet, path, nil, &disks, opts); err != nil {
 		return nil, err
 	}
+	if disks == nil {
+		return nil, fmt.Errorf("the API did not return a complete VM disk inventory; existing attachment identity was preserved")
+	}
+
 	return disks, nil
 }
 
@@ -907,7 +938,8 @@ func (c *Client) DetachPublicIP(ctx context.Context, vmID int64, opts *RequestOp
 
 // AttachVolumeRequest represents the request to attach a volume to a VM.
 type AttachVolumeRequest struct {
-	VolumeID int64 `json:"volumeId"`
+	VolumeID            int64  `json:"volumeId"`
+	ExpectedSourceVolid string `json:"expectedSourceVolid,omitempty"`
 }
 
 func (c *Client) AttachVolume(ctx context.Context, vmID int64, req AttachVolumeRequest, opts *RequestOpts) (*Volume, error) {

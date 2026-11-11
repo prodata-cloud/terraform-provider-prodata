@@ -72,9 +72,11 @@ type nicPanel struct {
 	mu  sync.Mutex
 	srv *httptest.Server
 
-	nics   []client.VmLocalNetwork // what the list reports
-	nextID int64                   // the id of the next interface attached
-	nextIP int                     // the last octet handed out when no address is asked for
+	restart  map[int64]bool
+	protocol map[int64]string
+	nics     []client.VmLocalNetwork // what the list reports
+	nextID   int64                   // the id of the next interface attached
+	nextIP   int                     // the last octet handed out when no address is asked for
 
 	noCloudInit      bool // an attach reports requiresGuestConfiguration
 	noMAC            bool // an attach reports no MAC address
@@ -107,6 +109,10 @@ func newNICPanel(t *testing.T, vmStatus string) (*client.Client, *nicPanel) {
 		always: map[string]answer{},
 	}
 	p.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, vmPanelBase+"/local-network-attachments") {
+			p.serveProtocol(t, w, r)
+			return
+		}
 		if p.holdAttachFrom > 0 && r.Method == http.MethodPost && r.URL.Path == lnaNICBase && int(p.attachRequests.Add(1)) >= p.holdAttachFrom {
 			p.mu.Lock()
 			p.record("attach", r)
@@ -595,15 +601,18 @@ func TestLocalNetworkAttachmentCreate_WithoutAnAddressTheOneTheNetworkGivesIsRec
 	}
 }
 
-func TestLocalNetworkAttachmentCreate_AnInterfaceWithoutAMACIsRecordedWithoutOne(t *testing.T) {
+func TestLocalNetworkAttachmentCreate_MissingReservedMacKeepsIdentityWithoutSubmitting(t *testing.T) {
 	c, p := newNICPanel(t, "STOPPED")
 	p.noMAC = true
-
 	resp := lnaCreate(t, c, lnaCreatePlan(t, nil))
-
-	lnaOnly(t, resp.Diagnostics, nil, nil)
-	if m := lnaModel(t, resp.State); !m.MACAddress.IsNull() {
-		t.Errorf("mac_address = %v, want null: the panel did not report one", m.MACAddress)
+	lnaOnly(t, resp.Diagnostics, []string{"Local Network Reservation Is Incomplete"}, nil)
+	if m := lnaModel(t, resp.State); m.InterfaceID.ValueInt64() != lnaInterfaceID || m.Status.ValueString() != "RESERVED" {
+		t.Fatalf("reservation lost: %+v", m)
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.protocol[lnaInterfaceID] != "RESERVED" {
+		t.Fatal("invalid reservation physically submitted")
 	}
 }
 
@@ -1734,9 +1743,9 @@ func TestLocalNetworkAttachmentRead_WhatIsGoneIsRemoved(t *testing.T) {
 
 			resp := lnaRead(t, c, lnaStored(t, nil))
 
-			lnaOnly(t, resp.Diagnostics, nil, nil)
-			if !resp.State.Raw.IsNull() {
-				t.Errorf("the resource is still in the state: %v", resp.State.Raw)
+			positive := tc.name == "the interface is not in the list" || tc.name == "the VM has no interfaces"
+			if resp.State.Raw.IsNull() != positive || resp.Diagnostics.HasError() == positive {
+				t.Fatalf("positive=%v state=%v diag=%v", positive, resp.State.Raw, resp.Diagnostics)
 			}
 		})
 	}
@@ -1985,8 +1994,8 @@ func TestLocalNetworkAttachmentDelete_DetachesTheInterfaceByItsIDAndLeavesTheVMA
 	resp := lnaDelete(t, c, lnaStored(t, nil))
 
 	lnaOnly(t, resp.Diagnostics, nil, nil)
-	wantCalls(t, p.nicCalls(), []string{"detach 9071"})
-	if got, want := p.nicQueries(), []string{"projectTag=proj&region=TEST"}; !slices.Equal(got, want) {
+	wantCalls(t, p.nicCalls(), []string{"list", "detach 9071"})
+	if got, want := p.nicQueries(), []string{"projectTag=proj&region=TEST", "projectTag=proj&region=TEST"}; !slices.Equal(got, want) {
 		t.Errorf("queries = %v, want %v", got, want)
 	}
 	// Neither a stop nor a start: the detach never restarts the VM.
@@ -2016,7 +2025,7 @@ func TestLocalNetworkAttachmentDelete_WhatIsAlreadyGoneIsDone(t *testing.T) {
 			resp := lnaDelete(t, c, lnaStored(t, nil))
 
 			lnaOnly(t, resp.Diagnostics, nil, nil)
-			wantCalls(t, p.nicCalls(), []string{"detach 9071"})
+			wantCalls(t, p.nicCalls(), []string{"list"})
 		})
 	}
 }
@@ -2040,7 +2049,7 @@ func TestLocalNetworkAttachmentDelete_AVMThatIsBusyIsAskedAgain(t *testing.T) {
 	resp := lnaDelete(t, c, lnaStored(t, nil))
 
 	lnaOnly(t, resp.Diagnostics, nil, nil)
-	wantCalls(t, p.nicCalls(), []string{"detach 9071", "detach 9071"})
+	wantCalls(t, p.nicCalls(), []string{"list", "detach 9071", "list", "detach 9071"})
 }
 
 func TestLocalNetworkAttachmentDelete_WaitsForAVMToSettleAndNeverStopsIt(t *testing.T) {
@@ -2054,7 +2063,7 @@ func TestLocalNetworkAttachmentDelete_WaitsForAVMToSettleAndNeverStopsIt(t *test
 			resp := lnaDelete(t, c, lnaStored(t, nil))
 
 			lnaOnly(t, resp.Diagnostics, nil, nil)
-			wantCalls(t, p.nicCalls(), []string{"detach 9071", "detach 9071"})
+			wantCalls(t, p.nicCalls(), []string{"list", "detach 9071", "detach 9071"})
 			wantCalls(t, p.vp.posts(), nil)
 			if len(p.listed()) != 0 {
 				t.Error("the interface is still attached")
@@ -2063,7 +2072,7 @@ func TestLocalNetworkAttachmentDelete_WaitsForAVMToSettleAndNeverStopsIt(t *test
 	}
 }
 
-func TestLocalNetworkAttachmentDelete_AVMThatIsGoneWhileWaitingMeansTheInterfaceIsGone(t *testing.T) {
+func TestLocalNetworkAttachmentDelete_UnprovedVmAbsenceRetainsInterface(t *testing.T) {
 	// The status endpoint says 601 of a VM that is not there, which is also what a blocked user is
 	// told, so it proves nothing; the list of the VM's interfaces says 633, and that is asked once
 	// the status cannot be read.
@@ -2075,8 +2084,8 @@ func TestLocalNetworkAttachmentDelete_AVMThatIsGoneWhileWaitingMeansTheInterface
 
 	resp := lnaDelete(t, c, lnaStored(t, nil))
 
-	lnaOnly(t, resp.Diagnostics, nil, nil)
-	wantCalls(t, p.nicCalls(), []string{"detach 9071", "list"})
+	lnaOnly(t, resp.Diagnostics, []string{"Unable to Detach Local Network"}, nil)
+	wantCalls(t, p.nicCalls(), []string{"list"})
 }
 
 func TestLocalNetworkAttachmentDelete_AStatusThatCannotBeReadOfAVMThatIsStillThereIsNotTakenForGone(t *testing.T) {
@@ -2090,8 +2099,8 @@ func TestLocalNetworkAttachmentDelete_AStatusThatCannotBeReadOfAVMThatIsStillThe
 	resp := lnaDelete(t, c, lnaStored(t, nil))
 
 	lnaOnly(t, resp.Diagnostics, []string{"Unable to Detach Local Network"}, nil)
-	wantInText(t, lnaDetail(t, resp.Diagnostics), "[959]", "reading the status of VM 7", "3 consecutive failures")
-	wantCalls(t, p.nicCalls(), []string{"detach 9071", "list"})
+	wantInText(t, lnaDetail(t, resp.Diagnostics), "[601]")
+	wantCalls(t, p.nicCalls(), []string{"list"})
 }
 
 func TestLocalNetworkAttachmentDelete_AStatusThatCannotBeReadOfAVMInAnotherProjectIsNotTakenForGone(t *testing.T) {
@@ -2109,7 +2118,7 @@ func TestLocalNetworkAttachmentDelete_AStatusThatCannotBeReadOfAVMInAnotherProje
 
 	lnaOnly(t, resp.Diagnostics, []string{"Unable to Detach Local Network"}, nil)
 	wantInText(t, lnaDetail(t, resp.Diagnostics), "[959]", "reading the status of VM 7", "3 consecutive failures")
-	wantCalls(t, p.nicCalls(), []string{"detach 9071", "list"})
+	wantCalls(t, p.nicCalls(), []string{"list", "detach 9071", "list"})
 	if len(p.listed()) != 1 {
 		t.Errorf("the VM has %d interfaces, want the one that was not detached", len(p.listed()))
 	}
@@ -2126,7 +2135,7 @@ func TestLocalNetworkAttachmentDelete_ANotFoundPageIsNotAnInterfaceThatIsGone(t 
 
 	lnaOnly(t, resp.Diagnostics, []string{"Unable to Detach Local Network"}, nil)
 	wantInText(t, lnaDetail(t, resp.Diagnostics), "404")
-	wantCalls(t, p.nicCalls(), []string{"detach 9071"})
+	wantCalls(t, p.nicCalls(), []string{"list", "detach 9071", "list", "detach 9071", "list", "detach 9071", "list"})
 }
 
 func TestLocalNetworkAttachmentDelete_ADeleteTimeoutBoundsTheWaitForAVM(t *testing.T) {
@@ -2157,7 +2166,7 @@ func TestLocalNetworkAttachmentDelete_APrimaryInterfaceIsExplained(t *testing.T)
 	wantInText(t, lnaDetail(t, resp.Diagnostics), "[958]",
 		"Interface 9071 of VM 7 has become the VM's primary interface, for example because a default gateway was set on it, "+
 			"or its address was edited, in the console, and the platform does not detach a primary interface. To detach it, "+lnaMoveGateway)
-	wantCalls(t, p.nicCalls(), []string{"detach 9071"})
+	wantCalls(t, p.nicCalls(), []string{"list", "detach 9071"})
 }
 
 func TestLocalNetworkAttachmentDelete_ThePlatformCatchAllIsExplainedAndNotMadeWorse(t *testing.T) {
@@ -2188,12 +2197,13 @@ func TestLocalNetworkAttachmentDelete_ThePlatformCatchAllIsExplainedAndNotMadeWo
 	// "nothing was changed" and "still attached, safe to repeat".
 	wantNotInText(t, text, "nothing else was changed", "safe to repeat", "still attached", "queued removal", "whatever is done with this resource",
 		"The platform did not remove the interface")
-	wantCalls(t, p.nicCalls(), []string{"detach 9071"})
+	wantCalls(t, p.nicCalls(), []string{"list", "detach 9071", "list", "detach 9071", "list", "detach 9071", "list"})
 	wantCalls(t, p.vp.posts(), nil)
 }
 
 func TestLocalNetworkAttachmentDelete_AnyOtherRefusalIsShown(t *testing.T) {
 	c, p := newNICPanel(t, "RUNNING")
+	p.has(stored())
 	p.failEvery("detach", answer{http.StatusForbidden, 714})
 
 	resp := lnaDelete(t, c, lnaStored(t, nil))
@@ -2434,6 +2444,10 @@ func TestLocalNetworkAttachmentSchema_WhoSetsWhat(t *testing.T) {
 		// Not computed: a null in the configuration must stay a null in the plan, or every plan
 		// after an import, where nothing records the flag, would show it as a change.
 		{"reboot_after_attach", false, true, false},
+		{"allow_gateway_address", false, true, true},
+		{"configure_guest", false, true, true},
+		{"guest_configuration_applied", false, false, true},
+		{"status", false, false, true},
 		{"timeouts", false, true, false},
 	} {
 		a, ok := sch.Attributes[tc.name]
@@ -2446,7 +2460,144 @@ func TestLocalNetworkAttachmentSchema_WhoSetsWhat(t *testing.T) {
 				tc.name, a.IsRequired(), a.IsOptional(), a.IsComputed(), tc.required, tc.optional, tc.computed)
 		}
 	}
-	if len(sch.Attributes) != 9 {
-		t.Errorf("the schema has %d attributes, want the 9 above", len(sch.Attributes))
+	if len(sch.Attributes) != 13 {
+		t.Errorf("the schema has %d attributes, want the 13 above", len(sch.Attributes))
 	}
+}
+
+// Versioned fixture exposes a metadata reservation separately from its submission.
+// Legacy helpers retain their user-visible operation log; strict physical replay
+// counters and ACK-loss cases are covered by the dedicated protocol fixture.
+func (p *nicPanel) serveProtocol(t *testing.T, w http.ResponseWriter, r *http.Request) {
+	base := vmPanelBase + "/local-network-attachments"
+	suffix := strings.TrimPrefix(r.URL.Path, base)
+	if suffix == "/capabilities" {
+		p.vp.ok(w, map[string]any{"contract": client.LocalNetworkAttachmentContract, "reserveBeforeSubmit": true, "recoverableSubmission": true, "strictInterfaceIdentity": true})
+		return
+	}
+	if strings.HasSuffix(suffix, "/submit") {
+		id, err := strconv.ParseInt(strings.TrimSuffix(strings.TrimPrefix(suffix, "/"), "/submit"), 10, 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p.mu.Lock()
+		if p.protocol == nil {
+			p.protocol = map[int64]string{}
+		}
+		p.protocol[id] = "SUCCESS"
+		p.mu.Unlock()
+		p.protocolView(w, id, false)
+		return
+	}
+	clone := r.Clone(r.Context())
+	u := *r.URL
+	clone.URL = &u
+	record := httptest.NewRecorder()
+	if suffix == "/reservations" && r.Method == "POST" {
+		clone.URL.Path = lnaNICBase
+		p.srv.Config.Handler.ServeHTTP(record, clone)
+		if record.Code >= 300 {
+			for k, v := range record.Header() {
+				w.Header()[k] = v
+			}
+			w.WriteHeader(record.Code)
+			_, _ = w.Write(record.Body.Bytes())
+			return
+		}
+		if record.Body.Len() == 0 && r.Context().Err() != nil {
+			return
+		}
+		var env struct {
+			Data map[string]any `json:"data"`
+		}
+		if err := json.Unmarshal(record.Body.Bytes(), &env); err != nil {
+			t.Fatal(err)
+		}
+		rawId, ok := env.Data["id"].(float64)
+		if !ok {
+			t.Fatalf("missing typed canonical interface id: %+v", env.Data)
+		}
+		id := int64(rawId)
+		p.mu.Lock()
+		if p.protocol == nil {
+			p.protocol = map[int64]string{}
+		}
+		p.protocol[id] = "RESERVED"
+		if p.restart == nil {
+			p.restart = map[int64]bool{}
+		}
+		p.restart[id], _ = env.Data["requiresRestart"].(bool)
+		p.mu.Unlock()
+		p.protocolView(w, id, false)
+		return
+	}
+	id, err := strconv.ParseInt(strings.TrimPrefix(suffix, "/"), 10, 64)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method == "DELETE" {
+		clone.URL.Path = lnaNICBase + "/" + strconv.FormatInt(id, 10)
+		p.srv.Config.Handler.ServeHTTP(record, clone)
+		if record.Code >= 300 {
+			for k, v := range record.Header() {
+				w.Header()[k] = v
+			}
+			w.WriteHeader(record.Code)
+			_, _ = w.Write(record.Body.Bytes())
+			return
+		}
+		p.protocolView(w, id, true)
+		return
+	}
+	// Use the real fixture list path to preserve scope/error/timeout behavior.
+	clone.URL.Path = lnaNICBase
+	clone.Method = "GET"
+	p.srv.Config.Handler.ServeHTTP(record, clone)
+	if record.Code >= 300 {
+		for k, v := range record.Header() {
+			w.Header()[k] = v
+		}
+		w.WriteHeader(record.Code)
+		_, _ = w.Write(record.Body.Bytes())
+		return
+	}
+	p.protocolView(w, id, false)
+}
+func (p *nicPanel) protocolView(w http.ResponseWriter, id int64, deleted bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var nic *client.VmLocalNetwork
+	for i := range p.nics {
+		if p.nics[i].ID == id {
+			copiedNic := p.nics[i]
+			nic = &copiedNic
+			break
+		}
+	}
+	network := int64(lnaNetworkID)
+	status := "DELETED"
+	operation := "DETACH_LOCAL_NIC"
+	exists := nic != nil && !deleted
+	value := map[string]any{"contract": client.LocalNetworkAttachmentContract, "id": id, "vmId": int64(vmPanelVMID), "networkId": network, "status": status, "operation": operation, "exists": exists, "canRelease": false, "primary": false, "requiresRestart": false, "requiresGuestConfiguration": p.noCloudInit}
+	if exists {
+		status = "SUCCESS"
+		if p.protocol[id] != "" {
+			status = p.protocol[id]
+		}
+		value["status"] = status
+		value["operation"] = "ATTACH_LOCAL_NIC"
+		value["networkId"] = nic.NetworkID
+		value["ip"] = nic.IP
+		value["mac"] = nic.MAC
+		value["gateway"] = nic.Gateway
+		value["networkName"] = nic.NetworkName
+		value["primary"] = nic.Primary
+		value["requiresRestart"] = p.restart[id]
+		if status == "SUCCESS" {
+			value["netIndex"] = 1
+			value["pveFullName"] = "net1"
+		}
+	}
+	p.vp.ok(w, value)
 }

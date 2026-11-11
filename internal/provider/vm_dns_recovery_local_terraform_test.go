@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"terraform-provider-prodata/internal/client"
+	"terraform-provider-prodata/internal/testutil"
 	"testing"
 )
 
@@ -26,12 +28,14 @@ func TestVmDNSLocalTerraformCreationRecovery(t *testing.T) {
 	vm := map[string]any{"id": 7, "name": "test-vm", "status": "STOPPED", "cpuCores": 2,
 		"ram": 4, "diskSize": 20, "diskType": "SSD", "localNetworkId": 42, "imageId": 1,
 		"privateIp": "192.0.2.10"}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(testutil.GatewayJournal(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		defer mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		answer := func(v any) { _ = json.NewEncoder(w).Encode(map[string]any{"success": true, "data": v}) }
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/panel-main/api/v2/vms/7/power-operations/capabilities":
+			answer(map[string]any{"contract": client.VmPowerOperationContract, "callerUuid": true, "claimBeforeWrite": true, "readNeverActivates": true, "resolveTombstone": true, "recoverablePowerChildren": true, "stopCheckpoint": true, "supportedActions": []string{"START", "REBOOT", "RESET", "RESUME", "STOP", "SHUTDOWN"}})
 		case r.Method == http.MethodPost && r.URL.Path == "/panel-main/api/v2/vms":
 			creates++
 			answer(vm)
@@ -114,7 +118,7 @@ func TestVmDNSLocalTerraformCreationRecovery(t *testing.T) {
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.String())
 			http.NotFound(w, r)
 		}
-	}))
+	})))
 	t.Cleanup(server.Close)
 
 	dir := t.TempDir()

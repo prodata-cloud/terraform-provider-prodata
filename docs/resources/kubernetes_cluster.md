@@ -11,6 +11,10 @@ Manages a ProData Managed Kubernetes cluster's **control plane**. Worker capacit
 
 Cluster creation is asynchronous; `terraform apply` blocks until the cluster reaches `SUCCESS` (with a bounded grace period for the lazily-fetched kubeconfig) or the create timeout elapses. If the kubeconfig still lags after the grace, the apply finishes with a warning and `terraform refresh` populates it. (With `exclude_credentials_from_state` set there is nothing to populate: the warning says so, and the ephemeral resource fails until the kubeconfig is available.)
 
+Creation requires the matching `cluster-creation-v1` API. The provider checkpoints `request_uuid` before reserving the canonical cluster and records its ID before submission. Lost acknowledgements recover that exact request; an existing name is never adopted. Read observes a pending request without activating it. Destroy first resolves the original creation, releases an unsubmitted attempt only with positive cancellation proof, and otherwise uses the owned canonical cluster's durable teardown. Older servers fail before a legacy create or delete mutation.
+
+Deletion completes only when the matching backend confirms durable teardown for this exact cluster. A missing response, an unavailable API, or an older unverified `DELETED` status retains the cluster in Terraform state. Retry after the known deletion operation is reconciled; the provider does not infer successful teardown from a proxy error.
+
 ~> **Note:** The cluster's credentials — `kube_config` and, when the platform generated the nodes' SSH key pair, `private_key_encoded` — are stored in Terraform state by default. Marking them `Sensitive` only hides them from the console; the state file holds them in plaintext. To keep them out, set [`exclude_credentials_from_state`](#credentials-in-terraform-state) and read the kubeconfig with the [`prodata_kubernetes_kubeconfig`](../ephemeral-resources/kubernetes_kubeconfig.md) ephemeral resource.
 
 ~> **Note:** The cluster is created in the region the API resolves for the request. If your account spans multiple regions, set the region through the provider configuration (or `PRODATA_REGION`) to be sure the cluster lands where you intend. `region` and `project_tag` are fixed at create time — changing either forces a new resource.
@@ -21,10 +25,16 @@ Cluster creation is asynchronous; `terraform apply` blocks until the cluster rea
 
 - The network check needs the network to be readable in the cluster's region and project. If it cannot be read, the check is skipped with a warning.
 - If `network_id` is not known at plan time (for example the network is created in the same apply), the check runs during apply, after the network exists and before the cluster is created.
-- An in-place update or a plain `terraform destroy` of an existing cluster does not run the network check while `node_ip_range` and `network_id` are unchanged. A **replacement** — for any reason, such as a changed `name`, `pod_cidr`, flavor or region, or `-replace` — creates a new cluster and is checked like a create; during such a replacement the plan shows only the errors, and warnings appear during apply. If a replacement-forcing change is pending in the configuration, `terraform destroy` runs the same check; use `terraform destroy -refresh=false` or revert that change.
+- An in-place update or a plain `terraform destroy` of an existing cluster does not run the network check while `node_ip_range` and `network_id` are unchanged. A **replacement** — for any reason, such as a changed `name`, `pod_cidr`, or region, or `-replace` — creates a new cluster and is checked like a create; during such a replacement the plan shows only the errors, and warnings appear during apply. If a replacement-forcing change is pending in the configuration, `terraform destroy` runs the same check; use `terraform destroy -refresh=false` or revert that change.
 - Clusters created in the web console often hold a range that starts at the network address or contains the gateway. They keep working, but to replace such a cluster you must give it a valid `node_ip_range`.
 - Omitting `node_ip_range` produces a warning on create, because the platform sizes the automatic range from the capacity known at creation time and never widens it.
 - To keep an existing cluster whose stored `node_ip_range` no longer passes validation, remove the attribute from the configuration: the stored value stays in state and nothing is replaced. Editing the value forces a new cluster.
+
+## Resizing the control plane
+
+Change `master_flavor_id` or `control_plane_size` to roll the control-plane machines within the existing cluster. The chosen flavor must match the cluster's region and HA mode. Disk shrinking is refused. The platform checks quota for the larger configuration plus one temporary surge machine and requires one spare address in the cluster node IP range. The Kubernetes control-plane controller manages the replacement and quorum checks; Terraform waits for the current generation, all updated/ready replicas, and the control plane's readiness flag.
+
+This update requires both a panel and Kubernetes service supporting the versioned hardware API. Older servers return an error and the cluster stays in state. Allow enough time in `timeouts.update` for a control-plane rollout. The API endpoint and credentials are refreshed after completion.
 
 ## Example Usage
 
@@ -172,8 +182,8 @@ Here the cluster is created in the same configuration, so `cluster_id` is not kn
 
 > Set **exactly one** of `control_plane_size` or `master_flavor_id` to size the control plane.
 
-- `control_plane_size` (String) Control-plane size class — `small`, `medium`, or `large`. A convenience alias that selects the master flavor for you based on `high_availability`: the provider maps the size onto the region's master-flavor catalog by capacity (smallest → `small`). Mutually exclusive with `master_flavor_id`. Changing it forces a new resource.
-- `master_flavor_id` (Number) Master node configuration (flavor) ID, from the [`prodata_kubernetes_flavors`](../data-sources/kubernetes_flavors.md) data source. Minimum `1`. Mutually exclusive with `control_plane_size`; when you set `control_plane_size` instead, this is resolved for you and exported as a computed value. Changing it forces a new resource: resizing the control plane in place is not yet supported, so a different master flavor recreates the cluster.
+- `control_plane_size` (String) Control-plane size class — `small`, `medium`, or `large`. A convenience alias that selects the master flavor for you based on `high_availability`: the provider maps the size onto the region's master-flavor catalog by capacity (smallest → `small`). Mutually exclusive with `master_flavor_id`. Changing it rolls the control-plane machines while preserving the cluster ID.
+- `master_flavor_id` (Number) Master node configuration (flavor) ID, from the [`prodata_kubernetes_flavors`](../data-sources/kubernetes_flavors.md) data source. Minimum `1`. Mutually exclusive with `control_plane_size`; when you set `control_plane_size` instead, this is resolved for you and exported as a computed value. Changing it rolls the control-plane machines while preserving the cluster ID; shrinking control-plane disks is refused.
 - `region` (String) Region ID. If omitted, uses the provider's default. See the note above about how the create region is resolved. Changing this forces a new resource.
 - `project_tag` (String) Project tag the cluster belongs to. If omitted, uses the provider default. Changing this forces a new resource.
 - `high_availability` (Boolean) Highly-available control plane (multiple master nodes). Defaults to `false`. Changing it forces a new resource.
@@ -197,6 +207,7 @@ Here the cluster is created in the same configuration, so `cluster_id` is not kn
 - `api_endpoint` (String) Kubernetes API server endpoint.
 - `ssh_key_encoded` (String) Base64-encoded SSH public key registered on the nodes. It is the public half, not a secret.
 - `private_key_encoded` (String, Sensitive) Base64-encoded SSH private key for the nodes. It exists only when the platform generated the key pair — `ssh_access_enabled` is `true` and `public_key` is not set — and is null when you supplied your own `public_key`. Always null when `exclude_credentials_from_state` is `true`.
+- `request_uuid` (String) Durable creation request UUID. Retained when the canonical ID has not yet been confirmed; available after interrupted or failed creation for exact recovery and cancellation. Existing correlated clusters discover it during import/refresh.
 - `status` (String) Lifecycle status: `NEW`, `PROCESSING`, `SUCCESS`, `FAIL`, `DELETING`, or `DELETED`. `DELETING` is a lingering state while the cluster's asynchronous teardown runs; on a teardown timeout the cluster goes `FAIL` and keeps reserving its name until it is deleted.
 - `blocked` (Boolean) True while a mutating operation is in flight on the cluster.
 - `node_pool_count` (Number) Number of node pools on the cluster (master + worker pools). Managed workers are separate `prodata_kubernetes_node_pool` resources.

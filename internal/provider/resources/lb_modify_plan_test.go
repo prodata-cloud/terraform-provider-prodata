@@ -20,6 +20,7 @@ var (
 	lbGroupType = tftypes.Object{AttributeTypes: map[string]tftypes.Type{
 		"vm_ids":       lbVMIDsType,
 		"node_pool_id": tftypes.Number,
+		"asg_id":       tftypes.Number,
 	}}
 )
 
@@ -51,6 +52,7 @@ func (g lbGroup) raw() tftypes.Value {
 	return tftypes.NewValue(lbGroupType, map[string]tftypes.Value{
 		"vm_ids":       vms,
 		"node_pool_id": poolIDCfg(g.pool),
+		"asg_id":       tftypes.NewValue(tftypes.Number, nil),
 	})
 }
 

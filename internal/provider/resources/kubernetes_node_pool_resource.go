@@ -33,10 +33,11 @@ var (
 )
 
 // K8sNodePoolResource implements prodata_kubernetes_node_pool — an additional
-// worker node pool attached to a prodata_kubernetes_cluster. The cluster's inline
-// default pool is owned by prodata_kubernetes_cluster, not this resource.
+// worker node pool attached to a prodata_kubernetes_cluster. The cluster owns its
+// control plane; every worker pool, including the first, uses this resource.
 type K8sNodePoolResource struct {
-	c *client.Client
+	c                     *client.Client
+	lifecyclePollInterval time.Duration
 }
 
 // K8sNodePoolModel mirrors the prodata_kubernetes_node_pool schema. It carries the
@@ -44,16 +45,18 @@ type K8sNodePoolResource struct {
 // (cluster_id) needed to address a pool on its own. Autoscaling reuses the shared
 // K8sAutoscalingModel: its mere presence means "autoscaling enabled".
 type K8sNodePoolModel struct {
-	ID          types.Int64          `tfsdk:"id"`
-	ClusterID   types.Int64          `tfsdk:"cluster_id"`
-	Region      types.String         `tfsdk:"region"`
-	ProjectTag  types.String         `tfsdk:"project_tag"`
-	Name        types.String         `tfsdk:"name"`
-	VCPU        types.Int64          `tfsdk:"vcpu"`
-	RAM         types.Int64          `tfsdk:"ram"`
-	DiskSize    types.Int64          `tfsdk:"disk_size"`
-	NodeCount   types.Int64          `tfsdk:"node_count"`
-	Autoscaling *K8sAutoscalingModel `tfsdk:"autoscaling"`
+	ID                  types.Int64          `tfsdk:"id"`
+	RequestUUID         types.String         `tfsdk:"request_uuid"`
+	DeletionRequestUUID types.String         `tfsdk:"deletion_request_uuid"`
+	ClusterID           types.Int64          `tfsdk:"cluster_id"`
+	Region              types.String         `tfsdk:"region"`
+	ProjectTag          types.String         `tfsdk:"project_tag"`
+	Name                types.String         `tfsdk:"name"`
+	VCPU                types.Int64          `tfsdk:"vcpu"`
+	RAM                 types.Int64          `tfsdk:"ram"`
+	DiskSize            types.Int64          `tfsdk:"disk_size"`
+	NodeCount           types.Int64          `tfsdk:"node_count"`
+	Autoscaling         *K8sAutoscalingModel `tfsdk:"autoscaling"`
 
 	// Computed, server-owned.
 	Status     types.String   `tfsdk:"status"`
@@ -68,12 +71,6 @@ const (
 	k8sPoolDefaultCreateTime = 30 * time.Minute
 	k8sPoolDefaultUpdateTime = 30 * time.Minute
 	k8sPoolDefaultDeleteTime = 10 * time.Minute
-
-	// k8sPoolDiscoveryAttempts bounds how many times Create re-lists the cluster's
-	// pools to find the id of the just-created pool. createNewNodePool returns no
-	// id (ADR-K6), so the id is recovered via an id-set diff; the row is persisted
-	// synchronously by the backend, so it is normally found on the first attempt.
-	k8sPoolDiscoveryAttempts = 5
 )
 
 func NewK8sNodePoolResource() resource.Resource {
@@ -86,13 +83,15 @@ func (r *K8sNodePoolResource) Metadata(_ context.Context, req resource.MetadataR
 
 func (r *K8sNodePoolResource) Schema(ctx context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		MarkdownDescription: "Manages an additional worker node pool on a ProData Managed Kubernetes cluster. " +
-			"The cluster's first (default) worker pool is managed inline by the `prodata_kubernetes_cluster` " +
-			"resource; use this resource for every pool beyond it. Pool creation and scaling are asynchronous; " +
+		MarkdownDescription: "Manages a worker node pool on a ProData Managed Kubernetes cluster. " +
+			"The cluster is control-plane-only; use this resource for every worker pool, including the first. " +
+			"Pool creation and scaling are asynchronous; " +
 			"`terraform apply` blocks until the pool converges or the timeout elapses.",
 		Attributes: map[string]schema.Attribute{
+			"request_uuid":          schema.StringAttribute{Computed: true, MarkdownDescription: "Durable creation request UUID, retained when the canonical pool ID has not yet been confirmed.", PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()}},
+			"deletion_request_uuid": schema.StringAttribute{Computed: true, MarkdownDescription: "Durable deletion request UUID while an identity-bound destroy attempt is pending.", PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()}},
 			"id": schema.Int64Attribute{
-				MarkdownDescription: "Node pool ID, assigned by the panel and discovered after creation.",
+				MarkdownDescription: "Canonical node pool ID, committed by the panel before physical submission.",
 				Computed:            true,
 				PlanModifiers:       []planmodifier.Int64{int64planmodifier.UseStateForUnknown()},
 			},
@@ -138,21 +137,18 @@ func (r *K8sNodePoolResource) Schema(ctx context.Context, _ resource.SchemaReque
 				},
 			},
 			"vcpu": schema.Int64Attribute{
-				MarkdownDescription: "vCPUs per worker node. Changing it forces a new resource.",
+				MarkdownDescription: "vCPUs per worker node. Updated by rolling the workers while preserving the pool ID.",
 				Required:            true,
-				PlanModifiers:       []planmodifier.Int64{int64planmodifier.RequiresReplace()},
 				Validators:          []validator.Int64{int64validator.AtLeast(1)},
 			},
 			"ram": schema.Int64Attribute{
-				MarkdownDescription: "RAM per worker node, in GB. Changing it forces a new resource.",
+				MarkdownDescription: "RAM per worker node, in GB. Updated by rolling the workers while preserving the pool ID.",
 				Required:            true,
-				PlanModifiers:       []planmodifier.Int64{int64planmodifier.RequiresReplace()},
 				Validators:          []validator.Int64{int64validator.AtLeast(1)},
 			},
 			"disk_size": schema.Int64Attribute{
-				MarkdownDescription: "Disk size per worker node, in GB. Changing it forces a new resource.",
+				MarkdownDescription: "Disk size per worker node, in GB. Increases roll the workers while preserving the pool ID. Shrinking is not supported.",
 				Required:            true,
-				PlanModifiers:       []planmodifier.Int64{int64planmodifier.RequiresReplace()},
 				Validators:          []validator.Int64{int64validator.AtLeast(1)},
 			},
 			"node_count": schema.Int64Attribute{
@@ -183,9 +179,8 @@ func (r *K8sNodePoolResource) Schema(ctx context.Context, _ resource.SchemaReque
 
 			// ---- computed, server-owned ----
 			"status": schema.StringAttribute{
-				MarkdownDescription: "Lifecycle status: `PROCESSING` while a change is rolling out, `SUCCESS` when " +
-					"converged.",
-				Computed: true,
+				MarkdownDescription: "Lifecycle status. Creation and deletion keep their durable operation identity while pending or unverified; `SUCCESS` means converged.",
+				Computed:            true,
 			},
 			"node_subnet": schema.Int64Attribute{
 				MarkdownDescription: "Node subnet prefix length assigned to the pool by the backend.",
@@ -272,8 +267,7 @@ func (r *K8sNodePoolResource) ValidateConfig(ctx context.Context, req resource.V
 // (node_count or autoscaling) rolls the pool through PROCESSING, so Terraform's
 // "computed output must be consistent" check does not fail after apply (ADR-K3).
 // A standalone pool needs none of the cluster's kubeconfig/credential blanking,
-// and ADR-K8's out-of-band-delete handling is cluster-only (a deleted pool simply
-// reads back not-found → RemoveResource).
+// Durable operation evidence is handled independently of volatile field planning.
 func (r *K8sNodePoolResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
 	// Destroy plan — nothing to do.
 	if req.Plan.Raw.IsNull() {
@@ -315,7 +309,14 @@ func (r *K8sNodePoolResource) ModifyPlan(ctx context.Context, req resource.Modif
 		return
 	}
 
-	if !nodePoolChanged(&state, &plan) {
+	if !plan.DiskSize.IsUnknown() && !state.DiskSize.IsNull() && plan.DiskSize.ValueInt64() < state.DiskSize.ValueInt64() {
+		resp.Diagnostics.AddAttributeError(path.Root("disk_size"), "Worker disk shrinking is not supported", "Increase disk_size, or create a separate pool and migrate workloads explicitly.")
+		return
+	}
+	if nodePoolHardwareChanged(&state, &plan) {
+		resp.Diagnostics.AddWarning("Worker machines will be replaced gradually", "The node pool keeps its ID. Worker machines are drained and replaced one at a time. A pool with one worker has no available worker during its replacement; arrange application capacity before applying. Local ephemeral data on their boot disks is lost. Application data must use storage with suitable retention. The update requires a compatible panel API and Kubernetes service.")
+	}
+	if !nodePoolChanged(&state, &plan) && !nodePoolHardwareChanged(&state, &plan) {
 		return
 	}
 
@@ -354,137 +355,7 @@ func nodePoolChanged(state, plan *K8sNodePoolModel) bool {
 // ---- Create ----
 
 func (r *K8sNodePoolResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
-	var plan K8sNodePoolModel
-	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
-	if resp.Diagnostics.HasError() {
-		return
-	}
-
-	region, projectTag := r.resolveScope(plan.Region, plan.ProjectTag)
-	opts := &client.RequestOpts{Region: region, ProjectTag: projectTag}
-	clusterID := plan.ClusterID.ValueInt64()
-
-	createTimeout, diags := plan.Timeouts.Create(ctx, k8sPoolDefaultCreateTime)
-	resp.Diagnostics.Append(diags...)
-	if resp.Diagnostics.HasError() {
-		return
-	}
-	ctx, cancel := context.WithTimeout(ctx, createTimeout)
-	defer cancel()
-
-	if err := requireClusterInProject(ctx, r.c, clusterID, opts); err != nil {
-		resp.Diagnostics.AddError("Unable to verify node pool project", err.Error())
-		return
-	}
-
-	// ADR-K7: serialize per-cluster mutations within this process and refuse to act
-	// on a FAILed or in-flight (blocked) cluster. A pool create mutates the parent
-	// cluster, so it takes the same lock keyed by cluster id.
-	unlock := lockCluster(clusterID)
-	defer unlock()
-	if err := r.ensureClusterMutable(ctx, clusterID, opts); err != nil {
-		resp.Diagnostics.AddError("Cluster is not in a modifiable state", client.KuberErrorDetail(err))
-		return
-	}
-
-	// ADR-K6: snapshot the existing pool ids and adopt-or-error on a name collision.
-	// A lost create response (e.g. a 429 on read-back) must not orphan a pool; the
-	// backend (G9) also rejects duplicate names, but checking up front gives a clear
-	// "import it" message instead of a generic conflict.
-	before, err := r.c.ListNodePools(ctx, clusterID, opts)
-	if err != nil {
-		resp.Diagnostics.AddError("Unable to verify node pool name availability", client.KuberErrorDetail(err))
-		return
-	}
-	want := strings.ToLower(plan.Name.ValueString())
-	beforeIDs := make(map[int64]bool, len(before))
-	for i := range before {
-		beforeIDs[before[i].ID] = true
-		if strings.ToLower(before[i].Name) == want {
-			resp.Diagnostics.AddError(
-				"A node pool with this name already exists",
-				fmt.Sprintf("Node pool %q already exists (id %d) in cluster %d. Import it "+
-					"(terraform import) or choose a different name.", plan.Name.ValueString(), before[i].ID, clusterID),
-			)
-			return
-		}
-	}
-
-	autoscale := plan.Autoscaling != nil
-	wire := client.CreateNodePoolRequest{
-		ClusterID:        clusterID,
-		NodePoolName:     plan.Name.ValueString(),
-		WorkerCPU:        int(plan.VCPU.ValueInt64()),
-		WorkerRAM:        int(plan.RAM.ValueInt64()),
-		WorkerDiskSize:   int(plan.DiskSize.ValueInt64()),
-		AutoScaleEnabled: autoscale,
-	}
-	if autoscale {
-		wire.MinNodes = int(plan.Autoscaling.MinNodes.ValueInt64())
-		wire.MaxNodes = int(plan.Autoscaling.MaxNodes.ValueInt64())
-		wire.WorkerReplicas = wire.MinNodes // backend forces replicas=minNodes for autoscale
-	} else {
-		wire.WorkerReplicas = int(plan.NodeCount.ValueInt64())
-	}
-
-	tflog.Debug(ctx, "Creating Kubernetes node pool", map[string]any{
-		"cluster_id": clusterID, "name": wire.NodePoolName, "autoscale": autoscale,
-	})
-
-	// RetryOnBusy covers transient 503 (capacity); it deliberately does not retry
-	// 627. createNewNodePool returns no id, so success is signalled only by a nil
-	// error; the id is recovered below via an id-set diff.
-	if _, err := client.RetryOnBusy(ctx, client.RetryTimeoutLong, func() (struct{}, error) {
-		return struct{}{}, r.c.CreateNodePool(ctx, wire, opts)
-	}); err != nil {
-		resp.Diagnostics.AddError("Unable to create node pool", client.KuberErrorDetail(err))
-		return
-	}
-
-	// ADR-K6: recover the new pool (createNewNodePool returns no id). The discovered
-	// pool also serves as the always-present fallback for state below — unlike the
-	// cluster resource there is no create-response object to fall back on, so without
-	// it a read-back miss would persist unknown Computed values.
-	discovered, err := r.resolveNewPoolID(ctx, clusterID, want, beforeIDs, opts)
-	if err != nil {
-		resp.Diagnostics.AddError("Unable to resolve the created node pool", client.KuberErrorDetail(err))
-		return
-	}
-	poolID := discovered.ID
-
-	// Save the id to state immediately (before the long poll) so a mid-poll failure
-	// leaves an importable/destroyable resource rather than an orphan (ADR-K6).
-	plan.ID = types.Int64Value(poolID)
-	plan.Region = types.StringValue(region)
-	plan.ProjectTag = types.StringValue(projectTag)
-	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
-	if resp.Diagnostics.HasError() {
-		return
-	}
-
-	converged, waitErr := r.waitForPoolReady(ctx, poolID, &plan, opts)
-
-	// Always apply a concrete pool snapshot so no Computed field (status, node_subnet,
-	// and the autoscaler-owned node_count) is left unknown in state — even on the
-	// error/taint path. Prefer a fresh read, then the converged snapshot, then the
-	// pool discovered right after create.
-	final := discovered
-	if converged != nil {
-		final = converged
-	}
-	if fresh, ferr := r.c.GetNodePool(ctx, poolID, opts); ferr == nil && fresh != nil {
-		final = fresh
-	}
-	r.applyServerState(&plan, final, region, projectTag, false)
-	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
-
-	if waitErr != nil {
-		resp.Diagnostics.AddError(
-			"Node pool did not reach a ready state",
-			fmt.Sprintf("node pool %d (cluster %d): %s", poolID, clusterID, waitErr.Error()),
-		)
-		return
-	}
+	r.createDurablePool(ctx, req, resp)
 }
 
 // ---- Read ----
@@ -496,30 +367,68 @@ func (r *K8sNodePoolResource) Read(ctx context.Context, req resource.ReadRequest
 		return
 	}
 
+	resp.State = req.State
 	opts := r.optsFromState(data.Region, data.ProjectTag)
+	if r.readPoolOperationState(ctx, &data, opts, resp) {
+		return
+	}
+	if data.ID.ValueInt64() < 1 {
+		resp.Diagnostics.AddWarning("Node pool identity remains unverified", "The request UUID has no confirmed canonical pool ID; state is retained.")
+		return
+	}
 	id := data.ID.ValueInt64()
 
 	pool, err := r.c.GetNodePool(ctx, id, opts)
 	if err != nil {
-		if client.IsKuberNotFound(err) {
-			tflog.Warn(ctx, "Node pool not found, removing from state", map[string]any{"id": id})
-			resp.State.RemoveResource(ctx)
-			return
-		}
-		resp.Diagnostics.AddError("Unable to read node pool", client.KuberErrorDetail(err))
+		nodePoolReadFailure(resp, "Node pool readback unverified", err)
 		return
 	}
-	// Pools hard-delete (no sticky DELETED status, unlike clusters), but guard
-	// defensively so a DELETED row is treated as gone rather than written to state.
+	if pool.ID != id || pool.ClusterID != data.ClusterID.ValueInt64() {
+		resp.Diagnostics.AddWarning("Node pool identity unverified", "Canonical readback returned another pool or cluster; state is retained.")
+		return
+	}
 	if pool.Status == client.ClusterStatusDeleted {
-		tflog.Warn(ctx, "Node pool reported DELETED, removing from state", map[string]any{"id": id})
-		resp.State.RemoveResource(ctx)
+		resp.Diagnostics.AddWarning("Node pool absence unverified", "A legacy DELETED row is not UID-bound physical absence proof; existing identity is retained.")
 		return
 	}
 
 	region := valueOrDefault(data.Region, r.c.Region)
 	projectTag := valueOrDefault(data.ProjectTag, r.c.ProjectTag)
+	previous := data
 	r.applyServerState(&data, pool, region, projectTag, true)
+	if hardware, err := r.c.NodePoolHardware(ctx, id, opts); err == nil {
+		data.VCPU = types.Int64Value(hardware.VCPU)
+		data.RAM = types.Int64Value(hardware.RAM)
+		data.DiskSize = types.Int64Value(hardware.DiskSize)
+		if !*hardware.Ready && pool.Status != client.ClusterStatusFail && pool.Status != client.ClusterStatusDeleting {
+			data.Status = types.StringValue("PROCESSING")
+		}
+	} else {
+		// A failed CAPI read does not revoke ownership or prevent deleting a broken pool.
+		// Retain previously verified sizing rather than publishing the panel's desired sizing.
+		if !previous.VCPU.IsNull() && !previous.VCPU.IsUnknown() {
+			data.VCPU = previous.VCPU
+		}
+		if !previous.RAM.IsNull() && !previous.RAM.IsUnknown() {
+			data.RAM = previous.RAM
+		}
+		if !previous.DiskSize.IsNull() && !previous.DiskSize.IsUnknown() {
+			data.DiskSize = previous.DiskSize
+		}
+		resp.Diagnostics.AddWarning("Worker hardware could not be verified", err.Error()+". The pool identity and prior sizing are retained; deletion remains available. Hardware updates require the matching panel and Kubernetes API.")
+	}
+	if pool.CreationRequestUUID != "" {
+		if data.RequestUUID.ValueString() != "" && data.RequestUUID.ValueString() != pool.CreationRequestUUID {
+			resp.Diagnostics.AddWarning("Node pool creation identity changed", "The prior operation UUID is retained; the API advertised another creation association.")
+			return
+		}
+		if data.RequestUUID.ValueString() == "" {
+			data.RequestUUID = types.StringValue(pool.CreationRequestUUID)
+			if r.readPoolOperationState(ctx, &data, opts, resp) {
+				return
+			}
+		}
+	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
 
@@ -533,6 +442,8 @@ func (r *K8sNodePoolResource) Update(ctx context.Context, req resource.UpdateReq
 		return
 	}
 
+	plan.RequestUUID = state.RequestUUID
+	plan.DeletionRequestUUID = state.DeletionRequestUUID
 	opts := r.optsFromState(state.Region, state.ProjectTag)
 	clusterID := state.ClusterID.ValueInt64()
 	poolID := state.ID.ValueInt64()
@@ -552,6 +463,13 @@ func (r *K8sNodePoolResource) Update(ctx context.Context, req resource.UpdateReq
 	if err := r.ensureClusterMutable(ctx, clusterID, opts); err != nil {
 		resp.Diagnostics.AddError("Cluster is not in a modifiable state", client.KuberErrorDetail(err))
 		return
+	}
+
+	if nodePoolHardwareChanged(&state, &plan) {
+		if err := r.resizePoolHardware(ctx, poolID, &state, &plan, opts); err != nil {
+			resp.Diagnostics.AddError("Unable to update worker hardware", err.Error())
+			return
+		}
 	}
 
 	changed, err := r.reconcilePool(ctx, clusterID, poolID, &state, &plan, opts)
@@ -590,6 +508,41 @@ func (r *K8sNodePoolResource) Update(ctx context.Context, req resource.UpdateReq
 		plan.NodeCount = state.NodeCount
 	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+}
+
+func nodePoolHardwareChanged(state, plan *K8sNodePoolModel) bool {
+	return !state.VCPU.Equal(plan.VCPU) || !state.RAM.Equal(plan.RAM) || !state.DiskSize.Equal(plan.DiskSize)
+}
+
+func (r *K8sNodePoolResource) resizePoolHardware(ctx context.Context, id int64, state, plan *K8sNodePoolModel, opts *client.RequestOpts) error {
+	if plan.VCPU.IsUnknown() || plan.RAM.IsUnknown() || plan.DiskSize.IsUnknown() || plan.VCPU.ValueInt64() < 1 || plan.RAM.ValueInt64() < 1 {
+		return fmt.Errorf("worker hardware must be known and positive before updating")
+	}
+	if plan.DiskSize.ValueInt64() < state.DiskSize.ValueInt64() {
+		return fmt.Errorf("shrinking worker disks is not supported")
+	}
+	order := client.NodePoolHardwareRequest{VCPU: plan.VCPU.ValueInt64(), RAM: plan.RAM.ValueInt64(), DiskSize: plan.DiskSize.ValueInt64()}
+	view, err := r.c.ResizeNodePoolHardware(ctx, id, order, opts)
+	if err != nil {
+		return err
+	}
+	for {
+		if view.VCPU != order.VCPU || view.RAM != order.RAM || view.DiskSize != order.DiskSize {
+			return fmt.Errorf("worker hardware readback does not match the requested configuration; refresh and retry")
+		}
+		if *view.Ready {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(k8sPollInterval):
+		}
+		view, err = r.c.NodePoolHardware(ctx, id, opts)
+		if err != nil {
+			return err
+		}
+	}
 }
 
 // reconcilePool applies node_count / autoscaling changes, choosing the right
@@ -645,84 +598,7 @@ func (r *K8sNodePoolResource) reconcilePool(ctx context.Context, clusterID, pool
 // ---- Delete ----
 
 func (r *K8sNodePoolResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
-	var data K8sNodePoolModel
-	resp.Diagnostics.Append(req.State.Get(ctx, &data)...)
-	if resp.Diagnostics.HasError() {
-		return
-	}
-
-	opts := r.optsFromState(data.Region, data.ProjectTag)
-	clusterID := data.ClusterID.ValueInt64()
-	id := data.ID.ValueInt64()
-
-	deleteTimeout, diags := data.Timeouts.Delete(ctx, k8sPoolDefaultDeleteTime)
-	resp.Diagnostics.Append(diags...)
-	if resp.Diagnostics.HasError() {
-		return
-	}
-	ctx, cancel := context.WithTimeout(ctx, deleteTimeout)
-	defer cancel()
-
-	unlock := lockCluster(clusterID)
-	defer unlock()
-
-	// ADR-K7: wait out an in-flight (blocked) parent cluster so the delete does not
-	// race a cluster mid-roll. Unlike Create/Update we do NOT refuse a FAILed cluster
-	// — a pool must stay deletable while tearing down a broken one.
-	if err := r.waitClusterDeletable(ctx, clusterID, opts); err != nil {
-		resp.Diagnostics.AddError("Cluster is not in a modifiable state", client.KuberErrorDetail(err))
-		return
-	}
-
-	if err := r.c.DeleteNodePool(ctx, id, opts); err != nil {
-		if client.IsKuberNotFound(err) {
-			return
-		}
-		// 756 (last worker pool) fires only on backends that still guard it; the new
-		// control-plane-only backend allows deleting the last pool. KuberErrorDetail
-		// maps 756 to a clear message for un-promoted prod, and the "Cannot delete
-		// master node pool" guard also surfaces here. The pool still exists, so do
-		// not remove state.
-		resp.Diagnostics.AddError("Unable to delete node pool", client.KuberErrorDetail(err))
-		return
-	}
-
-	// Confirm the pool is gone. deleteNodePool hard-deletes the row, so the pool
-	// disappears from the API (not-found); tolerate a few transient errors, then
-	// surface the real one instead of spinning to the timeout (ADR-K5).
-	var consecutiveErrs int
-	var lastErr error
-	for {
-		pool, err := r.c.GetNodePool(ctx, id, opts)
-		switch {
-		case err == nil:
-			consecutiveErrs = 0
-			if pool.Status == client.ClusterStatusDeleted {
-				return
-			}
-		case client.IsKuberNotFound(err):
-			return
-		default:
-			consecutiveErrs++
-			lastErr = err
-			if consecutiveErrs > k8sMaxConsecutiveErrs {
-				resp.Diagnostics.AddError("Unable to confirm node pool deletion",
-					fmt.Sprintf("node pool %d: %s", id, client.KuberErrorDetail(err)))
-				return
-			}
-		}
-		select {
-		case <-ctx.Done():
-			msg := ctx.Err().Error()
-			if lastErr != nil {
-				msg = fmt.Sprintf("%s (last error: %s)", msg, lastErr.Error())
-			}
-			resp.Diagnostics.AddError("Node pool did not finish deleting",
-				fmt.Sprintf("node pool %d: %s", id, msg))
-			return
-		case <-time.After(k8sPollInterval):
-		}
-	}
+	r.deleteDurablePool(ctx, req, resp)
 }
 
 // ---- ImportState ----
@@ -798,84 +674,6 @@ func (r *K8sNodePoolResource) ensureClusterMutable(ctx context.Context, clusterI
 		select {
 		case <-ctx.Done():
 			return fmt.Errorf("timed out waiting for cluster %d to become unblocked: %w", clusterID, ctx.Err())
-		case <-time.After(k8sPollInterval):
-		}
-	}
-}
-
-// waitClusterDeletable waits out an in-flight (blocked) parent cluster before a pool
-// delete (ADR-K7). Unlike ensureClusterMutable it does NOT refuse a FAILed cluster:
-// a pool must stay deletable while tearing down a broken cluster (and a FAILed
-// cluster stays blocked until MR-D, so waiting it out would otherwise hang). A
-// vanished parent means the pool is gone too, so it lets the delete proceed.
-func (r *K8sNodePoolResource) waitClusterDeletable(ctx context.Context, clusterID int64, opts *client.RequestOpts) error {
-	for {
-		cl, err := r.c.GetCluster(ctx, clusterID, opts)
-		if err != nil {
-			if client.IsKuberNotFound(err) {
-				return nil
-			}
-			return err
-		}
-		if cl.Status == client.ClusterStatusFail || !cl.Blocked {
-			return nil
-		}
-		tflog.Debug(ctx, "Cluster is blocked by an in-flight operation, waiting before pool delete", map[string]any{"id": clusterID})
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("timed out waiting for cluster %d to become unblocked: %w", clusterID, ctx.Err())
-		case <-time.After(k8sPollInterval):
-		}
-	}
-}
-
-// resolveNewPoolID recovers the id of the pool just created in clusterID, given the
-// set of pool ids that existed before the create (ADR-K6). It prefers a unique new
-// id; on ambiguity it disambiguates by the (lowercased) pool name and errors loudly
-// if more than one new pool carries that name. The backend persists the row
-// synchronously, so the pool is normally present on the first attempt; a few bounded
-// retries cover replica lag.
-func (r *K8sNodePoolResource) resolveNewPoolID(ctx context.Context, clusterID int64, wantName string, beforeIDs map[int64]bool, opts *client.RequestOpts) (*client.NodePool, error) {
-	var consecutiveErrs, emptyAttempts int
-	for {
-		pools, err := r.c.ListNodePools(ctx, clusterID, opts)
-		if err != nil {
-			// The create already succeeded; tolerate a few transient list errors
-			// rather than aborting and orphaning the pool (ADR-K5).
-			consecutiveErrs++
-			if consecutiveErrs > k8sMaxConsecutiveErrs {
-				return nil, fmt.Errorf("could not list node pools to resolve the created pool: %w", err)
-			}
-		} else {
-			consecutiveErrs = 0
-			// Match strictly by name (the backend lowercases names and G9 enforces
-			// per-cluster uniqueness); never adopt an unrelated new pool on a name
-			// mismatch, which could bind state to a pool created out-of-band.
-			var nameMatches []*client.NodePool
-			for i := range pools {
-				if beforeIDs[pools[i].ID] {
-					continue
-				}
-				if strings.ToLower(pools[i].Name) == wantName {
-					nameMatches = append(nameMatches, &pools[i])
-				}
-			}
-			switch {
-			case len(nameMatches) == 1:
-				return nameMatches[0], nil
-			case len(nameMatches) > 1:
-				return nil, fmt.Errorf("ambiguous node pool discovery: %d new pools named %q in cluster %d",
-					len(nameMatches), wantName, clusterID)
-			}
-			emptyAttempts++
-			if emptyAttempts >= k8sPoolDiscoveryAttempts {
-				return nil, fmt.Errorf("could not resolve the id of node pool %q in cluster %d after creation; "+
-					"run `terraform import` once it appears in the panel", wantName, clusterID)
-			}
-		}
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
 		case <-time.After(k8sPollInterval):
 		}
 	}

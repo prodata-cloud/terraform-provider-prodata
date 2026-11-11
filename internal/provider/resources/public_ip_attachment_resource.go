@@ -161,6 +161,19 @@ func (r *PublicIPAttachmentResource) Create(ctx context.Context, req resource.Cr
 	attachReq := client.AttachPublicIPRequest{
 		PublicIPID: data.PublicIPID.ValueInt64(),
 	}
+	if data.RebootAfterAttach.ValueBool() {
+		vm, err := r.client.GetVmStatus(ctx, vmID, opts)
+		if err != nil {
+			resp.Diagnostics.AddError("Unable to Verify VM Restart", err.Error())
+			return
+		}
+		if vmIsUp(vm.Status) {
+			if err := r.client.RequireVmPowerOperations(ctx, vmID, opts); err != nil {
+				resp.Diagnostics.AddError("Automatic VM Restart Unavailable", err.Error())
+				return
+			}
+		}
+	}
 
 	tflog.Debug(ctx, "Attaching public IP to VM", map[string]any{
 		"vm_id":        vmID,

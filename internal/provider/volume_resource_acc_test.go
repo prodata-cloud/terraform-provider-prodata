@@ -26,9 +26,8 @@ func init() {
 }
 
 // TestAccVolume_outOfBandDeleteDetected is the regression witness for the volume
-// soft-delete drift fix: GET /volumes/{id} keeps returning a deleted volume
-// (success:true) while the list endpoint drops it, so Read must confirm liveness via
-// the list. After deleting the volume out-of-band, the refresh plan must be non-empty
+// stable-identity drift fix. After deleting the volume out-of-band, the stable
+// API explicitly confirms absence, and the refresh plan must be non-empty
 // (Terraform plans to recreate it). Without the fix, by-id Read keeps stale state and
 // the plan would be empty.
 func TestAccVolume_outOfBandDeleteDetected(t *testing.T) {
@@ -69,7 +68,7 @@ func testAccVolumeDisappears(resourceName string) resource.TestCheckFunc {
 			Region:     rs.Primary.Attributes["region"],
 			ProjectTag: rs.Primary.Attributes["project_tag"],
 		}
-		return c.DeleteVolume(context.Background(), id, opts)
+		return c.DeleteManagedVolume(context.Background(), id, opts)
 	}
 }
 
@@ -141,17 +140,12 @@ func testAccCheckVolumeDestroy(s *terraform.State) error {
 			Region:     rs.Primary.Attributes["region"],
 			ProjectTag: rs.Primary.Attributes["project_tag"],
 		}
-		// The by-id GET /volumes/{id} endpoint keeps returning soft-deleted volumes
-		// (success:true) after deletion, whereas the list endpoint correctly drops
-		// them — so the list is the authoritative signal that a destroy succeeded.
-		volumes, err := c.GetVolumes(ctx, opts)
+		volume, err := c.GetManagedVolume(ctx, id, opts)
 		if err != nil {
-			return fmt.Errorf("listing volumes to verify destroy: %w", err)
+			return fmt.Errorf("verifying stable volume absence after destroy: %w", err)
 		}
-		for _, v := range volumes {
-			if v.ID == id {
-				return fmt.Errorf("volume %d still exists after destroy", id)
-			}
+		if *volume.Exists {
+			return fmt.Errorf("volume %d still exists after destroy", id)
 		}
 	}
 	return nil
@@ -164,7 +158,7 @@ func sweepVolumes(_ string) error {
 		return err
 	}
 	ctx := context.Background()
-	volumes, err := c.GetVolumes(ctx, nil)
+	volumes, err := c.GetManagedVolumes(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("list volumes: %w", err)
 	}
@@ -172,7 +166,7 @@ func sweepVolumes(_ string) error {
 		if !strings.HasPrefix(v.Name, accResourcePrefix) {
 			continue
 		}
-		if derr := c.DeleteVolume(ctx, v.ID, nil); derr != nil && !client.IsNotFound(derr) {
+		if derr := c.DeleteManagedVolume(ctx, v.ID, nil); derr != nil {
 			log.Printf("[WARN] sweep: failed to delete volume %d (%q): %v", v.ID, v.Name, derr)
 		}
 	}

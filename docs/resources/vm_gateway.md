@@ -37,6 +37,8 @@ provider first checks the request and does not stop the VM if that check fails. 
 hypervisor's cloud-init settings does not prove the guest operating system applied them; on a VM
 without cloud-init, configure the guest separately.
 
+Automatic restart requires matching APIs that confirm recoverable STOP and START operations, independently of guest-agent support. An unchanged route or a VM that stays stopped does not require a new restart. New guest automation additionally checks recoverable power-child support; existing verified reads and exact owned-route cleanup retain their recovery path.
+
 Depending on the image and cloud-init configuration, changing network data may be treated as a new
 instance. SSH host keys can be regenerated and once-per-instance scripts can run again. If a
 restart cannot be confirmed, apply returns an error and records `restart_pending`. Recover the VM
@@ -56,12 +58,33 @@ last route can leave the VM without a default gateway; configure the next route 
 interface was replaced, the provider refuses to change it until the resource is reviewed and
 re-imported or recreated.
 
-If the platform loses the result of a network change, it can block starting or changing the VM
-until support has checked the operation. The VM may remain stopped. Do not assume that a timed-out
-request did nothing. These features require a panel and proxmox-core version that implement the VM
-network-settings API.
+Gateway changes require `vm-gateway-operation-v1` on the panel and the matching Core protocol.
+The provider checkpoints `platform_operation_uuid` before the first reservation request. Reservation
+is metadata only; physical submission uses that exact UUID. Lost panel/Core responses are recovered
+by observing the same operation. A pending or unavailable result retains ownership and can block
+starting or changing the VM. A missing physical Proxmox acknowledgement remains unverified and may
+need support to establish that the original writer has terminated. The VM may remain stopped.
+Cancellation releases an intent only after a positive no-submission acknowledgement; it never clears
+an existing gateway. Do not assume that a timed-out request did nothing.
 
 If the panel reports that the network settings service is busy (error 370971), wait briefly and retry.
+
+## Optional guest configuration
+
+Set `configure_guest = true` to persistently configure and verify the guest's IPv4 address and default route after the platform change. Support is checked before stopping the VM or changing its gateway. This requires the running Linux/root QEMU guest agent and static Netplan/systemd-networkd layout described in [Configuring the VM](local_network_attachment.md#configuring-the-vm). Unsupported guests, including pfSense/FreeBSD and guests without an agent, require manual guest configuration and fail preflight. No packages are installed and no default route is inferred.
+
+The guest MAC, IPv4 address and planned route are checked by a full dry-run before stopping the VM or changing its platform gateway. A persisted guest UUID authorizes only the matching gateway and power-cycle children, and guest execution begins after their verified completion. Only this explicit option authorizes moving the guest IPv4 default route; other interfaces' addresses, IPv6 and DNS remain intact. `guest_configuration_applied` records verified success. External guest drift is corrected in place, without a new interface or a power cycle when the platform gateway is already correct. Disabling the option returns cloud-init ownership while retaining the runtime configuration. Cloud-init stays enabled during normal managed operations.
+
+On destroy, the platform gateway is conditionally cleared first. Guest cleanup then removes only the previously owned IPv4 gateway on the same verified interface, leaving a replacement or foreign route alone. A guest failure retains state and reports an error; if a failed create was tainted, review and untaint the resource before applying again. A timed-out guest request has an unverified outcome and can continue for a bounded period under a guest lock. The original guest file is backed up and restoration is attempted after an apply/readback failure; restoration itself is not guaranteed.
+
+```terraform
+resource "prodata_vm_gateway" "managed_guest" {
+  vm_id           = prodata_vm.example.id
+  network_id      = prodata_local_network_attachment.example.network_id
+  gateway         = "192.0.2.1"
+  configure_guest = true
+}
+```
 
 ## Schema
 
@@ -75,13 +98,20 @@ If the panel reports that the network settings service is busy (error 370971), w
 
 - `region` (String) Region override. Defaults to the provider's region. Changing it replaces this resource.
 - `project_tag` (String) Project override. Defaults to the provider's project. Changing it replaces this resource.
+- `configure_guest` (Boolean) Default `false`. Explicitly enable supported persistent guest address and IPv4 default-route configuration and drift reconciliation. This option can be enabled in place.
 - `timeouts` (Object) Operation ceilings. `create`, `update` and `delete` default to `15m`. A change on a running VM needs at least 13 minutes of remaining time for the stop, the change and the reserved restart time; use a larger value for a slow VM.
 
 ### Attribute Reference
 
+- `platform_operation_uuid` (String) Caller-known platform operation, retained on errors for exact recovery or cancellation.
+- `platform_operation_status` (String) `RESERVED`, `SUBMITTING`, `SUCCESS`, `NOT_SUBMITTED` or an exact VM-deletion proof `DELETED`.
+- `guest_operation_uuid` (String) Persisted guest operation associated with the planned gateway change.
+- `guest_operation_status` (String) Last observed guest operation status.
+- `guest_owned_gateway` (String) Last gateway verified inside the guest, retained independently during an incomplete platform update.
 - `interface_id` (Number) ID of the selected, verified local interface.
 - `owned_gateway` (String) Gateway last applied or imported by this resource, used for conditional deletion.
 - `restart_pending` (Boolean) A gateway change stopped a running VM but its restart was not confirmed.
+- `guest_configuration_applied` (Boolean) Whether opted-in guest address/default-route configuration was verified. False when disabled or verified drift is observed. Unsupported, stopped, busy or unavailable observations preserve the last verified value with a warning.
 
 ## Import
 
@@ -93,3 +123,18 @@ terraform import prodata_vm_gateway.local 123:456
 
 Import adopts the gateway currently present on the selected interface. If there is no gateway on
 that interface, the next apply can set the value in the configuration.
+
+Imports and older states default `configure_guest` to `false`; setting it to `true` afterwards performs support checks and reconciles the guest in place.
+
+After a provider process crash before its response reaches Terraform, use the panel's scoped
+`GET /api/v2/vms/{vm_id}/gateway-operations/pending?networkId={network_id}` inventory. Explicitly import
+a retained SET intent by its UUID:
+
+```shell
+terraform import prodata_vm_gateway.local '123:456:11111111-1111-4111-8111-111111111111'
+```
+
+This imports that operation's proven ownership and preserves a different current route. A pending
+intent remains pending; import performs no write. Resolve a retained conditional CLEAR by its UUID
+through the API before importing a current route. Terraform persists provider response state after
+the RPC returns, so an abrupt process death before that return cannot guarantee the local checkpoint.

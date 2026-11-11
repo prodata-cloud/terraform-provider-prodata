@@ -7,6 +7,11 @@ description: |-
 
 # prodata_volume (Data Source)
 
+Use the persistent volume ID returned by volume creation, rather than a VM attachment
+slot ID. This lookup also works while the volume is attached. It requires the panel's
+stable volume API (`user-disk-v1`); an older API returns an error rather than an
+unverified disk with a coincidentally matching numeric ID.
+
 Lookup a ProData volume by its unique identifier.
 
 ## Example Usage

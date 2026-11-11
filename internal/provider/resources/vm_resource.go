@@ -626,61 +626,6 @@ func (r *VmResource) Create(ctx context.Context, req resource.CreateRequest, res
 
 	vm, err := createVm()
 
-	// Error 666: name conflict — likely a create_before_destroy replacement.
-	// Rename the existing VM, then retry.
-	if err != nil && client.IsAPIError(err, 666) {
-		tflog.Info(ctx, "VM name conflict detected, attempting to rename existing VM", map[string]any{
-			"name": createReq.Name,
-		})
-
-		opts := &client.RequestOpts{Region: region, ProjectTag: projectTag}
-		vms, listErr := r.client.GetVms(ctx, opts)
-		if listErr != nil {
-			// Recovery needs the conflicting VM's id; without the list we cannot
-			// rename it, so the original 666 surfaces below. Make the skipped
-			// recovery visible rather than silent.
-			tflog.Warn(ctx, "Name conflict (666) but listing VMs to locate the conflict failed; cannot auto-recover", map[string]any{
-				"name":  createReq.Name,
-				"error": listErr.Error(),
-			})
-		}
-		if listErr == nil {
-			for _, existing := range vms {
-				if existing.Name == createReq.Name {
-					newName := existing.Name + "-replacing"
-					tflog.Info(ctx, "Renaming existing VM", map[string]any{
-						"id":       existing.ID,
-						"old_name": existing.Name,
-						"new_name": newName,
-					})
-					renameErr := r.client.RenameVm(ctx, existing.ID, client.RenameVmRequest{Name: newName}, opts)
-					if renameErr != nil {
-						resp.Diagnostics.AddError(
-							"Unable to Create Virtual Machine",
-							fmt.Sprintf("Name conflict: a VM with name %q already exists (id=%d). "+
-								"Attempted to rename it but failed: %s", createReq.Name, existing.ID, renameErr.Error()),
-						)
-						return
-					}
-					vm, err = createVm()
-					if err != nil {
-						// The existing VM was renamed to free the name but the new create
-						// still failed — it is now orphaned under newName. Tell the user
-						// exactly how to recover instead of leaving a silently-renamed VM.
-						resp.Diagnostics.AddError(
-							"Unable to Create Virtual Machine",
-							fmt.Sprintf("Name-conflict recovery left an orphaned VM: the existing VM (id=%d) was "+
-								"renamed to %q to free the name %q, but creating the new VM still failed: %s. "+
-								"Rename VM %d back to %q or delete it.",
-								existing.ID, newName, createReq.Name, err.Error(), existing.ID, createReq.Name),
-						)
-						return
-					}
-					break
-				}
-			}
-		}
-	}
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to Create Virtual Machine", err.Error())
 		return
@@ -829,7 +774,7 @@ func (r *VmResource) Read(ctx context.Context, req resource.ReadRequest, resp *r
 	// refresh does not remove an ERROR-status VM from state before it can be cleaned up.
 	vm, err := r.client.GetVmStatus(ctx, vmID, opts)
 	if err != nil {
-		if client.IsNotFound(err) {
+		if client.IsVmNotFound(err) {
 			if recoveryPending {
 				resp.Diagnostics.AddError("VM recovery requires verification", fmt.Sprintf("VM %d could not be found while network recovery is pending. Verify its actual state before removing it from Terraform state or creating a replacement.", vmID))
 				return
@@ -1367,6 +1312,9 @@ func (r *VmResource) stopIfRunning(ctx context.Context, vmID int64, opts *client
 	}
 	if vm.Status != "RUNNING" {
 		return false, nil
+	}
+	if err := r.client.RequireVmPowerOperations(ctx, vmID, opts); err != nil {
+		return false, fmt.Errorf("automatic restart is unavailable: %w", err)
 	}
 
 	tflog.Info(ctx, "VM is running, stopping before update", map[string]any{"id": vmID})

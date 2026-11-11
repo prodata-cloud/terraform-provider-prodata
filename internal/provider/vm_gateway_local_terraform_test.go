@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os/exec"
 	"sync"
+	"terraform-provider-prodata/internal/testutil"
 	"testing"
 
 	"terraform-provider-prodata/internal/client"
@@ -27,7 +28,7 @@ func TestVmGatewayLocalTerraformLifecycle(t *testing.T) {
 	}
 	var mu sync.Mutex
 	var gateway *string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+	server := httptest.NewServer(testutil.GatewayJournal(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		mu.Lock()
 		defer mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
@@ -76,7 +77,7 @@ func TestVmGatewayLocalTerraformLifecycle(t *testing.T) {
 			t.Errorf("unexpected request %s %s", req.Method, req.URL.Path)
 			http.NotFound(w, req)
 		}
-	}))
+	})))
 	t.Cleanup(server.Close)
 
 	config := func(value string) string {
@@ -121,7 +122,7 @@ resource "prodata_vm_gateway" "test" {
 		Steps: []resource.TestStep{
 			{Config: config("192.0.2.1"), ConfigStateChecks: checkState("192.0.2.1"), ConfigPlanChecks: stable},
 			{Config: config("192.0.2.2"), ConfigStateChecks: checkState("192.0.2.2"), ConfigPlanChecks: stable},
-			{ResourceName: "prodata_vm_gateway.test", ImportState: true, ImportStateId: "7:42", ImportStateVerify: true, ImportStateVerifyIdentifierAttribute: "vm_id"},
+			{ResourceName: "prodata_vm_gateway.test", ImportState: true, ImportStateId: "7:42", ImportStateVerify: true, ImportStateVerifyIgnore: []string{"platform_operation_uuid", "platform_operation_status"}, ImportStateVerifyIdentifierAttribute: "vm_id"},
 			{PreConfig: setForeign, Config: config("192.0.2.2"), ConfigStateChecks: checkState("192.0.2.2"), ConfigPlanChecks: stable},
 			{PreConfig: setForeign, Config: config("192.0.2.2"), Destroy: true},
 		},

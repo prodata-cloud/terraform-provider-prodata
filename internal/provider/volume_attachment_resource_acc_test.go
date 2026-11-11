@@ -47,13 +47,12 @@ func TestAccVolumeAttachment_basic(t *testing.T) {
 				ConfigStateChecks: []statecheck.StateCheck{
 					statecheck.ExpectKnownValue(resourceName, tfjsonpath.New("attached_volume_id"), knownvalue.NotNull()),
 				},
-				// The B1 assertion: after refresh the attachment itself must be a no-op.
-				// (Targeted at the attachment resource so an unrelated drift on the VM
-				// resource does not mask the regression this test guards.) Before the
-				// fix, Read dropped the attachment from state, so this would be a Create.
+				// Both identities must survive refresh: forgetting the volume also
+				// replaces the attachment through its volume_id dependency.
 				ConfigPlanChecks: resource.ConfigPlanChecks{
 					PostApplyPostRefresh: []plancheck.PlanCheck{
 						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionNoop),
+						plancheck.ExpectResourceAction("prodata_volume.test", plancheck.ResourceActionNoop),
 					},
 				},
 			},

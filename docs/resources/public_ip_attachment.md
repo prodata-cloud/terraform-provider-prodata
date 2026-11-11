@@ -9,6 +9,8 @@ description: |-
 
 Attaches a ProData public IP to a virtual machine. Destroying this resource detaches the public IP from the VM.
 
+When `reboot_after_attach = true` requires restarting a running VM, the provider checks recoverable power support before attaching the address. This check is independent of the guest operating system and guest-agent support. A VM already stopped stays stopped; attaching without automatic restart does not require this capability.
+
 ~> **Note:** `vm_id`, `public_ip_id`, `region` and `project_tag` require resource replacement when changed. Any change will detach and reattach the public IP. `reboot_after_attach` and `timeouts` can be changed in place, but only a new attachment makes use of them.
 
 ~> **Note:** The platform applies the network configuration of a public IP only when the VM starts. On a VM that is running, the address does not work until the VM has been stopped and started again, although the attachment is created and Terraform reports it as done. Set `reboot_after_attach = true` to have the provider restart the VM during `apply`, or restart the VM yourself. See [Restarting the VM](#restarting-the-vm).

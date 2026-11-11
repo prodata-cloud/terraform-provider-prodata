@@ -14,7 +14,9 @@ A balancer can dispatch traffic to either:
 - a set of ProData VMs (`backend_group.vm_ids`) — referred to as `FRONTEND` source on the server, or
 - an entire Kubernetes node pool (`backend_group.node_pool_id`) — `CCM` source.
 
-Switching between the two backend modes forces resource replacement; same-mode content changes (renaming, port edits, swapping VM members in/out, adjusting `description`) are applied in place.
+An auto scaling group can also supply the backends through `backend_group.asg_id`. The platform keeps its current members synchronized, including when the group scales to zero. Switching between individual VMs and an ASG, or changing the ASG, updates the existing load balancer in place. Switching to or from the CCM node-pool mode requires resource replacement.
+
+An update involving an ASG first verifies that the panel reports `backendSelectorContract = "replace-v1"`. Older APIs are refused before any configure request is sent. The provider supplies a complete selector and explicitly replaces declarations that were left out, so the background sync cannot re-add members of a previous ASG. Upgrade the matching panel API before changing an ASG selector; ordinary VM-only operations remain compatible with older APIs.
 
 ~> **Note:** A load balancer backed by `backend_group.node_pool_id` belongs to that pool's cluster project. Its `project_tag` (or the provider default) must match that project. The provider reads the pool and checks that its cluster is listed in the selected project before creating the balancer; a missing parent or an unreadable listing stops creation.
 
@@ -22,7 +24,7 @@ For this node-pool mode, the API key needs Kubernetes **read** permission to ver
 
 ~> **Note:** Creating a load balancer requires at least **three** free IPs in `network_id` (one VIP plus two for the hidden nginx VMs). The server returns error code 737 ("Insufficient free IPs in network for load balancer.") when the network does not have enough; the provider surfaces this as a clear plan/apply error.
 
-~> **Note:** `name`, `description`, `port`, and `backend_group` content (VM members) are updated in place. Changing `region`, `project_tag`, `type`, `protocol`, `network_id`, or switching backend modes forces a new resource. The hidden nginx VMs are not re-provisioned on in-place updates.
+~> **Note:** `name`, `description`, `port`, and `backend_group` content (VM members or an ASG selector) are updated in place. Changing `region`, `project_tag`, `type`, `protocol`, `network_id`, or switching to/from CCM node-pool mode forces a new resource. The hidden nginx VMs are not re-provisioned on in-place updates.
 
 ~> **Note:** `description` is **not configurable for CCM (node pool) load balancers.** The panel owns it — it sets `"CCM: <name>"` and ignores any caller-supplied value on both create and update. The provider rejects a user-supplied `description` at plan time to surface the constraint — omit `description` for CCM balancers and let the provider read the panel value back into state.
 
@@ -101,7 +103,8 @@ resource "prodata_lb" "ingress" {
 - `port` (Set of Object, 1-10 entries) Port mappings. Re-ordering entries does not produce a diff (set semantics). Each entry has:
   - `port` (Number, required) Port exposed on the load balancer (1-65535).
   - `target_port` (Number, required) Port on each backend (1-65535).
-- `backend_group` (Object) Backend selection. Exactly one of `vm_ids` or `node_pool_id` must be set:
+- `backend_group` (Object) Backend selection. Exactly one of `vm_ids`, `asg_id` or `node_pool_id` must be set:
+  - `asg_id` (Number, optional) Auto scaling group ID. The group must belong to the balancer's network and project. Changing the group updates the balancer in place. Requires an API that reports durable `backendGroups` declarations; the provider verifies the requested declaration before reporting success.
   - `vm_ids` (Set of String, optional) Set of VM guids — the `guid` attribute on `prodata_vm`. At least one entry required when this mode is used. Re-ordering produces no diff. Used by `FRONTEND`-source LBs.
 
 ~> **Note:** `vm_ids` expects VM **guids** — the computed `guid` attribute of `prodata_vm` (e.g. `prodata_vm.web[*].guid`), **not** the numeric `prodata_vm.id`. Passing the id (or any non-guid value) fails the create with a backend-not-found error.
@@ -122,6 +125,7 @@ resource "prodata_lb" "ingress" {
 - `public_ip` (String) Public IP assigned to external load balancers. Null for internal balancers and transiently null while status is `NEW`.
 - `private_ip` (String) Private VIP allocated inside `network_id`. May be transiently null while status is `NEW`.
 - `date_created` (String) Server-reported creation timestamp.
+- `backend_selector_drift` (Boolean) Whether the server reports mixed or unsupported frontend selectors. Refresh warns and retains ownership; the next apply reconciles the configured complete selector in place, including extra declarations whose groups have no current members.
 
 ### Timeouts
 
@@ -161,7 +165,7 @@ terraform import prodata_lb.example UZ-5/42@my-project
 
 With the bare-ID form, `region` and `project_tag` are seeded from the provider defaults; if the LB lives elsewhere, either use the composite form or set them explicitly in your configuration before the next `terraform plan` so the read scopes correctly.
 
-~> **Note:** A `CCM`-source LB imported with this resource cannot have its `node_pool_id` populated from state — the panel does not surface `node_pool_id` on the GET endpoint. You must set `backend_group.node_pool_id` in your HCL after import to match the actual pool, otherwise the next plan will not be able to manage backend membership and update operations will fail. See "Known Limitations".
+~> **Note:** For an imported `CCM` load balancer, the provider reads `node_pool_id` from a durable pool declaration or one positively tagged backend pool. Set HCL to that verified pool. An imported null pool value does not itself force replacement. If the API cannot confirm an association, refresh warns and destroy remains available, while a plan that adds a pool stops with an explicit error and preserves the existing balancer. The provider never guesses from VM names or pool names.
 
 ## Known Limitations
 
@@ -169,9 +173,12 @@ With the bare-ID form, `region` and `project_tag` are seeded from the provider d
 - **`getFreeNetIps` is a snapshot.** Two near-simultaneous LB creates against the same near-full network can both be told the same free IPs, racing for the same VIP. The platform's resolution path is being hardened; for now, serialize LB creates against tight networks (`depends_on` between resources, or `terraform apply -parallelism=1`) when free IP capacity is close to the minimum.
 - **Switching `node_pool_id` requires destroy+recreate.** The panel's configure endpoint has no `nodePoolId` parameter, so the provider gates pool swaps via `RequiresReplace`. Same-pool configures (rename, port edits) are applied in place as expected.
 - **A `backend_group` that is unknown as a whole at plan time.** When the whole block depends on a value known only after apply (for example a conditional on another resource's attribute), the plan cannot tell whether the backend mode or `node_pool_id` of an existing balancer will change. If one of them does, `terraform apply` stops with `Provider produced inconsistent final plan` before touching the balancer; run `terraform apply` again and the new plan shows the replacement. A block that is known but has an unknown member (`node_pool_id = prodata_kubernetes_node_pool.pool.id`) is not affected.
-- **`node_pool_id` is not surfaced on GET.** The panel does not return `nodePoolId` in the load-balancer read shape, so the resource preserves it from prior state. After `terraform import`, you must restate it in HCL — see the Import note. Track node-pool membership separately through your Kubernetes tooling.
+- **CCM association requires server evidence.** Legacy backends without a pool tag and empty CCM rosters without a durable pool declaration cannot establish an imported pool identity. Existing known state is retained, refresh warns, and an unverified import cannot automatically plan replacement. See the Import note.
 - **`description` is panel-controlled for CCM balancers.** The provider rejects a user-supplied `description` at plan time for CCM (node pool) balancers, on both create and update; the panel sets it to `"CCM: <name>"` and that value reads back into state. Frontend (VM-backed) LBs accept user-supplied descriptions normally.
-- **`date_created` is preserved across updates.** The panel's configure endpoint resets `dateCreated` to the current time, which would fail Terraform's "computed output must be consistent" check. The provider re-injects the prior `date_created` into state on update so plans stay stable.
-- **Legacy LBs may report empty `source`.** Load balancers created before source tracking landed will read `source = ""`. The provider treats empty source as `FRONTEND` for compatibility on `delete` and surfaces a clear error if you try to `update` such an LB — destroy and recreate to migrate it onto the new schema.
+- **`date_created` is preserved across updates.** The provider retains the prior creation timestamp when handling configure responses, including responses from legacy API versions.
+- **Legacy LBs may report empty `source`.** Load balancers created before source tracking landed can read `source = ""`. The provider uses the frontend update and delete endpoints for this legacy value.
 - **Hidden nginx VMs.** Each LB creates two nginx VMs in `network_id`. They are managed by the platform and do not appear in `prodata_vms`, but they do consume VM quota — plan capacity accordingly. They are cleaned up on `terraform destroy`.
 - **No TLS termination.** This LB is L4 only. There is no HTTPS / SSL termination, no per-listener protocol override, no session stickiness, no health-check tuning, no tags, and no equivalent of `force_destroy`. These are not on the v0 roadmap.
+
+
+Refresh and destroy recognize only the LB API's explicit `736` absence code or a matching-ID DELETED response. A proxy `404` response and missing-resource codes for other resource types retain state and surface an error. Temporary selector-lock refusal can be retried only when the API supplies its explicit safe-retry proof; an ambiguous `806` AWX launch error is never automatically replayed.

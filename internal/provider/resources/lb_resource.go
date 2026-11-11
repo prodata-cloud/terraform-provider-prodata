@@ -48,22 +48,23 @@ type LbResource struct {
 // framework can distinguish "config block omitted" from "block present with all
 // fields null" — both reach this struct as nil after Get().
 type LbResourceModel struct {
-	ID           types.Int64          `tfsdk:"id"`
-	Region       types.String         `tfsdk:"region"`
-	ProjectTag   types.String         `tfsdk:"project_tag"`
-	Name         types.String         `tfsdk:"name"`
-	Description  types.String         `tfsdk:"description"`
-	Type         types.String         `tfsdk:"type"`
-	Protocol     types.String         `tfsdk:"protocol"`
-	NetworkID    types.Int64          `tfsdk:"network_id"`
-	Port         []LbPortModel        `tfsdk:"port"`
-	BackendGroup *LbBackendGroupModel `tfsdk:"backend_group"`
-	Source       types.String         `tfsdk:"source"`
-	Status       types.String         `tfsdk:"status"`
-	PublicIP     types.String         `tfsdk:"public_ip"`
-	PrivateIP    types.String         `tfsdk:"private_ip"`
-	DateCreated  types.String         `tfsdk:"date_created"`
-	Timeouts     timeouts.Value       `tfsdk:"timeouts"`
+	ID                   types.Int64          `tfsdk:"id"`
+	Region               types.String         `tfsdk:"region"`
+	ProjectTag           types.String         `tfsdk:"project_tag"`
+	Name                 types.String         `tfsdk:"name"`
+	Description          types.String         `tfsdk:"description"`
+	Type                 types.String         `tfsdk:"type"`
+	Protocol             types.String         `tfsdk:"protocol"`
+	NetworkID            types.Int64          `tfsdk:"network_id"`
+	Port                 []LbPortModel        `tfsdk:"port"`
+	BackendGroup         *LbBackendGroupModel `tfsdk:"backend_group"`
+	BackendSelectorDrift types.Bool           `tfsdk:"backend_selector_drift"`
+	Source               types.String         `tfsdk:"source"`
+	Status               types.String         `tfsdk:"status"`
+	PublicIP             types.String         `tfsdk:"public_ip"`
+	PrivateIP            types.String         `tfsdk:"private_ip"`
+	DateCreated          types.String         `tfsdk:"date_created"`
+	Timeouts             timeouts.Value       `tfsdk:"timeouts"`
 }
 
 type LbPortModel struct {
@@ -74,6 +75,7 @@ type LbPortModel struct {
 type LbBackendGroupModel struct {
 	VMIDs      types.Set   `tfsdk:"vm_ids"`
 	NodePoolID types.Int64 `tfsdk:"node_pool_id"`
+	ASGID      types.Int64 `tfsdk:"asg_id"`
 }
 
 // Default polling and timeout values. Polling is fixed 30s; create/update/delete
@@ -99,8 +101,8 @@ func (r *LbResource) Schema(ctx context.Context, _ resource.SchemaRequest, resp 
 		MarkdownDescription: "Manages a ProData load balancer (L4 TCP/UDP). " +
 			"Backed by two hidden nginx VMs provisioned in the target network. " +
 			"Backends receive traffic in round-robin order. " +
-			"Backend group may be either a set of VM guids (`vm_ids`) or a Kubernetes " +
-			"node pool id (`node_pool_id`) — switching between modes forces a new resource.",
+			"Backend group may be either a set of VM guids (`vm_ids`) or an auto scaling group (`asg_id`), or a Kubernetes " +
+			"node pool id (`node_pool_id`). Switching to or from CCM node-pool mode forces a new resource.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.Int64Attribute{
 				MarkdownDescription: "Load balancer ID, assigned by the panel.",
@@ -245,8 +247,8 @@ func (r *LbResource) Schema(ctx context.Context, _ resource.SchemaRequest, resp 
 				},
 			},
 			"backend_group": schema.SingleNestedAttribute{
-				MarkdownDescription: "Exactly one of `vm_ids` or `node_pool_id` must be set. Switching between " +
-					"modes forces a new resource; same-mode content changes are applied in place.",
+				MarkdownDescription: "Exactly one of `vm_ids`, `asg_id` or `node_pool_id` must be set. Switching " +
+					"to or from CCM node-pool mode forces a new resource. VM/ASG changes are applied in place.",
 				Required: true,
 				Attributes: map[string]schema.Attribute{
 					"vm_ids": schema.SetAttribute{
@@ -258,15 +260,21 @@ func (r *LbResource) Schema(ctx context.Context, _ resource.SchemaRequest, resp 
 							setvalidator.SizeAtLeast(1),
 						},
 					},
+					"asg_id": schema.Int64Attribute{
+						MarkdownDescription: "Auto scaling group ID. The platform tracks its members, including a group scaled to zero. Switching between VM and ASG backends, or changing ASG, updates the balancer in place.",
+						Optional:            true,
+						Validators:          []validator.Int64{int64validator.AtLeast(1)},
+					},
 					"node_pool_id": schema.Int64Attribute{
 						MarkdownDescription: "Kubernetes node pool ID. Whole-pool only (no partial backends). " +
 							"Changing the pool requires destroy+recreate in v0.",
 						Optional: true,
-						PlanModifiers: []planmodifier.Int64{
-							int64planmodifier.RequiresReplace(),
-						},
 					},
 				},
+			},
+			"backend_selector_drift": schema.BoolAttribute{
+				MarkdownDescription: "Whether the platform reports mixed or unsupported frontend backend declarations. Read preserves the balancer and warns; the next apply reconciles the configured complete selector in place.",
+				Computed:            true,
 			},
 			"timeouts": timeouts.Attributes(ctx, timeouts.Opts{
 				Create: true,
@@ -292,13 +300,14 @@ func (r *LbResource) Configure(_ context.Context, req resource.ConfigureRequest,
 	r.c = c
 }
 
-// ConfigValidators enforces ExactlyOneOf vm_ids / node_pool_id inside backend_group.
+// ConfigValidators enforces exactly one of vm_ids, asg_id and node_pool_id.
 // SingleNestedAttribute fields can't host that validator on themselves directly, so
 // it lives at the resource level with explicit path expressions.
 func (r *LbResource) ConfigValidators(_ context.Context) []resource.ConfigValidator {
 	return []resource.ConfigValidator{
 		resourcevalidator.ExactlyOneOf(
 			path.MatchRoot("backend_group").AtName("vm_ids"),
+			path.MatchRoot("backend_group").AtName("asg_id"),
 			path.MatchRoot("backend_group").AtName("node_pool_id"),
 		),
 	}
@@ -357,6 +366,49 @@ func (r *LbResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequ
 	}
 	stateHasVMs, stateHasPool := backendMode(stateGroup)
 	planHasVMs, planHasPool := backendMode(planGroup)
+	var source types.String
+	var drift types.Bool
+	resp.Diagnostics.Append(req.State.GetAttribute(ctx, path.Root("source"), &source)...)
+	resp.Diagnostics.Append(req.State.GetAttribute(ctx, path.Root("backend_selector_drift"), &drift)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	if drift.ValueBool() {
+		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("backend_selector_drift"), false)...)
+	}
+	if source.ValueString() == client.LbSourceCCM && planHasPool && !stateHasPool && planGroup != nil && !planGroup.NodePoolID.IsUnknown() {
+		var id types.Int64
+		var region, project types.String
+		resp.Diagnostics.Append(req.State.GetAttribute(ctx, path.Root("id"), &id)...)
+		resp.Diagnostics.Append(req.State.GetAttribute(ctx, path.Root("region"), &region)...)
+		resp.Diagnostics.Append(req.State.GetAttribute(ctx, path.Root("project_tag"), &project)...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		if r.c == nil || id.IsNull() || id.IsUnknown() || id.ValueInt64() < 1 {
+			resp.Diagnostics.AddError("Unable to verify imported CCM node pool", "The existing load balancer identity and a configured client are required. No replacement is planned.")
+			return
+		}
+		lb, err := r.c.GetLoadBalancer(ctx, id.ValueInt64(), r.optsFromState(region, project))
+		if err != nil {
+			resp.Diagnostics.AddError("Unable to verify imported CCM node pool", client.LBErrorDetail(err))
+			return
+		}
+		pool, verified := observedCCMPool(lb)
+		if !verified {
+			resp.Diagnostics.AddError("Unable to verify imported CCM node pool", "The API must report one positive node pool association before an imported CCM balancer can be adopted or replaced. Ownership is retained; no replacement is planned.")
+			return
+		}
+		if pool != planGroup.NodePoolID.ValueInt64() {
+			resp.RequiresReplace = append(resp.RequiresReplace, path.Root("backend_group").AtName("node_pool_id"))
+		}
+	} else if stateHasPool && planHasPool && stateGroup != nil && planGroup != nil && !stateGroup.NodePoolID.Equal(planGroup.NodePoolID) {
+		resp.RequiresReplace = append(resp.RequiresReplace, path.Root("backend_group").AtName("node_pool_id"))
+	}
+	if (source.ValueString() == client.LbSourceCCM && planHasVMs) || (source.ValueString() == client.LbSourceFrontend && planHasPool) {
+		resp.RequiresReplace = append(resp.RequiresReplace, path.Root("backend_group"))
+		return
+	}
 	if detectModeSwitch(stateHasVMs, stateHasPool, planHasVMs, planHasPool) {
 		resp.RequiresReplace = append(resp.RequiresReplace, path.Root("backend_group"))
 	}
@@ -417,7 +469,7 @@ func (r *LbResource) Create(ctx context.Context, req resource.CreateRequest, res
 			resp.Diagnostics.AddError("Invalid port configuration", perr.Error())
 			return
 		}
-		backends, berr := vmIDsToWire(ctx, plan.BackendGroup.VMIDs)
+		backends, berr := frontendBackendsToWire(ctx, plan.BackendGroup)
 		if berr != nil {
 			resp.Diagnostics.AddError("Invalid backend_group.vm_ids", berr.Error())
 			return
@@ -479,7 +531,7 @@ func (r *LbResource) Create(ctx context.Context, req resource.CreateRequest, res
 		})
 
 	default:
-		resp.Diagnostics.AddError("Internal error", "backend_group has neither vm_ids nor node_pool_id (validator should have caught this)")
+		resp.Diagnostics.AddError("Internal error", "backend_group must select vm_ids, asg_id or node_pool_id")
 		return
 	}
 
@@ -500,9 +552,13 @@ func (r *LbResource) Create(ctx context.Context, req resource.CreateRequest, res
 	if resultLB == nil {
 		resultLB = lb
 	}
+	backendErr := verifyAppliedASGBackend(resultLB, plan.BackendGroup)
 
 	r.applyServerState(&plan, resultLB, region, projectTag)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+	if backendErr != nil {
+		resp.Diagnostics.AddError("Unable to verify load balancer backend group", backendErr.Error())
+	}
 
 	if waitErr != nil {
 		resp.Diagnostics.AddError(
@@ -527,7 +583,7 @@ func (r *LbResource) Read(ctx context.Context, req resource.ReadRequest, resp *r
 
 	lb, err := r.c.GetLoadBalancer(ctx, id, opts)
 	if err != nil {
-		if client.IsNotFound(err) {
+		if client.IsLoadBalancerNotFound(err) {
 			tflog.Warn(ctx, "Load balancer not found, removing from state", map[string]any{"id": id})
 			resp.State.RemoveResource(ctx)
 			return
@@ -539,6 +595,14 @@ func (r *LbResource) Read(ctx context.Context, req resource.ReadRequest, resp *r
 		tflog.Warn(ctx, "Load balancer reported DELETED, removing from state", map[string]any{"id": id})
 		resp.State.RemoveResource(ctx)
 		return
+	}
+	if err := verifyASGBackendDeclaration(lb, data.BackendGroup); err != nil {
+		resp.Diagnostics.AddWarning("Load balancer backend selector differs", err.Error()+". Ownership is retained. Apply can reconcile the configured complete frontend selector in place; destroy remains available.")
+	}
+	if lb.Source == client.LbSourceCCM {
+		if _, ok := observedCCMPool(lb); !ok {
+			resp.Diagnostics.AddWarning("CCM node pool association is unverified", "The API did not report one positive node pool association. Existing ownership is retained. Destroy remains available; adding an imported node_pool_id requires positive server confirmation before replacement can be planned.")
+		}
 	}
 
 	region := data.Region.ValueString()
@@ -563,6 +627,10 @@ func (r *LbResource) Update(ctx context.Context, req resource.UpdateRequest, res
 		return
 	}
 
+	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
 	opts := r.optsFromState(state.Region, state.ProjectTag)
 	id := state.ID.ValueInt64()
 	source := state.Source.ValueString()
@@ -595,10 +663,16 @@ func (r *LbResource) Update(ctx context.Context, req resource.UpdateRequest, res
 	// through the frontend configure path (mirroring Delete), so an imported pre-source
 	// LB stays updatable instead of hard-failing into destroy/recreate.
 	case client.LbSourceFrontend, "":
-		backends, berr := vmIDsToWire(ctx, plan.BackendGroup.VMIDs)
+		backends, berr := frontendBackendsToWire(ctx, plan.BackendGroup)
 		if berr != nil {
 			resp.Diagnostics.AddError("Invalid backend_group.vm_ids", berr.Error())
 			return
+		}
+		if backendGroupUsesASG(state.BackendGroup) || backendGroupUsesASG(plan.BackendGroup) || state.BackendSelectorDrift.ValueBool() {
+			if err := r.c.CheckLoadBalancerBackendSelectorContract(ctx, id, opts); err != nil {
+				resp.Diagnostics.AddError("Load Balancer Backend Selector Contract Required", err.Error())
+				return
+			}
 		}
 		wire.Backends = backends
 		tflog.Debug(ctx, "Configuring frontend load balancer", map[string]any{
@@ -644,6 +718,10 @@ func (r *LbResource) Update(ctx context.Context, req resource.UpdateRequest, res
 		resultLB, _ = r.c.GetLoadBalancer(ctx, id, opts)
 	}
 	if resultLB != nil {
+		if err := verifyAppliedASGBackend(resultLB, plan.BackendGroup); err != nil {
+			resp.Diagnostics.AddError("Unable to verify load balancer backend group", err.Error())
+			return
+		}
 		region := state.Region.ValueString()
 		if region == "" {
 			region = r.c.Region
@@ -666,6 +744,75 @@ func (r *LbResource) Update(ctx context.Context, req resource.UpdateRequest, res
 		)
 		return
 	}
+}
+
+func observedCCMPool(lb *client.LoadBalancer) (int64, bool) {
+	if lb == nil || lb.Source != client.LbSourceCCM {
+		return 0, false
+	}
+	pool := int64(0)
+	for _, declaration := range lb.BackendGroups {
+		if declaration.Kind != "NODE_POOL" || declaration.NodePoolID < 1 || pool != 0 && pool != declaration.NodePoolID {
+			return 0, false
+		}
+		pool = declaration.NodePoolID
+	}
+	if pool > 0 {
+		return pool, true
+	}
+	if len(lb.Backends) == 0 {
+		return 0, false
+	}
+	for _, backend := range lb.Backends {
+		if backend.NodePoolID < 1 || pool != 0 && pool != backend.NodePoolID {
+			return 0, false
+		}
+		pool = backend.NodePoolID
+	}
+	return pool, pool > 0
+}
+
+func backendGroupUsesASG(group *LbBackendGroupModel) bool {
+	return group != nil && !group.ASGID.IsNull() && !group.ASGID.IsUnknown()
+}
+
+// An older API may ignore an unrecognized backend selector. Never report a
+// successful ASG attach merely because it accepted the HTTP request.
+func verifyASGBackendDeclaration(lb *client.LoadBalancer, want *LbBackendGroupModel) error {
+	if len(lb.BackendGroups) > 1 {
+		return errors.New("this load balancer has multiple backend group declarations; this resource supports one selector")
+	}
+	if lb.Source == client.LbSourceFrontend && len(lb.BackendGroups) == 1 {
+		if lb.BackendGroups[0].Kind != "ASG" {
+			return errors.New("this frontend load balancer declares a node pool; use a balancer created with backend_group.node_pool_id or manage its mixed declarations through the platform API")
+		}
+		for _, backend := range lb.Backends {
+			if !backend.ManagedByGroup {
+				return errors.New("this load balancer mixes an ASG declaration with individual VM backends; this resource supports one selector")
+			}
+		}
+	}
+	if want == nil || want.ASGID.IsNull() || want.ASGID.IsUnknown() {
+		return nil
+	}
+	if lb.BackendGroups == nil {
+		return errors.New("the API did not report backendGroups; ASG backends require a server that reports durable backend group declarations")
+	}
+	return nil
+}
+
+func verifyAppliedASGBackend(lb *client.LoadBalancer, want *LbBackendGroupModel) error {
+	if err := verifyASGBackendDeclaration(lb, want); err != nil {
+		return err
+	}
+	if lb.Source == client.LbSourceFrontend && want != nil && want.ASGID.IsNull() && want.NodePoolID.IsNull() && len(lb.BackendGroups) > 0 {
+		return errors.New("the API still reports backend group declarations after a complete VM-selector update")
+	}
+	if want != nil && !want.ASGID.IsNull() && !want.ASGID.IsUnknown() &&
+		(len(lb.BackendGroups) != 1 || lb.BackendGroups[0].Kind != "ASG" || lb.BackendGroups[0].ASGID != want.ASGID.ValueInt64()) {
+		return errors.New("the API did not confirm the requested ASG backend declaration; refresh and retry after checking the platform")
+	}
+	return nil
 }
 
 // ---- Delete ----
@@ -704,7 +851,7 @@ func (r *LbResource) Delete(ctx context.Context, req resource.DeleteRequest, res
 		return
 	}
 	if err != nil {
-		if client.IsNotFound(err) {
+		if client.IsLoadBalancerNotFound(err) {
 			return
 		}
 		resp.Diagnostics.AddError("Unable to delete load balancer", client.LBErrorDetail(err))
@@ -815,6 +962,7 @@ func (r *LbResource) applyServerState(m *LbResourceModel, lb *client.LoadBalance
 	m.Type = types.StringValue(lb.Type)
 	m.Protocol = types.StringValue(lb.Protocol)
 	m.NetworkID = types.Int64Value(lb.NetworkID)
+	m.BackendSelectorDrift = types.BoolValue((lb.Source == client.LbSourceFrontend || lb.Source == "") && verifyASGBackendDeclaration(lb, m.BackendGroup) != nil)
 	m.Source = types.StringValue(lb.Source)
 	m.Status = types.StringValue(lb.Status)
 	m.PublicIP = tfutil.StringOrNull(lb.PublicIP)
@@ -827,14 +975,39 @@ func (r *LbResource) applyServerState(m *LbResourceModel, lb *client.LoadBalance
 	// node_pool_id from state (the server does not surface it).
 	switch lb.Source {
 	case client.LbSourceFrontend:
+		if len(lb.BackendGroups) == 1 && lb.BackendGroups[0].Kind == "ASG" && lb.BackendGroups[0].ASGID > 0 {
+			var unmanaged []client.LbBackend
+			for _, backend := range lb.Backends {
+				if !backend.ManagedByGroup {
+					unmanaged = append(unmanaged, backend)
+				}
+			}
+			vmIDs := types.SetNull(types.StringType)
+			if len(unmanaged) > 0 {
+				vmIDs = vmIDsFromServer(unmanaged)
+			}
+			m.BackendGroup = &LbBackendGroupModel{VMIDs: vmIDs, NodePoolID: types.Int64Null(), ASGID: types.Int64Value(lb.BackendGroups[0].ASGID)}
+			break
+		}
+		// Older servers cannot report the declaration. Preserve a configured ASG
+		// rather than replacing it with transient materialized VM membership.
+		if lb.BackendGroups == nil && m.BackendGroup != nil && !m.BackendGroup.ASGID.IsNull() {
+			break
+		}
 		m.BackendGroup = &LbBackendGroupModel{
 			VMIDs:      vmIDsFromServer(lb.Backends),
 			NodePoolID: types.Int64Null(),
+			ASGID:      types.Int64Null(),
 		}
 	case client.LbSourceCCM:
 		nodePool := types.Int64Null()
+		if pool, verified := observedCCMPool(lb); verified {
+			nodePool = types.Int64Value(pool)
+		}
 		if m.BackendGroup != nil {
-			nodePool = m.BackendGroup.NodePoolID
+			if nodePool.IsNull() {
+				nodePool = m.BackendGroup.NodePoolID
+			}
 		}
 		m.BackendGroup = &LbBackendGroupModel{
 			VMIDs:      types.SetNull(types.StringType),
@@ -868,9 +1041,12 @@ func (r *LbResource) waitForTerminalStatus(ctx context.Context, id int64, opts *
 			case t.isSuccess(lb.Status):
 				return lb, nil
 			case t.isFailure(lb.Status):
+				if reason := strings.TrimSpace(lb.ErrorMessage); reason != "" {
+					return lb, fmt.Errorf("terminal status %s: %s", lb.Status, reason)
+				}
 				return lb, fmt.Errorf("terminal status %s", lb.Status)
 			}
-		case client.IsNotFound(err):
+		case client.IsLoadBalancerNotFound(err):
 			if t.removedIsSuccess {
 				return nil, nil
 			}
@@ -966,6 +1142,19 @@ func portsFromServer(in []client.LbPort) []LbPortModel {
 	return out
 }
 
+func frontendBackendsToWire(ctx context.Context, bg *LbBackendGroupModel) ([]client.LbBackendRef, error) {
+	if bg != nil && !bg.ASGID.IsNull() {
+		if bg.ASGID.IsUnknown() || bg.ASGID.ValueInt64() < 1 || !bg.VMIDs.IsNull() || !bg.NodePoolID.IsNull() {
+			return nil, errors.New("asg_id must be a known positive ID and the only backend selector")
+		}
+		return []client.LbBackendRef{{ASGID: bg.ASGID.ValueInt64()}}, nil
+	}
+	if bg == nil {
+		return nil, errors.New("backend_group is required")
+	}
+	return vmIDsToWire(ctx, bg.VMIDs)
+}
+
 // vmIDsToWire extracts the VM guid strings from the vm_ids Set into the wire shape.
 func vmIDsToWire(ctx context.Context, ids types.Set) ([]client.LbBackendRef, error) {
 	if ids.IsNull() || ids.IsUnknown() {
@@ -1014,7 +1203,9 @@ func backendMode(bg *LbBackendGroupModel) (hasVMs, hasPool bool) {
 	if bg == nil {
 		return false, false
 	}
-	return modeInUse(bg.VMIDs, bg.NodePoolID), modeInUse(bg.NodePoolID, bg.VMIDs)
+	frontend := modeInUse(bg.VMIDs, bg.NodePoolID) || modeInUse(bg.ASGID, bg.NodePoolID)
+	pool := !bg.ASGID.IsUnknown() && bg.ASGID.IsNull() && modeInUse(bg.NodePoolID, bg.VMIDs)
+	return frontend, pool
 }
 
 // modeInUse reports whether the backend mode held in v is in use, given the other mode's

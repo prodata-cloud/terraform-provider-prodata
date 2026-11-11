@@ -11,6 +11,8 @@ import (
 // VmGateway describes the default gateway on a selected local interface. It reports the
 // hypervisor's cloud-init configuration rather than the route inside the guest.
 type VmGateway struct {
+	GuestOperationUUID         string
+	GuestChildVerified         bool
 	InterfaceID                int64
 	NetworkID                  int64
 	Gateway                    *string
@@ -75,6 +77,8 @@ func (c *Client) ChangeVmGateway(ctx context.Context, vmID int64, request Change
 // older panel, must not be interpreted as an absent VM or a cleared gateway.
 func (c *Client) GetVmGateway(ctx context.Context, vmID, networkID int64, opts *RequestOpts) (*VmGateway, error) {
 	var wire struct {
+		GuestOperationUUID         string  `json:"guestOperationUuid"`
+		GuestChildVerified         bool    `json:"guestChildVerified"`
 		InterfaceID                *int64  `json:"interfaceId"`
 		NetworkID                  *int64  `json:"networkId"`
 		Gateway                    *string `json:"gateway"`
@@ -99,6 +103,7 @@ func (c *Client) GetVmGateway(ctx context.Context, vmID, networkID int64, opts *
 		return nil, fmt.Errorf("the panel returned an incomplete or mismatched VM gateway response")
 	}
 	return &VmGateway{
+		GuestOperationUUID: wire.GuestOperationUUID, GuestChildVerified: wire.GuestChildVerified,
 		InterfaceID:                *wire.InterfaceID,
 		NetworkID:                  *wire.NetworkID,
 		Gateway:                    wire.Gateway,

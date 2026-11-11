@@ -9,6 +9,12 @@ description: |-
 
 Manages a ProData local network.
 
+Creating a network whose name is already in use fails with API error `614`, even when
+the existing network has the same CIDR and gateway. To manage an existing network,
+verify its ID and [import it explicitly](#import), or choose a different name for the
+new network. If a previous creation was interrupted and the network already exists,
+use the same explicit import procedure after checking the result in the platform.
+
 ~> **Note:** Only the `name` attribute can be updated in-place. Changing `cidr`, `gateway`, `region`, or `project_tag` will force the creation of a new local network (destroy and recreate). The platform refuses to delete a network that has VMs in it, so move the VMs to another network first: see [Moving a VM to another network](vm.md#moving-a-vm-to-another-network).
 
 ## Example Usage

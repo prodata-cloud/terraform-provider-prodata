@@ -46,6 +46,10 @@ func newLnapPanel(t *testing.T) *lnapPanel {
 	t.Helper()
 	p := &lnapPanel{}
 	p.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/local-network-attachments/") {
+			w.WriteHeader(404)
+			return
+		}
 		p.mu.Lock()
 		defer p.mu.Unlock()
 		if r.Method == http.MethodGet && r.URL.Path == lnapPath {
@@ -137,18 +141,52 @@ func (e *lnapEnv) timeouts(create string) tftypes.Value {
 // defaults ephServer.configure sets went into region and project_tag.
 func (e *lnapEnv) stored(override map[string]tftypes.Value) tftypes.Value {
 	set := map[string]tftypes.Value{
-		"vm_id":        lnapNum(7),
-		"network_id":   lnapNum(412),
-		"ip":           ephStr(lnapAddress),
-		"interface_id": lnapNum(9071),
-		"mac_address":  ephStr(lnapMAC),
-		"region":       ephStr("PROV-REGION"),
-		"project_tag":  ephStr("prov-project"),
+		"vm_id":                       lnapNum(7),
+		"network_id":                  lnapNum(412),
+		"ip":                          ephStr(lnapAddress),
+		"interface_id":                lnapNum(9071),
+		"mac_address":                 ephStr(lnapMAC),
+		"status":                      ephStr("LEGACY_UNVERIFIED"),
+		"region":                      ephStr("PROV-REGION"),
+		"project_tag":                 ephStr("prov-project"),
+		"allow_gateway_address":       lnapBool(false),
+		"configure_guest":             lnapBool(false),
+		"guest_configuration_applied": lnapBool(false),
 	}
 	for k, v := range override {
 		set[k] = v
 	}
 	return e.object(set)
+}
+
+func TestProviderServer_LocalNetworkAttachment_LegacyStateGetsSafeDefaultsWithoutGuestCalls(t *testing.T) {
+	e := newLnapEnv(t)
+	e.panel.has(lnapAddress)
+	legacy := e.stored(map[string]tftypes.Value{
+		"allow_gateway_address":       tftypes.NewValue(tftypes.Bool, nil),
+		"configure_guest":             tftypes.NewValue(tftypes.Bool, nil),
+		"guest_configuration_applied": tftypes.NewValue(tftypes.Bool, nil),
+	})
+	state, diags := e.read(legacy)
+	if diags != "" {
+		t.Fatal(diags)
+	}
+	if !state.Equal(e.stored(nil)) {
+		t.Fatalf("legacy state was not normalized to safe false defaults: %s", state)
+	}
+	if plan := e.plan(state, e.minimal(nil)); len(plan.replace) != 0 || !plan.planned.Equal(state) {
+		t.Fatalf("upgrade planned a mutation: %+v", plan)
+	}
+}
+
+func TestProviderServer_LocalNetworkAttachment_GuestOptInPlansInPlaceAndAllowsUnknown(t *testing.T) {
+	e := newLnapEnv(t)
+	for _, flag := range []tftypes.Value{lnapBool(true), tftypes.NewValue(tftypes.Bool, tftypes.UnknownValue)} {
+		p := e.plan(e.stored(nil), e.minimal(map[string]tftypes.Value{"configure_guest": flag}))
+		if len(p.replace) != 0 || e.attrs(p.planned)["guest_configuration_applied"].IsKnown() {
+			t.Fatalf("guest opt-in should reconcile in place with unknown outcome: %+v", p)
+		}
+	}
 }
 
 // minimal is the configuration of the attachment in the plain case: the VM and the network, and

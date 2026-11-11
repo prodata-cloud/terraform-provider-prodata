@@ -7,6 +7,12 @@ import (
 	"time"
 )
 
+// RetryNetworkSettingsBusy is the local-NIC resource's explicit pre-write-refusal wait.
+// It shares the gateway/DNS policy and never retries an ambiguous network write.
+func RetryNetworkSettingsBusy(ctx context.Context, fn func() error) error {
+	return retryNetworkSettingsBusy(ctx, fn)
+}
+
 // Only the panel's explicit pre-write refusals may be repeated. A transport error, an arbitrary
 // 503, or the unresolved-outcome code does not prove that a network write was never sent.
 func retryNetworkSettingsBusy(ctx context.Context, fn func() error) error {

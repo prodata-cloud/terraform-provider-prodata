@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -44,6 +45,7 @@ func TestDependentResources_CreateProjectScope(t *testing.T) {
 				}
 				var mu sync.Mutex
 				writes, lists := 0, 0
+				reserves := 0
 				poolCreated := false
 				pool := map[string]any{
 					"id": 7, "poolName": "workers", "clusterId": 313,
@@ -60,6 +62,35 @@ func TestDependentResources_CreateProjectScope(t *testing.T) {
 					mu.Lock()
 					defer mu.Unlock()
 					call := req.Method + " " + req.URL.Path
+					if kind == "node_pool" && strings.HasPrefix(req.URL.Path, "/panel-main/api/v2/kubernetes/clusters/313/node-pool-operations/") {
+						if tag := req.Header.Get("X-Project-Tag"); tag != selectedTag {
+							t.Errorf("durable pool scope %q, want %q", tag, selectedTag)
+						}
+						var data any
+						if strings.HasSuffix(req.URL.Path, "/capabilities") {
+							data = poolLifecycleCapabilities()
+						} else {
+							suffix := strings.TrimPrefix(req.URL.Path, "/panel-main/api/v2/kubernetes/clusters/313/node-pool-operations/")
+							requestUUID := strings.TrimSuffix(strings.TrimSuffix(suffix, "/reservations"), "/submit")
+							state := "RESERVED"
+							if req.Method == http.MethodPost && strings.HasSuffix(suffix, "/reservations") {
+								reserves++
+							}
+							if req.Method == http.MethodPost && strings.HasSuffix(suffix, "/submit") {
+								writes++
+								poolCreated = true
+								state = "SUCCESS"
+							}
+							if poolCreated {
+								state = "SUCCESS"
+							}
+							data = poolLifecycleView(requestUUID, state, "CREATE", 7)
+						}
+						w.Header().Set("Content-Type", "application/json")
+						_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "data": data})
+						return
+					}
+
 					if tag := req.Header.Get("X-Project-Tag"); tag != selectedTag {
 						t.Errorf("%s: project header %q, want %q", call, tag, selectedTag)
 					}
@@ -147,7 +178,7 @@ func TestDependentResources_CreateProjectScope(t *testing.T) {
 				}
 				mu.Lock()
 				defer mu.Unlock()
-				if tc.wantError != "" && writes != 0 {
+				if tc.wantError != "" && (writes != 0 || reserves != 0) {
 					t.Errorf("rejected project sent %d mutation requests", writes)
 				}
 				if tc.wantError == "" && writes == 0 {
@@ -187,6 +218,7 @@ func dependentProjectPlan(t *testing.T, r resource.Resource, kind, resourceTag s
 		}
 		values["backend_group"] = tftypes.NewValue(group, map[string]tftypes.Value{
 			"node_pool_id": nirNum(7), "vm_ids": tftypes.NewValue(group.AttributeTypes["vm_ids"], nil),
+			"asg_id": tftypes.NewValue(tftypes.Number, nil),
 		})
 		ports, ok := obj.AttributeTypes["port"].(tftypes.Set)
 		if !ok {

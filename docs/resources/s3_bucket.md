@@ -7,6 +7,16 @@ description: |-
 
 # prodata_s3_bucket (Resource)
 
+Creating a bucket whose name is already in use fails with API error `626`, including
+when an existing bucket belongs to the same project. Choose another name or verify
+the existing bucket and import it explicitly. A failed creation never adopts the
+existing bucket or changes its ACL/versioning settings.
+
+After a successful create acknowledgement, the provider saves the bucket identity before
+reading its settings. A failed follow-up read therefore retains ownership for recovery.
+Refresh and destroy accept only the bucket API's explicit `628` absence code; a proxy `404` response
+or a missing-resource code from another API preserves state and surfaces an error.
+
 Manages a ProData S3 (Ceph RGW) bucket. Buckets are scoped to a single project; cross-project name conflicts surface as a clear error from the API.
 
 Managing buckets requires the `S3:WRITE` permission on the API key used by the provider. Read-only data sources require `S3:READ`.

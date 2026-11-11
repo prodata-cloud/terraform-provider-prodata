@@ -122,26 +122,14 @@ func (d *VolumeDataSource) Read(ctx context.Context, req datasource.ReadRequest,
 		"project_tag": opts.ProjectTag,
 	})
 
-	volume, err := d.client.GetVolume(ctx, volumeID, opts)
+	volume, err := d.client.GetManagedVolume(ctx, volumeID, opts)
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to Read Volume", err.Error())
 		return
 	}
-	// The by-id endpoint returns soft-deleted volumes (success:true) while the list
-	// drops them; confirm via the authoritative list and error rather than handing
-	// back a phantom. A transient list failure is tolerated (returns the volume).
-	if volumes, lerr := d.client.GetVolumes(ctx, opts); lerr == nil {
-		present := false
-		for i := range volumes {
-			if volumes[i].ID == volumeID {
-				present = true
-				break
-			}
-		}
-		if !present {
-			resp.Diagnostics.AddError("Volume not found", fmt.Sprintf("Volume %d has been deleted.", volumeID))
-			return
-		}
+	if !*volume.Exists {
+		resp.Diagnostics.AddError("Volume not found", fmt.Sprintf("Volume %d has been deleted or is outside the selected scope.", volumeID))
+		return
 	}
 
 	data.Name = types.StringValue(volume.Name)

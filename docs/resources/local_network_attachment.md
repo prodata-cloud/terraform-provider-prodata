@@ -11,7 +11,7 @@ Attaches a virtual machine to one more ProData local network, as an additional n
 
 The VM's main interface, the one in the VM's own network (the network named by `local_network_id` of its `prodata_vm`), is not managed by this resource and cannot be detached. Adding an interface changes neither `prodata_vm.private_ip` nor `prodata_vm.local_network_id`: both keep describing the main interface. To put the VM itself in another network, change `local_network_id` of the `prodata_vm` instead: it moves the main interface in place (see [Moving a VM to another network](vm.md#moving-a-vm-to-another-network)).
 
-~> **Note:** `vm_id`, `network_id`, `ip`, `region` and `project_tag` require resource replacement when changed. Any change will detach the interface and attach it again, with another MAC address and, unless `ip` is set, possibly another address. `reboot_after_attach` and `timeouts` can be changed in place, but only a new attachment makes use of them.
+~> **Note:** `vm_id`, `network_id`, `ip`, `region` and `project_tag` require resource replacement when changed. Any change will detach the interface and attach it again, with another MAC address and, unless `ip` is set, possibly another address. Guest configuration can be enabled and reconciled in place with `configure_guest`.
 
 ~> **Note:** The platform does not set up the new interface inside the guest operating system for every VM, and does not restart a running VM. Read [Configuring the VM](#configuring-the-vm) before relying on the interface.
 
@@ -69,7 +69,7 @@ resource "prodata_local_network_attachment" "storage" {
 
 - A VM has **one interface per network**. The VM's own network already holds its main interface, so it cannot be attached a second time. Moving the VM to a network it has a second interface in is refused until that attachment is destroyed: see [Moving a VM to another network](vm.md#moving-a-vm-to-another-network).
 - The number of interfaces of a VM is limited by the platform; an attach beyond the limit is refused with the limit in the message.
-- `ip`, if set, must be an address of the network that is free: not the network address, the broadcast address or the gateway, and not held by another interface of the network. If it is not set, the platform assigns the next free address and it is recorded in `ip`.
+- `ip`, if set, must be a free usable address of the network. The network and broadcast addresses are always refused. The network's declared gateway address requires the explicit `allow_gateway_address = true` option and ownership of the network in the VM's project. Addresses reserved by platform routers, load balancers, clusters, other VMs (including lost/error VMs), or pending operations remain unavailable. This option claims an interface address; it does not create a router or set any default route. Automatic allocation continues to exclude the gateway.
 - The VM must be `RUNNING` or `STOPPED`. If it is starting, stopping or rebooting, the provider waits for it to settle and repeats the call, within the `create` or `delete` [timeout](#timeouts); a VM in the `ERROR` status ends the wait with the platform's answer. If another operation on the VM is in progress (code 961), the call is repeated at growing intervals for up to about two minutes, and then fails with the platform's answer: apply again once the other operation has ended. If the `create` or `delete` timeout runs out first, the error says that another operation held the VM.
 - A VM that is **paused or hibernated** is shown by the platform as `STOPPED`, yet attaching and detaching are refused for it like for a VM in transition (code 959). The provider asks three times in a row and then stops, with a message that says the VM is shown as settled and may be paused or hibernated: resume or stop it, then apply again.
 - For these calls the platform answers as if a VM in the `ERROR` or `LOST` status did not exist (code 633). Creating an attachment on such a VM fails with that answer; a refresh and a destroy treat the attachment as gone (see [Drift](#drift) and [Destroying the attachment](#destroying-the-attachment)).
@@ -77,6 +77,28 @@ resource "prodata_local_network_attachment" "storage" {
 - The platform does not set a default gateway on an added interface. The interface serves the addresses of its own network, which is what a storage or database network needs. Interfaces that carry a gateway are treated as primary, and cannot be detached: see [Destroying the attachment](#destroying-the-attachment). An interface can get a gateway later: when somebody sets one in the console, and, if the VM has a gateway, when somebody edits the address of the interface there.
 
 ## Configuring the VM
+
+With `configure_guest = true`, the provider first checks guest support before creating the interface, then persistently applies and verifies its IPv4 address through the QEMU guest agent. It never changes the default route for an attachment. Use the separate [`prodata_vm_gateway`](vm_gateway.md) resource with its own explicit `configure_guest = true` to manage a guest default route.
+
+New guest automation requires matching APIs that confirm recoverable power operations. An automatic restart also checks this support before physically attaching the interface. Reading, cancelling, and releasing an existing known guest operation remain available when new automation is disabled. A manual attachment without a requested restart does not require guest-agent or power-automation support.
+
+Supported guests are running Linux VMs with a root QEMU guest agent, `/usr/bin/python3`, Python YAML support, `iproute2`, and static Netplan version 2 using systemd-networkd. The only Netplan file must be the normal cloud-init-generated `/etc/netplan/50-cloud-init.yaml` or the provider's previously managed file. DHCPv4, NetworkManager, custom override files, multiple IPv4 addresses per interface, policy routing, custom route tables, interface renames that conflict with the live MAC, and bridges/bonds/VLANs/tunnels require manual configuration. pfSense/FreeBSD, Windows, guests without an agent, and stopped VMs fail preflight without creating the interface. The provider installs no packages.
+
+The operation targets the verified interface MAC and platform IPv4 address, preserves other interfaces, IPv6 and DNS, and verifies both persistent configuration and the active address. It saves the original file as `50-cloud-init.yaml.prodata-before` and preserves cloud-init's authority over subsequent platform network updates. An exact override left by an earlier managed operation is removed after verification; custom override files are preserved and require manual review. Turning `configure_guest` off returns cloud-init ownership while retaining the current runtime configuration. Detaching an interface may leave its MAC-specific guest stanza in place; that stanza cannot configure an unrelated MAC.
+
+If guest configuration fails after the interface is attached, the provider retains the attachment in state with `guest_configuration_applied = false` and reports an error. A later apply can reconcile it in place; if Terraform tainted the resource after a failed create, review its state and untaint it before retrying. The guest operation attempts to restore the preceding configuration after an apply or readback failure; unsuccessful restoration is not reported as success. An interrupted HTTP request leaves the persisted operation UUID available for observation. The provider polls that operation and does not repeat an untracked guest command. These options require a ProData Cloud API version that supports them.
+
+```terraform
+resource "prodata_local_network_attachment" "guest" {
+  vm_id                = prodata_vm.example.id
+  network_id           = prodata_local_network.storage.id
+  ip                   = "192.0.2.10"
+  configure_guest      = true
+  reboot_after_attach  = true
+}
+```
+
+With guest automation disabled (the default), the existing behavior is:
 
 Whether the new interface and its address work inside the guest operating system depends on the VM:
 
@@ -156,6 +178,8 @@ To bring the interface under Terraform, run the command from the message, `terra
 ### Optional
 
 - `ip` (String) The IPv4 address of the interface in the network. If not specified, the platform assigns the next free address of the network, and it is recorded here. Changing this forces a new resource. An address that is changed outside Terraform is reported as a warning when the state is refreshed and does not change the plan.
+- `allow_gateway_address` (Boolean) Default `false`. Explicitly allow claiming the network's declared gateway address when it is unreserved and the network belongs to the VM's company and project. Used when creating an attachment; changing this flag alone does not replace or readdress it.
+- `configure_guest` (Boolean) Default `false`. Opt in to supported persistent guest IPv4 address configuration and drift reconciliation. Can be enabled in place; see [Configuring the VM](#configuring-the-vm).
 - `region` (String) Region ID override. If not specified, uses the provider's default region. Changing this forces a new resource.
 - `project_tag` (String) Project tag override. If not specified, uses the provider's default project_tag. Changing this forces a new resource.
 - `reboot_after_attach` (Boolean) Restart the VM during `apply`, once the interface is attached, if the VM is running. See [Restarting the VM](#restarting-the-vm). The restart is the platform's stop followed by its start, and that stop is not a clean shutdown of the guest operating system: it may power the VM off at once. A VM that is not running is left alone. Only used when the attachment is created: changing it afterwards does nothing, and the VM is never restarted when the attachment is destroyed. If unset, the VM is not restarted and a running VM produces a warning; set it to `false` to say that you restart the VM yourself and silence the warning.
@@ -165,6 +189,7 @@ To bring the interface under Terraform, run the command from the message, `terra
 
 - `interface_id` (Number) The ID of the interface (not of the network). It identifies the interface for detaching and for import.
 - `mac_address` (String) The MAC address of the interface. Not set when the platform does not know it.
+- `guest_configuration_applied` (Boolean) Whether opted-in guest address configuration was verified. False when disabled or verified drift is observed. Unavailable, stopped or busy observations preserve the last verified value and issue a warning. Drift is reconciled in place when `configure_guest` is enabled.
 
 ### Timeouts
 
@@ -174,6 +199,7 @@ resource "prodata_local_network_attachment" "example" {
 
   timeouts = {
     create = "30m"
+    update = "20m"
     delete = "20m"
   }
 }
@@ -181,6 +207,7 @@ resource "prodata_local_network_attachment" "example" {
 
 - `create` (String) Default `15m`. A ceiling, not a fixed wait: the provider returns as soon as the attach call has returned and, with `reboot_after_attach`, the VM is `RUNNING` again.
 - `delete` (String) Default `10m`. The longest a detach waits for a VM that is neither `RUNNING` nor `STOPPED` to become one of them. The provider returns as soon as the interface is detached.
+- `update` (String) Default `15m`. Ceiling for enabling or reconciling guest address configuration in place.
 
 ## Import
 
@@ -203,3 +230,5 @@ Import with the provider of the VM's region and project. The VM is looked up in 
 The primary interface of a VM, the one in the VM's own network, or one with a default gateway, cannot be imported: it cannot be detached either, so this resource does not manage it. The main interface belongs to the `prodata_vm`, and its network is changed there: see [Moving a VM to another network](vm.md#moving-a-vm-to-another-network). An interface that is primary only because it carries the gateway of the VM can be imported once the gateway has been moved to another interface: see [Destroying the attachment](#destroying-the-attachment).
 
 `network_id` and `ip` are read from the platform after the import. `reboot_after_attach` and `timeouts` are not read from the platform. After an import, the first apply with either set in the configuration records it in the state and changes nothing else.
+
+Imports and older states default both opt-in flags to `false`. Enabling `configure_guest` afterwards runs the same support checks and configures the existing interface without replacing it.
